@@ -668,6 +668,8 @@ fn connector(allocator: std.mem.Allocator, gap: usize, step: Transition) void {
     const color = stepColor(step);
     const direction: pl.camelot.Direction = if (step.key_known) step.key.direction else .held;
 
+    drawBpmDelta(area.data().contentRectScale(), step.bpm_delta);
+
     if (direction == .held) {
         labelStyled(@src(), "=", .{
             .gravity_x = 0.5,
@@ -690,6 +692,25 @@ fn connector(allocator: std.mem.Allocator, gap: usize, step: Transition) void {
         const offset = (@as(f32, @floatFromInt(index)) - 1) * 18 * scale;
         drawTriangle(allocator, center_x + offset, center_y, 6 * scale, points_up, color);
     }
+}
+
+/// The tempo movement across a gap, drawn beside its connector.
+fn drawBpmDelta(rs: dvui.RectScale, delta: f64) void {
+    var buffer: [16]u8 = undefined;
+    const text = std.fmt.bufPrint(&buffer, "{s}{d:.1}", .{
+        if (delta < 0) "-" else "+",
+        @abs(delta),
+    }) catch return;
+
+    const center_x = rs.r.x + rs.r.w / 2;
+    const center_y = rs.r.y + rs.r.h / 2;
+    dvui.renderText(.{
+        .font = metaFont(),
+        .text = text,
+        .rs = rs,
+        .p = .{ .x = center_x + 34 * rs.s, .y = center_y - 8 * rs.s },
+        .color = Palette.muted,
+    }) catch {};
 }
 
 fn drawTriangle(allocator: std.mem.Allocator, x: f32, y: f32, size: f32, points_up: bool, color: dvui.Color) void {
