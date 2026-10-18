@@ -99,7 +99,9 @@ pub const Mixer = struct {
     thread: ?std.Thread = null,
     running: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     out: []f32 = &.{},
-    ticks: usize = 0,
+    /// A fresh start holds the mix until every lane in the batch has its
+    /// prefill, so lanes cannot begin tens of milliseconds apart.
+    gate: bool = false,
 
     pub fn init(allocator: std.mem.Allocator, io: std.Io) Mixer {
         var self = Mixer{
@@ -139,12 +141,14 @@ pub const Mixer = struct {
         var used: [max_lanes]bool = @splat(false);
         var finished: [max_lanes]*Slot = @splat(undefined);
         var finished_count: usize = 0;
+        var reused = false;
         for (lanes) |lane| {
             var target: ?*Slot = null;
             for (&self.slots, 0..) |*slot, index| {
                 if (!used[index] and slot.active and slot.track_id == lane.track.id) {
                     used[index] = true;
                     target = slot;
+                    reused = true;
                     break;
                 }
             }
@@ -166,6 +170,10 @@ pub const Mixer = struct {
             finished[finished_count] = slot;
             finished_count += 1;
         }
+
+        // Only a batch where nothing was already playing needs the joint gate;
+        // a lane joining a running mix must not stall the others.
+        if (!reused and lanes.len > 0) self.gate = true;
 
         self.mutex.unlock(self.io);
         for (finished[0..finished_count]) |slot| self.endRelease(slot);
@@ -366,6 +374,16 @@ pub const Mixer = struct {
     /// Mixes `frames` frames of every audible lane into `out`.
     fn mixFrames(self: *Mixer, frames: usize, now: i128) void {
         @memset(self.out[0 .. frames * channels], 0);
+
+        if (self.gate) {
+            var waiting = false;
+            for (&self.slots) |*slot| {
+                if (!slot.active) continue;
+                if (slot.file != null and bufferedFrames(slot) < prefill_frames) waiting = true;
+            }
+            if (waiting) return;
+            self.gate = false;
+        }
 
         for (&self.slots) |*slot| {
             if (!slot.active or slot.mute_until_ns > now) continue;

@@ -642,6 +642,13 @@ pub const App = struct {
 
     fn masterBpm(self: *const App) f32 {
         if (!self.master_locked) return self.master_bpm;
+        if (self.crate.seed) |seed| {
+            if (seed < self.grid.items.len) {
+                if (self.grid.items[seed].analysis) |*analysis| {
+                    if (analysis.bpm() > 0) return analysis.bpm();
+                }
+            }
+        }
         if (self.crate.seedTrack()) |track| {
             if (track.bpm > 0) return @floatCast(track.bpm);
         }
@@ -707,11 +714,19 @@ pub const App = struct {
         return 0;
     }
 
+    /// Beat index of the first downbeat, so a lane never starts on a partial
+    /// bar. A track whose grid begins on beat 3 has two beats to skip.
+    fn firstDownbeatOf(lane: *const Lane) f32 {
+        if (lane.analysis) |*analysis| return @floatFromInt(analysis.firstDownbeat());
+        return 0;
+    }
+
     /// Stopping lands on a downbeat of the rekordbox bar, not on an arbitrary
     /// multiple of four.
     fn snapBar(lane: *Lane) void {
         const offset = offsetOf(lane);
-        lane.beat = @round((lane.beat + offset) / 4) * 4 - offset;
+        const snapped = @round((lane.beat + offset) / 4) * 4 - offset;
+        lane.beat = if (snapped < 0) firstDownbeatOf(lane) else snapped;
         lane.beat_raw = lane.beat;
     }
 
@@ -719,7 +734,8 @@ pub const App = struct {
         const total: f32 = @floatFromInt(totalBeats(lane));
         lane.beat_raw = std.math.clamp(lane.beat_raw, 0, total);
         const offset = offsetOf(lane);
-        lane.beat = @round((lane.beat_raw + offset) / 4) * 4 - offset;
+        const snapped = @round((lane.beat_raw + offset) / 4) * 4 - offset;
+        lane.beat = if (snapped < 0) firstDownbeatOf(lane) else snapped;
     }
 
     fn snapBeat(lane: *Lane) void {
@@ -900,9 +916,16 @@ pub const App = struct {
         self.clock_started_ns = self.nowNs();
     }
 
-    /// Retunes every running lane in place, crossfaded, so the tempo changes
-    /// without a pause.
+    /// A tempo change restarts each decoder, so the lane's position must be
+    /// folded first: starting again from the beat the lane originally began at
+    /// would throw it back in time and desync it.
     fn retunePlaying(self: *App) void {
+        const lead: f32 = @as(f32, @floatFromInt(pl.mixer.prefill_ms)) / 1000 * self.masterBpm() / 60;
+        for (self.grid.items) |*lane| {
+            if (!lane.playing) continue;
+            self.foldLane(lane);
+            lane.started_master = self.masterBeat() + lead;
+        }
         self.rebuildMix();
     }
 
