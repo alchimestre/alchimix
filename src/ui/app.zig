@@ -81,6 +81,8 @@ pub const App = struct {
     clock_running: bool = false,
     clock_started_ns: i128 = 0,
     clock_beat: f32 = 0,
+    /// A lane is playing but the clock waits for the mixer's buffers.
+    pending_start: bool = false,
     /// Lane held down with the pointer: jog pause, resume on release.
     jog_lane: ?usize = null,
     /// Master tempo: follows the seed while locked, manual otherwise.
@@ -190,6 +192,14 @@ pub const App = struct {
 
         // The pointer pass reads the map the previous frame drew, then the map
         // is rebuilt from this frame's layout.
+        if (self.pending_start and self.mixer.ready()) {
+            self.pending_start = false;
+            self.startClock();
+            for (self.grid.items) |*lane| {
+                if (lane.playing) lane.started_master = 0;
+            }
+        }
+
         self.handlePointer();
         self.syncGrid();
 
@@ -689,7 +699,7 @@ pub const App = struct {
     /// Beat under the playhead: the lane's base plus whatever the master clock
     /// has advanced since the lane started.
     fn laneBeat(self: *const App, lane: *const Lane) f32 {
-        if (!lane.playing) return lane.beat;
+        if (!lane.playing or !self.clock_running) return lane.beat;
         const master = self.masterBeat();
         if (master < lane.started_master) return lane.beat;
         return lane.beat + (master - lane.started_master);
@@ -819,7 +829,15 @@ pub const App = struct {
         // aligns. Snapping it to a bar would shift it by up to three beats
         // against the other lane.
         const was_running = self.clock_running;
-        self.startClock();
+        if (was_running) {
+            self.startClock();
+        } else {
+            // The clock starts on the first frame the audio is actually ready,
+            // so a slow decoder cannot leave every lane behind the playhead.
+            self.pending_start = true;
+            self.clock_beat = 0;
+            lane.started_master = 0;
+        }
 
         // Mid-bar starts are delayed to the next master bar, so every lane's
         // downbeats line up in time.
@@ -828,12 +846,16 @@ pub const App = struct {
         // The decoder needs a moment to fill before it produces sound; the
         // clock starts where the audio will, not where the process did.
         const lead: f32 = @as(f32, @floatFromInt(pl.mixer.prefill_ms)) / 1000 * self.masterBpm() / 60;
-        lane.started_master = self.masterBeat() + wait + lead;
+        if (was_running) lane.started_master = self.masterBeat() + wait + lead;
 
         const remaining: f32 = @as(f32, @floatFromInt(totalBeats(lane))) - lane.beat;
         lane.end_ns = self.nowNs() + @as(i128, @intFromFloat((wait + lead + @max(0, remaining)) * 60 / self.masterBpm() * 1_000_000_000));
         lane.playing = true;
-        const delay_ms: u32 = @intFromFloat(wait * 60 / self.masterBpm() * 1000);
+        // The mute must also cover the decoder's prefill: the clock already
+        // leads by that much, so starting the audio earlier would put this lane
+        // ahead of every other one.
+        const wait_ms: u32 = @intFromFloat(wait * 60 / self.masterBpm() * 1000);
+        const delay_ms: u32 = wait_ms + pl.mixer.prefill_ms;
         self.rebuildMixDelayed(index, delay_ms);
     }
 
