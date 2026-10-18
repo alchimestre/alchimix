@@ -760,14 +760,20 @@ pub const App = struct {
         self.startLaneJoin(index, false);
     }
 
-    /// Rebuilds the single mixed stream from every lane that is playing.
+    /// Rebuilds the single mixed stream from every lane that is playing. Only
+    /// the lane that is joining gets a bar delay; the others keep playing.
     fn rebuildMix(self: *App) void {
+        self.rebuildMixDelayed(null, 0);
+    }
+
+    fn rebuildMixDelayed(self: *App, delayed: ?usize, delay_ms: u32) void {
         var specs: [64]pl.mixer.Lane = undefined;
         var count: usize = 0;
         for (self.grid.items, 0..) |*lane, index| {
             if (!lane.playing or lane.analysis == null) continue;
             if (count >= specs.len) break;
-            specs[count] = self.laneSpec(index, 0);
+            const delay: u32 = if (delayed != null and delayed.? == index) delay_ms else 0;
+            specs[count] = self.laneSpec(index, delay);
             count += 1;
         }
         self.mixer.play(specs[0..count]);
@@ -792,11 +798,7 @@ pub const App = struct {
         lane.end_ns = self.nowNs() + @as(i128, @intFromFloat((wait + @max(0, remaining)) * 60 / self.masterBpm() * 1_000_000_000));
         lane.playing = true;
         const delay_ms: u32 = @intFromFloat(wait * 60 / self.masterBpm() * 1000);
-        if (delay_ms > 0) {
-            self.mixer.play(&.{self.laneSpec(index, delay_ms)});
-        } else {
-            self.rebuildMix();
-        }
+        self.rebuildMixDelayed(index, delay_ms);
     }
 
     fn stopLane(self: *App, index: usize) void {
