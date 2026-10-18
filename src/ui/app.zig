@@ -47,6 +47,11 @@ fn mixerSpectrum(context: *anyopaque, uid: u64, out: []f32) void {
     mixer.spectrum(uid, out);
 }
 
+fn mixerLevel(context: *anyopaque, uid: u64) f32 {
+    const mixer: *pl.mixer.Mixer = @ptrCast(@alignCast(context));
+    return mixer.level(uid);
+}
+
 fn presetName(preset: pl.mixer.EqPreset) []const u8 {
     return switch (preset) {
         .lpf => "LPF",
@@ -146,6 +151,7 @@ pub const App = struct {
                     .stop = mixerOutputStop,
                     .laneState = mixerLaneState,
                     .spectrum = mixerSpectrum,
+                    .level = mixerLevel,
                 },
                 .{ .context = mixer, .nowNs = mixerClockNs },
             ),
@@ -592,6 +598,12 @@ pub const App = struct {
                 self.transport.setEqPreset(at.lane, next);
                 dvui.refresh(null, @src(), null);
             },
+            .set_trim => |lane| {
+                if (lane >= self.grid.items.len) return;
+                const db = self.hit_map.trimValueAt(lane, self.last_point.y) orelse return;
+                self.transport.setTrim(lane, db);
+                dvui.refresh(null, @src(), null);
+            },
             .seek_nav => |index| {
                 if (index >= self.grid.items.len) return;
                 const total: f32 = @floatFromInt(totalBeats(&self.grid.items[index]));
@@ -924,6 +936,12 @@ pub const App = struct {
                 self.transport.setEqNode(at.lane, at.band, point.gain_db, point.freq_hz);
                 dvui.refresh(null, @src(), null);
             },
+            .trim => |lane| {
+                if (lane >= self.grid.items.len) return;
+                const db = self.hit_map.trimValueAt(lane, pull.p.y) orelse return;
+                self.transport.setTrim(lane, db);
+                dvui.refresh(null, @src(), null);
+            },
             else => {},
         }
     }
@@ -967,7 +985,7 @@ pub const App = struct {
                 const full_rect = rectFrom(wave.data().contentRectScale().r).clipped(col_rect);
                 // The expanding box can report the whole row before the fixed
                 // EQ panel is placed; keep the drawing out from under it.
-                const eq_reserved = (46 + 124 + 4) * self.scale_hint;
+                const eq_reserved = (46 + 124 + 18 + 8) * self.scale_hint;
                 const wave_rect = hit.Rect{
                     .x = full_rect.x,
                     .y = full_rect.y,
@@ -1031,6 +1049,17 @@ pub const App = struct {
                 self.drawEqPlot(index, plot_rect);
             }
 
+            {
+                var trim = dvui.box(@src(), .{ .dir = .vertical }, .{
+                    .min_size_content = .{ .w = 18, .h = 0 },
+                    .expand = .vertical,
+                    .margin = .{ .x = 4, .y = 0 },
+                    .id_extra = 9600 + index,
+                });
+                defer trim.deinit();
+                const trim_rect = rectFrom(trim.data().contentRectScale().r).clipped(col_rect);
+                self.drawTrim(index, trim_rect);
+            }
         }
 
         {
@@ -1114,6 +1143,23 @@ pub const App = struct {
         }
         // Appended last so a press on a ball wins over the plot behind it.
         self.hit_map.append(rect, .{ .eq_plot = index });
+    }
+
+    /// The lane's trim slider, filled from the bottom by its live level.
+    fn drawTrim(self: *App, index: usize, rect: hit.Rect) void {
+        if (rect.w <= 2 or rect.h <= 2) return;
+        fillRect(self.allocator, rect.x, rect.y, rect.w, rect.h, fade(Palette.background, 230));
+
+        const inner = hit.Rect{ .x = rect.x + 3, .y = rect.y + 2, .w = rect.w - 6, .h = rect.h - 4 };
+        const level = std.math.clamp(self.transport.level(index), 0, 1);
+        const meter_h = inner.h * level;
+        fillRect(self.allocator, inner.x, inner.y + inner.h - meter_h, inner.w, meter_h, Palette.green);
+        fillRect(self.allocator, rect.x, rect.y + rect.h / 2, rect.w, 1, fade(Palette.muted, 60));
+
+        const fy = 0.5 - self.transport.trim(index) / (2 * pl.mixer.trim_max_db);
+        const knob_y = rect.y + fy * rect.h;
+        fillRect(self.allocator, rect.x, knob_y - 1.5, rect.w, 3, Palette.ink);
+        self.hit_map.append(rect, .{ .trim = index });
     }
 
     /// Beat count of the lane's track, from its grid.
