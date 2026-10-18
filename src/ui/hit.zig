@@ -132,16 +132,20 @@ pub const Drag = struct {
         toggle: Toggle,
         toggle_notation,
         select_block: usize,
+        toggle_block: usize,
         move_block: struct { from: usize, gap: usize },
         drop_track: struct { gap: usize, track: Track },
     };
 
-    pub fn press(self: *Drag, target: Target, p: Point) Action {
+    /// `shift` adds the block to the selection instead of making it the seed,
+    /// and never starts a drag.
+    pub fn press(self: *Drag, target: Target, p: Point, shift: bool) Action {
         self.* = .{ .press_at = p };
         return switch (target) {
             .toggle => |toggle| .{ .toggle = toggle },
             .notation => .toggle_notation,
             .block => |index| blk: {
+                if (shift) break :blk .{ .toggle_block = index };
                 self.pressed = target;
                 break :blk .{ .select_block = index };
             },
@@ -270,7 +274,7 @@ test "a press with no movement adds nothing" {
     map.append(.{ .x = 0, .y = 0, .w = 400, .h = 80 }, .{ .row = T.track(1) });
 
     var drag = Drag{};
-    _ = drag.press(.{ .row = T.track(1) }, .{ .x = 10, .y = 10 });
+    _ = drag.press(.{ .row = T.track(1) }, .{ .x = 10, .y = 10 }, false);
     try std.testing.expect(!drag.motion(.{ .x = 12, .y = 11 }, 6, viewport, &map));
     try std.testing.expect(isNone(drag.release()));
 }
@@ -281,7 +285,7 @@ test "movement past the threshold starts carrying" {
     map.append(.{ .x = 0, .y = 0, .w = 400, .h = 80 }, .{ .row = T.track(7) });
 
     var drag = Drag{};
-    _ = drag.press(.{ .row = T.track(7) }, .{ .x = 10, .y = 10 });
+    _ = drag.press(.{ .row = T.track(7) }, .{ .x = 10, .y = 10 }, false);
     try std.testing.expect(drag.motion(.{ .x = 40, .y = 40 }, 6, viewport, &map));
     try std.testing.expectEqual(@as(u64, 7), drag.carriedTrack().?.id);
     try std.testing.expectEqual(@as(?usize, 0), drag.gapIndex());
@@ -294,7 +298,7 @@ test "releasing over the canvas drops the carried track at the gap" {
     map.append(.{ .x = 0, .y = 100, .w = 400, .h = 100 }, .{ .block = 1 });
 
     var drag = Drag{};
-    _ = drag.press(.{ .row = T.track(9) }, .{ .x = 10, .y = 10 });
+    _ = drag.press(.{ .row = T.track(9) }, .{ .x = 10, .y = 10 }, false);
     _ = drag.motion(.{ .x = 300, .y = 180 }, 6, viewport, &map);
 
     const action = drag.release();
@@ -313,7 +317,7 @@ test "releasing outside the canvas drops nothing" {
     map.append(.{ .x = 0, .y = 0, .w = 400, .h = 100 }, .{ .block = 0 });
 
     var drag = Drag{};
-    _ = drag.press(.{ .row = T.track(9) }, .{ .x = 10, .y = 10 });
+    _ = drag.press(.{ .row = T.track(9) }, .{ .x = 10, .y = 10 }, false);
     _ = drag.motion(.{ .x = 900, .y = 10 }, 6, viewport, &map);
     try std.testing.expect(drag.gapIndex() == null);
     try std.testing.expect(isNone(drag.release()));
@@ -326,7 +330,7 @@ test "a block drag reports the move and its source" {
     map.append(.{ .x = 0, .y = 100, .w = 400, .h = 100 }, .{ .block = 1 });
 
     var drag = Drag{};
-    const pressed = drag.press(.{ .block = 0 }, .{ .x = 10, .y = 10 });
+    const pressed = drag.press(.{ .block = 0 }, .{ .x = 10, .y = 10 }, false);
     switch (pressed) {
         .select_block => |index| try std.testing.expectEqual(@as(usize, 0), index),
         else => return error.WrongAction,
@@ -349,7 +353,7 @@ test "the notation toggle fires on the press and carries nothing" {
     map.append(.{ .x = 0, .y = 0, .w = 60, .h = 30 }, .notation);
 
     var drag = Drag{};
-    const action = drag.press(.notation, .{ .x = 10, .y = 10 });
+    const action = drag.press(.notation, .{ .x = 10, .y = 10 }, false);
     switch (action) {
         .toggle_notation => {},
         else => return error.WrongAction,
@@ -364,11 +368,26 @@ test "a toggle flips on the press and carries nothing" {
     map.append(.{ .x = 0, .y = 0, .w = 40, .h = 30 }, .{ .toggle = .up });
 
     var drag = Drag{};
-    const action = drag.press(.{ .toggle = .up }, .{ .x = 10, .y = 10 });
+    const action = drag.press(.{ .toggle = .up }, .{ .x = 10, .y = 10 }, false);
     switch (action) {
         .toggle => |toggle| try std.testing.expectEqual(Toggle.up, toggle),
         else => return error.WrongAction,
     }
     try std.testing.expect(!drag.motion(.{ .x = 60, .y = 60 }, 6, viewport, &map));
+    try std.testing.expect(isNone(drag.release()));
+}
+
+test "a shift press toggles the block without carrying it" {
+    var map = HitMap.init(std.testing.allocator);
+    defer map.deinit();
+    map.append(.{ .x = 0, .y = 0, .w = 400, .h = 100 }, .{ .block = 2 });
+
+    var drag = Drag{};
+    const action = drag.press(.{ .block = 2 }, .{ .x = 10, .y = 10 }, true);
+    switch (action) {
+        .toggle_block => |index| try std.testing.expectEqual(@as(usize, 2), index),
+        else => return error.WrongAction,
+    }
+    try std.testing.expect(!drag.motion(.{ .x = 10, .y = 200 }, 6, viewport, &map));
     try std.testing.expect(isNone(drag.release()));
 }

@@ -34,6 +34,8 @@ pub const App = struct {
     /// Candidates the tempo window admits, so the field shows its effect even
     /// when the top of the list looks the same.
     in_range: usize = 0,
+    /// Blocks picked for the previewer, by crate index. Empty means none.
+    selected: std.ArrayListUnmanaged(usize) = .empty,
 
     /// Tempo window for suggestions, as a percentage of the seed's BPM.
     bpm_pct: f32 = 5,
@@ -75,6 +77,7 @@ pub const App = struct {
     }
 
     pub fn deinit(self: *App) void {
+        self.selected.deinit(self.allocator);
         self.hit_map.deinit();
         self.player.deinit();
         self.bpm_text.deinit(self.allocator);
@@ -419,6 +422,7 @@ pub const App = struct {
             .remove => |index| {
                 if (self.crate.at(index)) |track| self.player.stopPreview(track.id);
                 self.crate.remove(index) catch {};
+                self.selected.clearRetainingCapacity();
                 self.refresh() catch {};
                 dvui.refresh(null, @src(), null);
             },
@@ -438,7 +442,7 @@ pub const App = struct {
                 .press => {
                     if (!mouse.button.pointer()) continue;
                     const target = self.hit_map.hit(p) orelse continue;
-                    self.apply(self.drag.press(target, p));
+                    self.apply(self.drag.press(target, p, mouse.mod.shift()));
                 },
                 .motion => {
                     if (self.drag.motion(p, 6 * self.scale_hint, self.canvas, &self.hit_map)) {
@@ -474,18 +478,43 @@ pub const App = struct {
                 dvui.refresh(null, @src(), null);
             },
             .select_block => |index| self.pending_select = index,
+            .toggle_block => |index| {
+                self.toggleSelected(index);
+                dvui.refresh(null, @src(), null);
+            },
             .drop_track => |drop| {
                 _ = self.crate.insertAt(drop.gap, drop.track) catch {};
+                self.selected.clearRetainingCapacity();
                 self.refresh() catch {};
                 dvui.refresh(null, @src(), null);
             },
             .move_block => |move| {
                 if (self.crate.at(move.from)) |track| self.player.stopPreview(track.id);
                 self.crate.moveTo(move.from, move.gap) catch {};
+                self.selected.clearRetainingCapacity();
                 self.refresh() catch {};
                 dvui.refresh(null, @src(), null);
             },
         }
+    }
+
+    /// Picks a block for the previewer; three lanes is the cap.
+    fn toggleSelected(self: *App, index: usize) void {
+        for (self.selected.items, 0..) |value, slot| {
+            if (value == index) {
+                _ = self.selected.orderedRemove(slot);
+                return;
+            }
+        }
+        if (self.selected.items.len >= 3) return;
+        self.selected.append(self.allocator, index) catch {};
+    }
+
+    fn isSelected(self: *const App, index: usize) bool {
+        for (self.selected.items) |value| {
+            if (value == index) return true;
+        }
+        return false;
     }
 
     /// A line across the gap the drop would land in.
@@ -572,7 +601,9 @@ fn blockColor(app: *const App, index: usize, is_seed: bool) dvui.Color {
     if (app.drag.carriedBlock()) |carried| {
         if (carried == index) return Palette.field;
     }
-    return if (is_seed) Palette.selection else Palette.block;
+    if (is_seed) return Palette.selection;
+    if (app.isSelected(index)) return Palette.hover;
+    return Palette.block;
 }
 
 /// Pressing a row starts a drag carrying that track; the click itself adds
