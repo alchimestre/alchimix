@@ -128,7 +128,7 @@ pub const Mixer = struct {
             try writer.print("lowpass=f={d:.0}[l{d}];", .{ lowPassHz(lane.filter), index });
         }
         for (lanes, 0..) |_, index| try writer.print("[l{d}]", .{index});
-        try writer.print("amix=inputs={d}:duration=longest:dropout_transition=0,alimiter=limit=0.95", .{lanes.len});
+        try writer.print("amix=inputs={d}:duration=longest:dropout_transition=0:normalize=0,alimiter=limit=0.95", .{lanes.len});
         try writer.writeAll("[mix]");
 
         const graph = try self.allocator.dupe(u8, writer.buffered());

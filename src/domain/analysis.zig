@@ -10,6 +10,9 @@ const std = @import("std");
 pub const Beat = struct {
     time_ms: u32,
     bpm: f32,
+    /// Position inside the bar, 1..4, as rekordbox numbers it. This is the
+    /// track's bar phase: beat 1 is a downbeat.
+    position: u8,
 };
 
 /// A song-structure phrase rekordbox detected, starting at a 1-based beat.
@@ -54,6 +57,13 @@ pub const Analysis = struct {
             (@as(f64, @floatFromInt(b.time_ms)) - @as(f64, @floatFromInt(a.time_ms))) * fraction;
     }
 
+    /// Beats to subtract from a local beat to land on a downbeat. A grid whose
+    /// first beat is the third of a bar starts two beats before one.
+    pub fn downbeatOffset(self: Analysis) f32 {
+        if (self.beats.len == 0) return 0;
+        return @floatFromInt(self.beats[0].position - 1);
+    }
+
     pub fn bpm(self: Analysis) f32 {
         if (self.beats.len == 0) return 0;
         return self.beats[0].bpm;
@@ -79,6 +89,7 @@ pub fn parse(allocator: std.mem.Allocator, dat: []const u8, ext: []const u8) !An
     // Four bytes of padding, then eight-byte entries: beat, tempo x100, time.
     var offset: usize = 4;
     while (offset + 8 <= grid.len) : (offset += 8) {
+        const number = std.mem.readInt(u16, grid[offset..][0..2], .big);
         const tempo = std.mem.readInt(u16, grid[offset + 2 ..][0..2], .big);
         const time = std.mem.readInt(u32, grid[offset + 4 ..][0..4], .big);
         // The opening entry describes the grid origin and carries no tempo.
@@ -86,6 +97,7 @@ pub fn parse(allocator: std.mem.Allocator, dat: []const u8, ext: []const u8) !An
         try beats.append(allocator, .{
             .time_ms = time,
             .bpm = @as(f32, @floatFromInt(tempo)) / 100,
+            .position = @intCast(std.math.clamp(number, 1, 4)),
         });
     }
     if (beats.items.len == 0) return error.NoBeatGrid;
