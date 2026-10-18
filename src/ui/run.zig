@@ -54,7 +54,7 @@ pub fn run(init: std.process.Init, app: *App) !void {
         // A preview needs frames while it runs: waiting for the next event would
         // leave the bar frozen until something else moved.
         const wait_micros = win.waitTime(frame_end);
-        const timeout = if (app.player.animating() or app.animating()) @min(wait_micros, 16_000) else wait_micros;
+        const timeout = if (app.player.animating() or app.animating()) @min(wait_micros, 33_000) else wait_micros;
         interrupted = try backend.waitEventTimeout(timeout);
     }
 }
