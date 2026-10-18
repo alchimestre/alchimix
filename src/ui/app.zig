@@ -714,19 +714,12 @@ pub const App = struct {
         return 0;
     }
 
-    /// Beat index of the first downbeat, so a lane never starts on a partial
-    /// bar. A track whose grid begins on beat 3 has two beats to skip.
-    fn firstDownbeatOf(lane: *const Lane) f32 {
-        if (lane.analysis) |*analysis| return @floatFromInt(analysis.firstDownbeat());
-        return 0;
-    }
-
     /// Stopping lands on a downbeat of the rekordbox bar, not on an arbitrary
     /// multiple of four.
     fn snapBar(lane: *Lane) void {
         const offset = offsetOf(lane);
         const snapped = @round((lane.beat + offset) / 4) * 4 - offset;
-        lane.beat = if (snapped < 0) firstDownbeatOf(lane) else snapped;
+        lane.beat = @max(0, snapped);
         lane.beat_raw = lane.beat;
     }
 
@@ -735,7 +728,7 @@ pub const App = struct {
         lane.beat_raw = std.math.clamp(lane.beat_raw, 0, total);
         const offset = offsetOf(lane);
         const snapped = @round((lane.beat_raw + offset) / 4) * 4 - offset;
-        lane.beat = if (snapped < 0) firstDownbeatOf(lane) else snapped;
+        lane.beat = @max(0, snapped);
     }
 
     fn snapBeat(lane: *Lane) void {
@@ -815,8 +808,9 @@ pub const App = struct {
         if (index >= self.grid.items.len or index >= self.crate.len()) return;
         const lane = &self.grid.items[index];
         if (lane.analysis == null) return;
-        // Untouched lanes always launch on a bar.
-        if (!lane.manual) snapBar(lane);
+        // A fresh lane starts on its grid's first beat, which is what rekordbox
+        // aligns. Snapping it to a bar would shift it by up to three beats
+        // against the other lane.
         const was_running = self.clock_running;
         self.startClock();
 

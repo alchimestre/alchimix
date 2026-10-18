@@ -57,15 +57,6 @@ pub const Analysis = struct {
         return @floatFromInt(self.beats[0].position - 1);
     }
 
-    /// Beat index of the first downbeat. A grid whose first beat is the third
-    /// of a bar starts two beats before one, so playing from beat 0 starts the
-    /// lane off-phase with every other lane.
-    pub fn firstDownbeat(self: Analysis) u32 {
-        if (self.beats.len == 0) return 0;
-        const position: u32 = self.beats[0].position;
-        return (4 - (position - 1)) % 4;
-    }
-
     pub fn bpm(self: Analysis) f32 {
         if (self.beats.len == 0) return 0;
         return self.beats[0].bpm;
@@ -186,23 +177,4 @@ test "a file without a beat grid is rejected" {
     const ext_end = writeSection(&ext_buffer, 28, "PWV3", &.{ 1, 2 });
 
     try testing.expectError(error.NoBeatGrid, parse(testing.allocator, dat_buffer[0..50], ext_buffer[0..ext_end]));
-}
-
-test "the first downbeat follows the grid's bar phase" {
-    var beats = [_]Beat{
-        .{ .time_ms = 0, .bpm = 120, .position = 1 },
-        .{ .time_ms = 500, .bpm = 120, .position = 2 },
-        .{ .time_ms = 1000, .bpm = 120, .position = 3 },
-        .{ .time_ms = 1500, .bpm = 120, .position = 4 },
-    };
-    var analysis = Analysis{ .beats = &beats, .waveform = &.{}, .peak = 0 };
-
-    analysis.beats[0].position = 1;
-    try std.testing.expectEqual(@as(u32, 0), analysis.firstDownbeat());
-    analysis.beats[0].position = 2;
-    try std.testing.expectEqual(@as(u32, 3), analysis.firstDownbeat());
-    analysis.beats[0].position = 3;
-    try std.testing.expectEqual(@as(u32, 2), analysis.firstDownbeat());
-    analysis.beats[0].position = 4;
-    try std.testing.expectEqual(@as(u32, 1), analysis.firstDownbeat());
 }
