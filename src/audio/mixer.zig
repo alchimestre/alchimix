@@ -142,6 +142,7 @@ pub const Mixer = struct {
         var finished: [max_lanes]*Slot = @splat(undefined);
         var finished_count: usize = 0;
         var reused = false;
+        var restarted = false;
         for (lanes) |lane| {
             var target: ?*Slot = null;
             for (&self.slots, 0..) |*slot, index| {
@@ -161,7 +162,9 @@ pub const Mixer = struct {
                     }
                 }
             }
-            if (target) |slot| self.apply(slot, lane);
+            if (target) |slot| {
+                if (self.apply(slot, lane)) restarted = true;
+            }
         }
 
         for (&self.slots, 0..) |*slot, index| {
@@ -173,7 +176,9 @@ pub const Mixer = struct {
 
         // Only a batch where nothing was already playing needs the joint gate;
         // a lane joining a running mix must not stall the others.
-        if (!reused and lanes.len > 0) self.gate = true;
+        // A fresh batch and a retune both restart decoders; either way every
+        // restarted lane must begin on the same tick.
+        if ((!reused and lanes.len > 0) or restarted) self.gate = true;
 
         self.mutex.unlock(self.io);
         for (finished[0..finished_count]) |slot| self.endRelease(slot);
@@ -209,15 +214,19 @@ pub const Mixer = struct {
         self.thread = std.Thread.spawn(.{}, pumpMain, .{self}) catch null;
     }
 
-    fn apply(self: *Mixer, slot: *Slot, lane: Lane) void {
+    /// Returns true when the decoder was restarted, which needs the joint
+    /// start gate: otherwise the restarted lanes begin at different times.
+    fn apply(self: *Mixer, slot: *Slot, lane: Lane) bool {
         const same_track = slot.active and slot.track_id == lane.track.id;
         const same_start = @abs(slot.start_s - lane.start_s) < 0.001;
         const same_tempo = @abs(slot.tempo - lane.tempo) < 0.0005 and slot.keylock == lane.keylock;
 
+        var restarted = false;
         if (!same_track or !same_start or !same_tempo) {
             self.beginRelease(slot);
             self.endRelease(slot);
             self.start(slot, lane);
+            restarted = true;
         }
 
         slot.filter = lane.filter;
@@ -227,6 +236,7 @@ pub const Mixer = struct {
         } else {
             slot.mute_until_ns = 0;
         }
+        return restarted;
     }
 
     fn start(self: *Mixer, slot: *Slot, lane: Lane) void {
