@@ -75,10 +75,10 @@ pub const App = struct {
     /// One grid lane per block, in crate order.
     grid: std.ArrayListUnmanaged(Lane) = .empty,
     
-    /// Bars or polygon fills, for A/B comparison.
-    poly: bool = false,
     /// Smoothed frame cost, shown next to the renderer switch.
     draw_ms: f32 = 0,
+    /// Fingerprint of the last mix, so unrelated UI work never restarts audio.
+    mix_key: u64 = 0,
     /// Master clock every playing lane is derived from.
     clock_running: bool = false,
     clock_started_ns: i128 = 0,
@@ -605,10 +605,6 @@ pub const App = struct {
                 self.retunePlaying();
                 dvui.refresh(null, @src(), null);
             },
-            .toggle_wave_mode => {
-                self.poly = !self.poly;
-                dvui.refresh(null, @src(), null);
-            },
             .toggle_transport => {
                 if (self.anyPlaying()) {
                     self.stopAllLanes();
@@ -738,6 +734,10 @@ pub const App = struct {
         lane.beat = @round(lane.beat_raw);
     }
 
+    fn mixHash(seed: u64, value: u64) u64 {
+        return (seed ^ value) *% 1099511628211;
+    }
+
     fn laneSpec(self: *App, index: usize, delay_ms: u32) pl.mixer.Lane {
         const track = self.crate.at(index).?.*;
         const lane = &self.grid.items[index];
@@ -776,13 +776,26 @@ pub const App = struct {
     fn rebuildMixDelayed(self: *App, delayed: ?usize, delay_ms: u32) void {
         var specs: [64]pl.mixer.Lane = undefined;
         var count: usize = 0;
+        var key: u64 = 1469598103934665603;
+
         for (self.grid.items, 0..) |*lane, index| {
             if (!lane.playing or lane.analysis == null) continue;
             if (count >= specs.len) break;
             const delay: u32 = if (delayed != null and delayed.? == index) delay_ms else 0;
             specs[count] = self.laneSpec(index, delay);
             count += 1;
+
+            key = mixHash(key, specs[count - 1].track.id);
+            key = mixHash(key, @bitCast(specs[count - 1].start_s));
+            key = mixHash(key, @as(u32, @bitCast(specs[count - 1].tempo)));
+            key = mixHash(key, @as(u32, @bitCast(specs[count - 1].filter)));
+            key = mixHash(key, delay);
         }
+
+        // Nothing audible changed: leave the running pipeline alone.
+        if (count > 0 and key == self.mix_key and self.mixer.active()) return;
+
+        self.mix_key = key;
         self.mixer.play(specs[0..count]);
     }
 
@@ -1080,30 +1093,6 @@ pub const App = struct {
         self.hit_map.append(rectFrom(rect), .{ .lane_play = index });
     }
 
-    fn waveModeChip(self: *App) void {
-        var chip = dvui.box(@src(), .{ .dir = .horizontal }, .{
-            .margin = .{ .x = 8, .y = 4 },
-            .padding = .{ .x = 10, .y = 2 },
-            .background = true,
-            .color_fill = .{ .color = Palette.field },
-            .id_extra = 82,
-        });
-        defer chip.deinit();
-
-        var buffer: [24]u8 = undefined;
-        const text = std.fmt.bufPrint(&buffer, "{s} {d:.0}ms", .{
-            if (self.poly) "poly" else "bars",
-            self.draw_ms,
-        }) catch "mode";
-
-        labelStyled(@src(), text, .{
-            .color_text = .{ .color = Palette.secondary },
-            .font = metaFont(),
-            .id_extra = 83,
-        });
-        self.hit_map.append(rectFrom(chip.data().rectScaleFromParent().r), .wave_mode);
-    }
-
     fn transportToggle(self: *App) void {
         var chip = dvui.box(@src(), .{ .dir = .horizontal }, .{
             .margin = .{ .x = 8, .y = 4 },
@@ -1209,11 +1198,7 @@ pub const App = struct {
 
                 const view = self.laneStart(lane);
                 if (lane.analysis) |*analysis| {
-                    if (self.poly) {
-                        self.paintWavePoly(analysis, wave_rect, view, analysis.downbeatOffset());
-                    } else {
-                        self.paintWave(analysis, wave_rect, view, analysis.downbeatOffset());
-                    }
+                    self.paintWave(analysis, wave_rect, view, analysis.downbeatOffset());
                 } else {
                     labelStyled(@src(), "no analysis", .{
                         .color_text = .{ .color = Palette.muted },
@@ -1323,71 +1308,6 @@ pub const App = struct {
         self.paintBeats(rect, start_beat, beat_offset);
     }
 
-    /// The same waveform as filled heat bands: five concave polygons per lane
-    /// instead of hundreds of rectangles.
-    fn paintWavePoly(self: *App, analysis: *const pl.analysis.Analysis, rect: hit.Rect, start_beat: f32, beat_offset: f32) void {
-        if (rect.w <= 0 or rect.h <= 0) return;
-        fillRect(self.allocator, rect.x, rect.y, rect.w, rect.h, Palette.field);
-
-        paintPhrases(self.allocator, analysis, rect, start_beat, beats_visible, totalBeatsF(analysis));
-
-        const bpm = if (analysis.bpm() > 0) analysis.bpm() else 128;
-        const scale: f32 = 255 / @as(f32, @floatFromInt(@max(1, analysis.peak)));
-        const samples_per_beat: f32 = @as(f32, pl.analysis.Analysis.samples_per_second) * 60 / bpm;
-        const start_sample = start_beat * samples_per_beat;
-        const step: f32 = 6;
-        const samples_per_px = samples_per_beat * beats_visible / rect.w;
-
-        var levels: [600]f32 = undefined;
-        var count: usize = 0;
-        var smoothed: f32 = 0.35;
-        var x: f32 = 0;
-        while (x < rect.w and count < levels.len) : (x += step) {
-            const from: usize = @intFromFloat(@max(0, start_sample + x * samples_per_px));
-            if (from >= analysis.waveform.len) break;
-            const to: usize = @min(analysis.waveform.len, @as(usize, @intFromFloat(@max(0, start_sample + (x + step) * samples_per_px))));
-
-            var peak: u8 = 0;
-            var sum: usize = 0;
-            for (analysis.waveform[from..to]) |value| {
-                peak = @max(peak, value);
-                sum += value;
-            }
-            const average = @as(f32, @floatFromInt(sum)) / @as(f32, @floatFromInt(@max(1, to - from)));
-            const level = @min(255, @max(average * 1.15, @as(f32, @floatFromInt(peak)) * 0.6) * scale * 0.55) / 255;
-            smoothed = smoothed * 0.75 + level * 0.25;
-            levels[count] = smoothed;
-            count += 1;
-        }
-
-        const bands: u8 = 5;
-        var band: u8 = 0;
-        while (band < bands) : (band += 1) {
-            const lo = @as(f32, @floatFromInt(band)) / @as(f32, @floatFromInt(bands));
-            const hi = @as(f32, @floatFromInt(band + 1)) / @as(f32, @floatFromInt(bands));
-
-            var builder = dvui.Path.Builder.init(self.allocator);
-            defer builder.deinit();
-
-            const base_y = rect.bottom() - rect.h * lo;
-            builder.addPoint(.{ .x = rect.x, .y = base_y });
-            for (levels[0..count], 0..) |level, index| {
-                const clamped = std.math.clamp(level, lo, hi);
-                builder.addPoint(.{
-                    .x = rect.x + @as(f32, @floatFromInt(index)) * step,
-                    .y = rect.bottom() - rect.h * clamped,
-                });
-            }
-            builder.addPoint(.{ .x = rect.x + @as(f32, @floatFromInt(count)) * step, .y = base_y });
-
-            dvui.Path.fill(&.{builder.build()}, .{
-                .color = .{ .color = bandColor((lo + hi) / 2) },
-            });
-        }
-
-        self.paintBeats(rect, start_beat, beat_offset);
-    }
-
     fn totalBeatsF(analysis: *const pl.analysis.Analysis) f32 {
         return @floatFromInt(analysis.beats.len);
     }
@@ -1405,7 +1325,6 @@ pub const App = struct {
     /// waveform rather than a slider.
     fn paintOverview(allocator: std.mem.Allocator, analysis: *const pl.analysis.Analysis, rect: hit.Rect) void {
         if (rect.w <= 0 or rect.h <= 0 or analysis.waveform.len == 0) return;
-        paintPhrases(allocator, analysis, rect, 0, totalBeatsF(analysis), totalBeatsF(analysis));
         const len: f32 = @floatFromInt(analysis.waveform.len);
         const scale: f32 = 255 / @as(f32, @floatFromInt(@max(1, analysis.peak)));
 
@@ -1839,46 +1758,6 @@ fn fade(color: dvui.Color, alpha: u8) dvui.Color {
 /// the colour through orange towards white.
 /// Heat map: quiet reads indigo, body red and orange, peaks yellow. The
 /// waveform carries one amplitude byte, so loudness is the only information.
-fn paintPhrases(
-    allocator: std.mem.Allocator,
-    analysis: *const pl.analysis.Analysis,
-    rect: hit.Rect,
-    start_beat: f32,
-    span: f32,
-    total: f32,
-) void {
-    if (rect.w <= 0 or rect.h <= 0 or span <= 0 or analysis.phrases.len == 0) return;
-
-    for (analysis.phrases, 0..) |phrase, index| {
-        const from: f32 = @floatFromInt(if (phrase.beat > 0) phrase.beat - 1 else 0);
-        const to: f32 = if (index + 1 < analysis.phrases.len)
-            @floatFromInt(if (analysis.phrases[index + 1].beat > 0) analysis.phrases[index + 1].beat - 1 else 0)
-        else
-            total;
-
-        const x0 = (from - start_beat) / span * rect.w;
-        const x1 = (to - start_beat) / span * rect.w;
-        const left = @max(0, x0);
-        const right = @min(rect.w, x1);
-        if (right <= left) continue;
-
-        fillRect(allocator, rect.x + left, rect.y, right - left, rect.h, fade(phraseColor(phrase.kind), 40));
-    }
-}
-
-fn phraseColor(kind: u8) dvui.Color {
-    return switch (kind) {
-        1 => dvui.Color{ .r = 0x4f, .g = 0x9c, .b = 0xff, .a = 0xff },
-        2 => dvui.Color{ .r = 0x4f, .g = 0xd1, .b = 0x8a, .a = 0xff },
-        3 => dvui.Color{ .r = 0xb5, .g = 0x7a, .b = 0xff, .a = 0xff },
-        4 => dvui.Color{ .r = 0xff, .g = 0xa5, .b = 0x3d, .a = 0xff },
-        5 => dvui.Color{ .r = 0xff, .g = 0x5d, .b = 0x5d, .a = 0xff },
-        6 => dvui.Color{ .r = 0x3d, .g = 0xd6, .b = 0xd6, .a = 0xff },
-        7 => dvui.Color{ .r = 0xff, .g = 0x7a, .b = 0xc0, .a = 0xff },
-        else => dvui.Color{ .r = 0x8a, .g = 0x8f, .b = 0xa8, .a = 0xff },
-    };
-}
-
 fn bandColor(level: f32) dvui.Color {
     const t = std.math.clamp(level, 0, 1);
     if (t < 0.25) return mixColor(Palette.heat0, Palette.heat1, t / 0.25);
@@ -1918,34 +1797,6 @@ fn pointFrom(point: dvui.Point.Physical) hit.Point {
 
 /// Along the bottom: the direction filters on the left, the tempo window and
 /// the colour key on the right.
-fn frameLegend() void {
-    const entries = [_]struct { severity: f32, text: []const u8 }{
-        .{ .severity = 0, .text = "=" },
-        .{ .severity = 0.3, .text = "+1" },
-        .{ .severity = 0.6, .text = "+2" },
-        .{ .severity = 0.85, .text = "+5" },
-        .{ .severity = 1, .text = "x" },
-    };
-
-    for (entries, 0..) |entry, index| {
-        var swatch = dvui.box(@src(), .{ .dir = .horizontal }, .{
-            .min_size_content = .{ .w = 10, .h = 10 },
-            .margin = .{ .x = 6, .y = 8 },
-            .background = true,
-            .color_fill = .{ .color = rampColor(entry.severity) },
-            .id_extra = 200 + index,
-        });
-        swatch.deinit();
-
-        labelStyled(@src(), entry.text, .{
-            .color_text = .{ .color = Palette.secondary },
-            .font = metaFont(),
-            .margin = .{ .y = 6 },
-            .id_extra = 300 + index,
-        });
-    }
-}
-
 fn frameFooter(app: *App) void {
     var bar = dvui.box(@src(), .{ .dir = .horizontal }, .{
         .expand = .horizontal,
@@ -1955,14 +1806,6 @@ fn frameFooter(app: *App) void {
         .color_fill = .{ .color = Palette.panel },
     });
     defer bar.deinit();
-
-    frameLegend();
-
-    labelStyled(@src(), "energy", .{
-        .color_text = .{ .color = Palette.muted },
-        .font = metaFont(),
-        .margin = .{ .x = 12, .y = 6 },
-    });
 
     app.energyToggle("=", Palette.green, &app.filter_hold, .hold);
     app.energyToggle("↑", Palette.orange, &app.filter_up, .up);
@@ -1978,7 +1821,6 @@ fn frameFooter(app: *App) void {
     var spacer2 = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal });
     spacer2.deinit();
 
-    app.waveModeChip();
     app.frameMaster();
 }
 

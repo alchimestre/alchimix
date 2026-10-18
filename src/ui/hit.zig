@@ -73,8 +73,6 @@ pub const Target = union(enum) {
     filter: usize,
     /// Starts and stops the grid's shared transport.
     transport,
-    /// Switches the waveform between bars and polygon fills.
-    wave_mode,
     /// Freezes the master tempo to the seed's BPM, or frees it.
     master_lock,
     /// Keeps the pitch while the master tempo changes.
@@ -148,7 +146,6 @@ pub const Drag = struct {
         toggle: Toggle,
         toggle_notation,
         toggle_transport,
-        toggle_wave_mode,
         toggle_master_lock,
         toggle_pitch,
         toggle_lane_play: usize,
@@ -170,7 +167,6 @@ pub const Drag = struct {
             .toggle => |toggle| .{ .toggle = toggle },
             .notation => .toggle_notation,
             .transport => .toggle_transport,
-            .wave_mode => .toggle_wave_mode,
             .master_lock => .toggle_master_lock,
             .pitch_lock => .toggle_pitch,
             .lane_play => |index| .{ .toggle_lane_play = index },
@@ -240,7 +236,7 @@ pub const Drag = struct {
         return switch (target) {
             .block => |from| .{ .move_block = .{ .from = from, .gap = to } },
             .row => |track| .{ .drop_track = .{ .gap = to, .track = track } },
-            .toggle, .notation, .lane, .nav, .filter, .transport, .wave_mode, .master_lock, .pitch_lock, .lane_play => .none,
+            .toggle, .notation, .lane, .nav, .filter, .transport, .master_lock, .pitch_lock, .lane_play => .none,
         };
     }
 
