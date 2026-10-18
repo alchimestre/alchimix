@@ -73,6 +73,8 @@ pub const Target = union(enum) {
     filter: usize,
     /// Starts and stops the grid's shared transport.
     transport,
+    /// Switches the waveform between bars and polygon fills.
+    wave_mode,
 };
 
 /// Screen rectangles for one frame, with what each one means.
@@ -140,6 +142,7 @@ pub const Drag = struct {
         toggle: Toggle,
         toggle_notation,
         toggle_transport,
+        toggle_wave_mode,
         /// A press on a lane's scrub bar: jump the window to that point.
         seek_nav: usize,
         select_block: usize,
@@ -156,6 +159,7 @@ pub const Drag = struct {
             .toggle => |toggle| .{ .toggle = toggle },
             .notation => .toggle_notation,
             .transport => .toggle_transport,
+            .wave_mode => .toggle_wave_mode,
             .block => |index| blk: {
                 if (shift) break :blk .{ .toggle_block = index };
                 self.pressed = target;
@@ -218,7 +222,7 @@ pub const Drag = struct {
         return switch (target) {
             .block => |from| .{ .move_block = .{ .from = from, .gap = to } },
             .row => |track| .{ .drop_track = .{ .gap = to, .track = track } },
-            .toggle, .notation, .lane, .nav, .filter, .transport => .none,
+            .toggle, .notation, .lane, .nav, .filter, .transport, .wave_mode => .none,
         };
     }
 
