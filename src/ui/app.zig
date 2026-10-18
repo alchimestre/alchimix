@@ -585,7 +585,8 @@ pub const App = struct {
                 if (index >= self.grid.items.len) return;
                 const total: f32 = @floatFromInt(totalBeats(&self.grid.items[index]));
                 const fraction = std.math.clamp((self.last_point.x - self.grid.items[index].nav_x) / @max(1, self.grid.items[index].nav_w), 0, 1);
-                self.seekAll(self.grid.items[index].beat, fraction * total);
+                // Only this lane moves; it lands on a bar.
+                self.seekLane(index, fraction * total);
                 dvui.refresh(null, @src(), null);
             },
             .toggle_master_lock => {
@@ -770,18 +771,6 @@ pub const App = struct {
         self.startLane(index);
     }
 
-    /// Moves every lane by the same delta and snaps them to bars, so the grid
-    /// stays in phase. Lanes keep their relative offsets.
-    fn seekAll(self: *App, from: f32, to: f32) void {
-        const delta = to - from;
-        for (self.grid.items, 0..) |*lane, index| {
-            if (lane.playing) self.stopLane(index);
-            lane.beat = lane.beat + delta;
-            lane.beat_raw = lane.beat;
-            snapBar(lane);
-        }
-    }
-
     /// Seek: the lane stops, moves, and resumes if it was running.
     fn seekLane(self: *App, index: usize, beat: f32) void {
         if (index >= self.grid.items.len) return;
@@ -790,6 +779,7 @@ pub const App = struct {
         self.grid.items[index].playing = false;
         self.grid.items[index].beat_raw = beat;
         snapLane(&self.grid.items[index]);
+        self.grid.items[index].manual = false;
         if (was_playing) self.startLane(index);
     }
 
@@ -1062,8 +1052,11 @@ pub const App = struct {
             .nav => |slot| {
                 if (slot >= self.grid.items.len) return;
                 const lane = &self.grid.items[slot];
+                if (lane.playing) self.stopLane(slot);
                 const total: f32 = @floatFromInt(totalBeats(lane));
-                self.seekAll(lane.beat, lane.beat + pull.dx / @max(1, lane.nav_w) * total);
+                lane.beat_raw += pull.dx / @max(1, lane.nav_w) * total;
+                snapLane(lane);
+                lane.manual = false;
                 dvui.refresh(null, @src(), null);
             },
             .filter => |slot| {
