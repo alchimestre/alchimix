@@ -1541,6 +1541,9 @@ fn drawBlock(app: *App, index: usize, track: Track) Block {
 
     var block = dvui.box(@src(), .{ .dir = .vertical }, .{
         .min_size_content = .{ .w = 380, .h = 112 },
+        // Every card the same width, so the grid beside it starts at the same
+        // x on every row and the playheads stack.
+        .max_size_content = .{ .w = 380, .h = 100000 },
         .padding = .{ .x = 14, .y = 10 },
         .margin = .{ .x = 6, .y = 6 },
         .background = true,
