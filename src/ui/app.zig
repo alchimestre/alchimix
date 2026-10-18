@@ -18,6 +18,10 @@ const Candidate = pl.suggest.Candidate;
 const Lane = struct {
     track_id: u64 = 0,
     analysis: ?pl.analysis.Analysis = null,
+    /// Beat at the left edge of this lane's window.
+    start_beat: f32 = 0,
+    /// Unrounded drag position, so sub-beat movements are not lost to snapping.
+    start_raw: f32 = 0,
     /// Band filter, 0 closed to 1 open.
     filter: f32 = 1,
     /// Height of the filter strip, in physical pixels.
@@ -56,11 +60,14 @@ pub const App = struct {
     selected: std.ArrayListUnmanaged(usize) = .empty,
     /// One grid lane per block, in crate order.
     grid: std.ArrayListUnmanaged(Lane) = .empty,
-    /// Shared grid transport: one window and one play position for every lane.
+    /// Transport: every lane scrolls at the master tempo, each from its own
+    /// window, and the playhead stays at the centre of each lane.
     grid_playing: bool = false,
-    grid_start: f32 = 0,
-    grid_start_raw: f32 = 0,
     grid_started_at: i128 = 0,
+    /// Bars or polygon fills, for A/B comparison.
+    poly: bool = false,
+    /// Smoothed frame cost, shown next to the renderer switch.
+    draw_ms: f32 = 0,
     /// Where the last press landed, for controls that act on absolute position.
     last_point: hit.Point = .{},
 
@@ -138,6 +145,7 @@ pub const App = struct {
     }
 
     pub fn frame(self: *App) bool {
+        const frame_started = std.Io.Timestamp.now(self.io, .awake).nanoseconds;
         var root = dvui.box(@src(), .{ .dir = .vertical }, .{
             .expand = .both,
             .background = true,
@@ -171,6 +179,9 @@ pub const App = struct {
             dvui.refresh(null, @src(), null);
         }
 
+        const frame_ended = std.Io.Timestamp.now(self.io, .awake).nanoseconds;
+        const frame_ms: f32 = @floatCast(@as(f64, @floatFromInt(frame_ended - frame_started)) / 1_000_000);
+        self.draw_ms = self.draw_ms * 0.85 + frame_ms * 0.15;
         return true;
     }
 
@@ -526,18 +537,21 @@ pub const App = struct {
             },
             .seek_nav => |index| {
                 if (index >= self.grid.items.len) return;
-                self.rebaseClock();
+                self.foldElapsed();
                 const lane = &self.grid.items[index];
                 const total: f32 = @floatFromInt(totalBeats(lane));
                 const fraction = std.math.clamp((self.last_point.x - lane.nav_x) / @max(1, lane.nav_w), 0, 1);
-                self.grid_start_raw = fraction * total;
-                self.snapGrid();
+                lane.start_raw = fraction * total;
+                snapLane(lane);
+                dvui.refresh(null, @src(), null);
+            },
+            .toggle_wave_mode => {
+                self.poly = !self.poly;
                 dvui.refresh(null, @src(), null);
             },
             .toggle_transport => {
                 if (self.grid_playing) {
-                    self.grid_start = self.gridStart();
-                    self.grid_start_raw = self.grid_start;
+                    self.foldElapsed();
                     self.grid_playing = false;
                 } else {
                     self.grid_started_at = std.Io.Timestamp.now(self.io, .awake).nanoseconds;
@@ -564,6 +578,37 @@ pub const App = struct {
                 dvui.refresh(null, @src(), null);
             },
         }
+    }
+
+    fn elapsedBeats(self: *const App) f32 {
+        if (!self.grid_playing) return 0;
+        const now = std.Io.Timestamp.now(self.io, .awake).nanoseconds;
+        const elapsed_ns: f64 = @floatFromInt(now - self.grid_started_at);
+        const bpm = if (self.crate.seedTrack()) |track| track.bpm else 120;
+        return @as(f32, @floatCast(elapsed_ns / 1_000_000_000 * bpm / 60));
+    }
+
+    /// Beat at the left edge of a lane's window.
+    fn laneStart(self: *const App, lane: *const Lane) f32 {
+        return lane.start_beat + self.elapsedBeats();
+    }
+
+    /// Fold elapsed time into every lane, so a manual move starts from now.
+    fn foldElapsed(self: *App) void {
+        if (!self.grid_playing) return;
+        const elapsed = self.elapsedBeats();
+        for (self.grid.items) |*lane| {
+            lane.start_raw += elapsed;
+            lane.start_beat = @round(lane.start_raw);
+        }
+        self.grid_started_at = std.Io.Timestamp.now(self.io, .awake).nanoseconds;
+    }
+
+    fn snapLane(lane: *Lane) void {
+        const total = totalBeats(lane);
+        const last: f32 = @max(0, @as(f32, @floatFromInt(total)) - beats_visible);
+        lane.start_raw = std.math.clamp(lane.start_raw, 0, last);
+        lane.start_beat = @round(lane.start_raw);
     }
 
     /// Picks a block for the previewer; three lanes is the cap.
@@ -650,6 +695,30 @@ pub const App = struct {
         return self.grid_playing;
     }
 
+    fn waveModeChip(self: *App) void {
+        var chip = dvui.box(@src(), .{ .dir = .horizontal }, .{
+            .margin = .{ .x = 8, .y = 4 },
+            .padding = .{ .x = 10, .y = 2 },
+            .background = true,
+            .color_fill = .{ .color = Palette.field },
+            .id_extra = 82,
+        });
+        defer chip.deinit();
+
+        var buffer: [24]u8 = undefined;
+        const text = std.fmt.bufPrint(&buffer, "{s} {d:.0}ms", .{
+            if (self.poly) "poly" else "bars",
+            self.draw_ms,
+        }) catch "mode";
+
+        labelStyled(@src(), text, .{
+            .color_text = .{ .color = Palette.secondary },
+            .font = metaFont(),
+            .id_extra = 83,
+        });
+        self.hit_map.append(rectFrom(chip.data().rectScaleFromParent().r), .wave_mode);
+    }
+
     fn transportToggle(self: *App) void {
         var chip = dvui.box(@src(), .{ .dir = .horizontal }, .{
             .margin = .{ .x = 8, .y = 4 },
@@ -679,20 +748,20 @@ pub const App = struct {
         switch (pull.target) {
             .lane => |slot| {
                 if (slot >= self.grid.items.len) return;
+                self.foldElapsed();
                 const lane = &self.grid.items[slot];
-                self.rebaseClock();
                 // Grab the wave: dragging right shows earlier audio.
-                self.grid_start_raw -= pull.dx * beats_visible / @max(1, lane.wave_w);
-                self.snapGrid();
+                lane.start_raw -= pull.dx * beats_visible / @max(1, lane.wave_w);
+                snapLane(lane);
                 dvui.refresh(null, @src(), null);
             },
             .nav => |slot| {
                 if (slot >= self.grid.items.len) return;
+                self.foldElapsed();
                 const lane = &self.grid.items[slot];
-                self.rebaseClock();
                 const total: f32 = @floatFromInt(totalBeats(lane));
-                self.grid_start_raw += pull.dx / @max(1, lane.nav_w) * total;
-                self.snapGrid();
+                lane.start_raw += pull.dx / @max(1, lane.nav_w) * total;
+                snapLane(lane);
                 dvui.refresh(null, @src(), null);
             },
             .filter => |slot| {
@@ -740,9 +809,13 @@ pub const App = struct {
                 const wave_rect = rectFrom(wave.data().contentRectScale().r).clipped(col_rect);
                 lane.wave_w = wave_rect.w;
 
-                const view = self.gridStart();
+                const view = self.laneStart(lane);
                 if (lane.analysis) |*analysis| {
-                    self.paintWave(analysis, wave_rect, view);
+                    if (self.poly) {
+                        self.paintWavePoly(analysis, wave_rect, view);
+                    } else {
+                        self.paintWave(analysis, wave_rect, view);
+                    }
                 } else {
                     labelStyled(@src(), "no analysis", .{
                         .color_text = .{ .color = Palette.muted },
@@ -788,7 +861,7 @@ pub const App = struct {
 
             const total = totalBeats(lane);
             const visible: f32 = @min(beats_visible, @as(f32, @floatFromInt(total)));
-            const start = if (total > 0) self.gridStart() / @as(f32, @floatFromInt(total)) else 0;
+            const start = if (total > 0) self.laneStart(lane) / @as(f32, @floatFromInt(total)) else 0;
             const span = if (total > 0) visible / @as(f32, @floatFromInt(total)) else 1;
 
             fillRect(self.allocator, bar_rect.x, bar_rect.y, bar_rect.w, bar_rect.h, Palette.field);
@@ -846,6 +919,73 @@ pub const App = struct {
             fillRectInto(&builder, rect.x + x, rect.bottom() - height, 6, height, bandColor(smoothed));
         }
 
+        self.paintBeats(rect, start_beat);
+    }
+
+    /// The same waveform as filled heat bands: five concave polygons per lane
+    /// instead of hundreds of rectangles.
+    fn paintWavePoly(self: *App, analysis: *const pl.analysis.Analysis, rect: hit.Rect, start_beat: f32) void {
+        if (rect.w <= 0 or rect.h <= 0) return;
+        fillRect(self.allocator, rect.x, rect.y, rect.w, rect.h, Palette.field);
+
+        const bpm = if (analysis.bpm() > 0) analysis.bpm() else 128;
+        const scale: f32 = 255 / @as(f32, @floatFromInt(@max(1, analysis.peak)));
+        const samples_per_beat: f32 = @as(f32, pl.analysis.Analysis.samples_per_second) * 60 / bpm;
+        const start_sample = start_beat * samples_per_beat;
+        const step: f32 = 6;
+        const samples_per_px = samples_per_beat * beats_visible / rect.w;
+
+        var levels: [600]f32 = undefined;
+        var count: usize = 0;
+        var smoothed: f32 = 0.35;
+        var x: f32 = 0;
+        while (x < rect.w and count < levels.len) : (x += step) {
+            const from: usize = @intFromFloat(@max(0, start_sample + x * samples_per_px));
+            if (from >= analysis.waveform.len) break;
+            const to: usize = @min(analysis.waveform.len, @as(usize, @intFromFloat(@max(0, start_sample + (x + step) * samples_per_px))));
+
+            var peak: u8 = 0;
+            var sum: usize = 0;
+            for (analysis.waveform[from..to]) |value| {
+                peak = @max(peak, value);
+                sum += value;
+            }
+            const average = @as(f32, @floatFromInt(sum)) / @as(f32, @floatFromInt(@max(1, to - from)));
+            const level = @min(255, @max(average * 1.15, @as(f32, @floatFromInt(peak)) * 0.6) * scale * 0.55) / 255;
+            smoothed = smoothed * 0.75 + level * 0.25;
+            levels[count] = smoothed;
+            count += 1;
+        }
+
+        const bands: u8 = 5;
+        var band: u8 = 0;
+        while (band < bands) : (band += 1) {
+            const lo = @as(f32, @floatFromInt(band)) / @as(f32, @floatFromInt(bands));
+            const hi = @as(f32, @floatFromInt(band + 1)) / @as(f32, @floatFromInt(bands));
+
+            var builder = dvui.Path.Builder.init(self.allocator);
+            defer builder.deinit();
+
+            const base_y = rect.bottom() - rect.h * lo;
+            builder.addPoint(.{ .x = rect.x, .y = base_y });
+            for (levels[0..count], 0..) |level, index| {
+                const clamped = std.math.clamp(level, lo, hi);
+                builder.addPoint(.{
+                    .x = rect.x + @as(f32, @floatFromInt(index)) * step,
+                    .y = rect.bottom() - rect.h * clamped,
+                });
+            }
+            builder.addPoint(.{ .x = rect.x + @as(f32, @floatFromInt(count)) * step, .y = base_y });
+
+            dvui.Path.fill(&.{builder.build()}, .{
+                .color = .{ .color = bandColor((lo + hi) / 2) },
+            });
+        }
+
+        self.paintBeats(rect, start_beat);
+    }
+
+    fn paintBeats(self: *App, rect: hit.Rect, start_beat: f32) void {
         var beat: f32 = @ceil(start_beat);
         while (beat < start_beat + beats_visible) : (beat += 1) {
             const bx = (beat - start_beat) / beats_visible * rect.w;
@@ -1347,6 +1487,7 @@ fn frameFooter(app: *App) void {
     });
 
     app.transportToggle();
+    app.waveModeChip();
     app.energyToggle("=", Palette.green, &app.filter_hold, .hold);
     app.energyToggle("↑", Palette.orange, &app.filter_up, .up);
     app.energyToggle("↓", Palette.orange, &app.filter_down, .down);
