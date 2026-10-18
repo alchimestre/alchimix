@@ -1,0 +1,88 @@
+# playlister
+
+A block-style playlist builder for a rekordbox collection. Pick a seed track, see
+what can follow it by Camelot key and tempo, and place tracks left or right of a
+neighbour.
+
+## Requirements
+
+- Zig 0.17
+- SQLCipher (`brew install sqlcipher`) — the rekordbox collection is encrypted
+- ffmpeg (`brew install ffmpeg`) — preview playback
+
+SDL3, dvui, FreeType and the rest come in as packages; `zig-pkg/` is ignored by git.
+
+## Run
+
+```sh
+zig build && ./zig-out/bin/playlister
+```
+
+```sh
+zig build test        # domain tests
+```
+
+| Command | What it prints |
+|---|---|
+| `playlister` | the block canvas |
+| `playlister library` | track count and how many carry a key |
+| `playlister suggest <text>` | what could follow the first match, ranked |
+
+## Preview
+
+`▶` on a row or a block plays fifteen seconds from the middle of the track, through
+`ffplay`. Pause stops the process and remembers the offset, so play resumes from
+there; a stopped process would keep the audio device open. Starting another track stops the first.
+
+Each block carries a bar along its bottom: it fills as the snippet runs, and a
+click jumps to that point and plays the rest of it.
+
+## Editing a crate
+
+Drag a row from the left column into the canvas to insert it; a click alone adds
+nothing. Drag a block by its body and drop it on a gap line to move it. Pressing a
+block selects it, and the suggestions follow that selection. `×` removes a block.
+
+## Where the tracks come from
+
+`~/Library/Pioneer/rekordbox/master.db`, opened read-only. Nothing is written back.
+
+The database key comes from `PLAYLISTER_REKORDBOX_KEY` when set, otherwise from the
+cache pyrekordbox keeps at `~/Library/Application Support/pyrekordbox/rb.cache`.
+Without either, the app opens with three demo tracks.
+
+To read the collection from another source, implement the port in `src/ports/library.zig`.
+
+## Layout
+
+| Path | Holds |
+|---|---|
+| `src/domain/camelot.zig` | key parsing, wheel distance, relation between two keys |
+| `src/domain/bpm.zig` | tempo match, including half and double time |
+| `src/domain/crate.zig` | the crate: ordered tracks, seed, transitions |
+| `src/domain/suggest.zig` | ranking of what can follow a seed |
+| `src/ports/library.zig` | the track-source port |
+| `src/adapters/rekordbox.zig` | SQLCipher reader for rekordbox 6 |
+| `src/adapters/memory.zig` | in-memory source for tests and the demo |
+| `src/ui/app.zig` | block canvas, picker, toolbar |
+| `src/ui/hit.zig` | hit map and the press–drag–drop rules |
+| `src/ui/run.zig` | window and frame loop |
+
+## Arrows
+
+Blocks stack down the canvas, and the arrow between two of them is a `↓` glyph.
+Its colour runs from green to red
+with the size of the harmonic step, the same ramp in both directions. Triangles
+to the right of the arrow say which way the energy moves: one for ±1, two
+for ±2, three for ±5.
+
+| Colour | Step | Triangles |
+|---|---|---|
+| green | 0, relative | none |
+| olive | ±1 | 1 |
+| yellow | ±2 | 2 |
+| orange | ±5 | 3 |
+| red | ±3, ±4, ±6 | none, not harmonic |
+
+The arrow needs a font with `→`, so the app loads CaskaydiaCove Nerd Font from
+`~/Library/Fonts` at startup and falls back to `»` without it.
