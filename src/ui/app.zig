@@ -95,6 +95,8 @@ pub const App = struct {
     master_locked: bool = true,
     /// Keep the pitch while the tempo changes.
     pitch_lock: bool = true,
+    /// The master field had keyboard focus last frame, to detect leaving it.
+    master_focus: bool = false,
 
     /// Where the last press landed, for controls that act on absolute position.
     last_point: hit.Point = .{},
@@ -616,8 +618,9 @@ pub const App = struct {
                 if (self.anyPlaying()) {
                     self.stopAllLanes();
                 } else {
+                    // A global start is one act: every lane starts together.
                     for (self.grid.items, 0..) |*lane, index| {
-                        if (!lane.playing) self.startLane(index);
+                        if (!lane.playing) self.startLaneJoin(index, true);
                     }
                 }
                 dvui.refresh(null, @src(), null);
@@ -735,11 +738,23 @@ pub const App = struct {
 
     fn laneSpec(self: *App, index: usize, delay_ms: u32) pl.mixer.Lane {
         const track = self.crate.at(index).?.*;
-        const bpm: f32 = if (track.bpm > 0) @floatCast(track.bpm) else 128;
+        const lane = &self.grid.items[index];
+        const grid_bpm: f32 = if (lane.analysis) |*analysis| blk: {
+            if (analysis.bpm() > 0) break :blk analysis.bpm();
+            break :blk 128;
+        } else if (track.bpm > 0) @floatCast(track.bpm) else 128;
+
+        // Seconds come from the analysed grid: the first beat is rarely at 0.
+        const beat = self.laneBeat(lane);
+        const start_s: f64 = if (lane.analysis) |*analysis|
+            analysis.beatTimeMs(beat) / 1000
+        else
+            beat * 60 / grid_bpm;
+
         return .{
             .track = track,
-            .start_s = self.laneBeat(&self.grid.items[index]) * 60 / bpm,
-            .tempo = self.masterBpm() / bpm,
+            .start_s = start_s,
+            .tempo = self.masterBpm() / grid_bpm,
             .filter = self.grid.items[index].filter,
             .keylock = self.pitch_lock,
             .delay_ms = delay_ms,
@@ -747,6 +762,10 @@ pub const App = struct {
     }
 
     fn startLane(self: *App, index: usize) void {
+        self.startLaneJoin(index, false);
+    }
+
+    fn startLaneJoin(self: *App, index: usize, immediate: bool) void {
         if (index >= self.grid.items.len or index >= self.crate.len()) return;
         const lane = &self.grid.items[index];
         if (lane.analysis == null) return;
@@ -758,7 +777,7 @@ pub const App = struct {
         // Mid-bar starts are delayed to the next master bar, so every lane's
         // downbeats line up in time.
         const phase = @mod(self.masterBeat(), 4);
-        const wait: f32 = if (was_running and phase > 0.01) 4 - phase else 0;
+        const wait: f32 = if (!immediate and was_running and phase > 0.25) 4 - phase else 0;
         lane.started_master = self.masterBeat() + wait;
 
         const remaining: f32 = @as(f32, @floatFromInt(totalBeats(lane))) - lane.beat;
@@ -939,6 +958,14 @@ pub const App = struct {
         self.selected.append(self.allocator, index) catch {};
     }
 
+    fn commitMaster(self: *App) void {
+        self.freezeClock();
+        const parsed = std.fmt.parseFloat(f32, self.master_text.items) catch null;
+        if (parsed) |value| self.master_bpm = std.math.clamp(value, 40, 220);
+        self.master_locked = false;
+        self.retunePlaying();
+    }
+
     /// Master tempo at the right corner, with a lock that ties it to the seed.
     fn frameMaster(self: *App) void {
         labelStyled(@src(), "master", .{
@@ -972,16 +999,14 @@ pub const App = struct {
             .font = metaFont(),
             .id_extra = 70,
         });
-        const changed = entry.text_changed;
+        const enter = entry.enter_pressed;
+        const focused = dvui.focusedWidgetId() == entry.data().id;
         entry.deinit();
 
-        if (changed) {
-            self.freezeClock();
-            const parsed = std.fmt.parseFloat(f32, self.master_text.items) catch null;
-            if (parsed) |value| self.master_bpm = std.math.clamp(value, 40, 220);
-            self.master_locked = false;
-            self.retunePlaying();
-        }
+        const left_box = self.master_focus and !focused;
+        self.master_focus = focused;
+
+        if (enter or left_box) self.commitMaster();
 
         {
             var chip = dvui.box(@src(), .{ .dir = .horizontal }, .{
