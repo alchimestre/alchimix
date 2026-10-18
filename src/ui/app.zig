@@ -394,6 +394,7 @@ pub const App = struct {
 
         switch (next_action) {
             .remove => |index| {
+                if (self.crate.at(index)) |track| self.player.stopPreview(track.id);
                 self.crate.remove(index) catch {};
                 self.refresh() catch {};
                 dvui.refresh(null, @src(), null);
