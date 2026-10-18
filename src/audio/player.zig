@@ -96,6 +96,12 @@ pub const Player = struct {
         self.start(track, offset, left_s);
     }
 
+    /// Ends the preview if it belongs to this track; another track's keeps
+    /// playing.
+    pub fn stopPreview(self: *Player, track_id: u64) void {
+        if (self.holds(track_id)) self.stop();
+    }
+
     /// Clears the preview once the snippet is over.
     pub fn poll(self: *Player) void {
         if (self.child == null or self.paused) return;
