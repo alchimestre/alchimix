@@ -12,6 +12,7 @@ const Track = @import("../domain/track.zig").Track;
 /// Low shelf, bell, high shelf, in that order.
 pub const band_count = 3;
 pub const eq_max_gain_db: f32 = 12;
+pub const trim_max_db: f32 = 12;
 pub const eq_min_hz: f32 = 40;
 pub const eq_max_hz: f32 = 16000;
 
@@ -61,6 +62,8 @@ pub const Lane = struct {
     tempo: f32,
     /// Three-band EQ, applied in place without restarting the decoder.
     eq: EqParams = .{},
+    /// Per-lane gain after the EQ, in dB.
+    trim_db: f32 = 0,
     /// Keep the pitch while the tempo changes; otherwise pitch follows speed.
     keylock: bool,
     /// Audio-clock time at which the lane may become audible, so it starts on
@@ -78,6 +81,8 @@ pub const spectrum_bins = 32;
 const fft_size = 1024;
 /// Ten milliseconds per pump tick.
 const tick_frames = sample_rate / 100;
+/// Meter fall per pump tick.
+const level_decay: f32 = 0.86;
 const ring_frames = sample_rate * 2;
 pub const max_lanes = 8;
 /// Audio buffered before a lane starts playing, 100 ms.
@@ -201,6 +206,10 @@ pub fn responseDb(params: EqParams, hz: f32) f32 {
     return total;
 }
 
+fn trimGain(db: f32) f32 {
+    return std.math.pow(f32, 10, db / 20);
+}
+
 fn processBands(bands: *[band_count]Biquad, sample: f32) f32 {
     var out = sample;
     for (bands) |*bq| out = bq.process(out);
@@ -290,6 +299,9 @@ const Slot = struct {
     eq: EqParams = .{},
     /// Bands changed; recompute the shared coefficients before the next block.
     eq_dirty: bool = false,
+    trim_db: f32 = 0,
+    /// Post-trim peak of the last block, decayed once per pump tick.
+    level: f32 = 0,
     child: ?std.process.Child = null,
     /// Decoder stdout, nonblocking, drained by the pump thread.
     file: ?std.Io.File = null,
@@ -471,6 +483,17 @@ pub const Mixer = struct {
         }
     }
 
+    /// The lane's post-trim peak level, 0..1, with the pump's decay applied.
+    pub fn level(self: *Mixer, uid: u64) f32 {
+        if (!self.mutex.tryLock()) return 0;
+        defer self.mutex.unlock(self.io);
+        for (&self.slots) |*slot| {
+            if (!slot.active or slot.uid != uid) continue;
+            return slot.level;
+        }
+        return 0;
+    }
+
     fn ensureThread(self: *Mixer) void {
         if (self.thread != null) return;
         self.running.store(true, .release);
@@ -494,6 +517,7 @@ pub const Mixer = struct {
 
         slot.eq = lane.eq;
         slot.eq_dirty = true;
+        slot.trim_db = lane.trim_db;
         slot.start_at_ns = lane.start_at_ns;
         return restarted;
     }
@@ -554,6 +578,8 @@ pub const Mixer = struct {
         slot.keylock = lane.keylock;
         slot.eq = lane.eq;
         slot.eq_dirty = true;
+        slot.trim_db = lane.trim_db;
+        slot.level = 0;
         slot.head = 0;
         slot.tail = 0;
         slot.channel_cursor = 0;
@@ -595,6 +621,7 @@ pub const Mixer = struct {
         slot.channel_cursor = 0;
         slot.started = false;
         slot.fft_fill = 0;
+        slot.level = 0;
         @memset(&slot.spectrum, 0);
     }
 
@@ -674,6 +701,7 @@ pub const Mixer = struct {
                 if (bufferedFrames(slot) < prefill_frames and slot.file != null) continue;
                 slot.ready = true;
             }
+            slot.level *= level_decay;
             if (slot.head == slot.tail) continue;
             // First audible frame: this is the time the transport must use,
             // whatever the decoder's own latency was.
@@ -690,18 +718,23 @@ pub const Mixer = struct {
                     for (channel, 0..) |*bq, band| bq.setBand(band, slot.eq);
                 }
             }
+            const gain = trimGain(slot.trim_db);
+            var peak: f32 = 0;
             var frame: usize = 0;
             while (frame < frames and slot.tail != slot.head) : (frame += 1) {
                 var mono: f32 = 0;
                 for (0..channels) |channel| {
                     const dry = slot.ring[slot.tail * channels + channel];
-                    const sample = if (flat) dry else processBands(&slot.biquads[channel], dry);
+                    const shaped = if (flat) dry else processBands(&slot.biquads[channel], dry);
+                    const sample = shaped * gain;
+                    peak = @max(peak, @abs(sample));
                     self.out[frame * channels + channel] += sample;
                     mono += sample;
                 }
                 pushSpectrum(slot, mono / channels);
                 slot.tail = (slot.tail + 1) % ring_frames;
             }
+            slot.level = @max(peak, slot.level);
         }
 
         for (self.out[0 .. frames * channels]) |*sample| {
