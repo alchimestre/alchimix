@@ -758,6 +758,13 @@ pub const App = struct {
         else
             beat * 60 / grid_bpm;
 
+        if (std.c.getenv("PLAYLISTER_DEBUG") != null) {
+            std.debug.print(
+                "lane {d} beat={d:.3} grid_bpm={d:.2} master={d:.2} start={d:.3}s tempo={d:.4} delay={d}ms\n",
+                .{ index, beat, grid_bpm, self.masterBpm(), start_s, self.masterBpm() / grid_bpm, delay_ms },
+            );
+        }
+
         return .{
             .track = track,
             .start_s = start_s,
