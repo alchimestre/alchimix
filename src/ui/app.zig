@@ -89,6 +89,8 @@ pub const App = struct {
     master_locked: bool = true,
     /// Keep the pitch while the tempo changes.
     pitch_lock: bool = true,
+    demo_started: bool = false,
+    demo_frames: usize = 0,
     /// The master field had keyboard focus last frame, to detect leaving it.
     master_focus: bool = false,
 
@@ -190,8 +192,26 @@ pub const App = struct {
 
         // The pointer pass reads the map the previous frame drew, then the map
         // is rebuilt from this frame's layout.
+        if (self.crate.len() == 0) {
+            self.refresh() catch {};
+            if (self.found.len >= 3) {
+                for (0..3) |i| _ = self.crate.insertAt(i, self.found[i]) catch {};
+            }
+        }
         self.handlePointer();
         self.syncGrid();
+        if (!self.demo_started and self.grid.items.len >= 2) {
+            self.demo_started = true;
+            self.startLaneJoin(0, true);
+            self.startLaneJoin(1, true);
+        }
+        self.demo_frames += 1;
+        if (self.demo_frames == 100) {
+            std.debug.print("demo: tempo change\n", .{});
+            self.master_locked = false;
+            self.master_bpm = 132;
+            self.retunePlaying();
+        }
 
         self.hit_map.reset();
 
@@ -741,7 +761,9 @@ pub const App = struct {
         } else if (track.bpm > 0) @floatCast(track.bpm) else 128;
 
         // Seconds come from the analysed grid: the first beat is rarely at 0.
-        const beat = self.laneBeat(lane);
+        // A playing lane keeps its base beat: the mixer already started the
+        // decoder there, and resending the advanced position would restart it.
+        const beat = lane.beat;
         const start_s: f64 = if (lane.analysis) |*analysis|
             analysis.beatTimeMs(beat) / 1000
         else
@@ -787,6 +809,7 @@ pub const App = struct {
         }
 
         // Nothing audible changed: leave the running pipeline alone.
+        std.debug.print("rebuild count={d} key={d} old={d} active={} master={d:.2}\n", .{ count, key, self.mix_key, self.mixer.active(), self.masterBpm() });
         if (count > 0 and key == self.mix_key and self.mixer.active()) return;
 
         self.mix_key = key;
@@ -901,14 +924,15 @@ pub const App = struct {
         self.rebuildMix();
     }
 
+    /// Filter changes go to the running mix; no decoder is restarted.
     fn restartDirty(self: *App) void {
+        var dirty = false;
         for (self.grid.items) |*lane| {
             if (!lane.filter_dirty) continue;
             lane.filter_dirty = false;
-            if (!lane.playing) continue;
-            // Rebuild the mix: the playhead keeps running.
-            self.rebuildMix();
+            if (lane.playing) dirty = true;
         }
+        if (dirty) self.rebuildMix();
     }
 
     /// Loads a grid lane for every block. Lanes survive edits: a lane matched

@@ -17,14 +17,30 @@ pub fn build(b: *std.Build) void {
     translate.addIncludePath(.{ .cwd_relative = b.pathJoin(&.{ prefix, "include", "sqlcipher" }) });
     const sqlcipher = translate.createModule();
 
+    // The mixer writes to an SDL audio stream; the window uses the same library.
+    const sdl_prefix = b.option([]const u8, "sdl3-prefix", "Prefix of the SDL3 install") orelse
+        std.mem.trimEnd(u8, b.run(&.{ "brew", "--prefix", "sdl3" }), "\r\n");
+    const sdl_translate = b.addTranslateC(.{
+        .root_source_file = b.path("src/sdl.h"),
+        .target = target,
+        .optimize = optimize,
+    });
+    sdl_translate.addIncludePath(.{ .cwd_relative = b.pathJoin(&.{ sdl_prefix, "include" }) });
+    const sdlc = sdl_translate.createModule();
+
     const core = b.addModule("playlister", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
         .optimize = optimize,
-        .imports = &.{.{ .name = "c", .module = sqlcipher }},
+        .imports = &.{
+            .{ .name = "c", .module = sqlcipher },
+            .{ .name = "sdl3-c", .module = sdlc },
+        },
     });
     core.addLibraryPath(.{ .cwd_relative = b.pathJoin(&.{ prefix, "lib" }) });
     core.linkSystemLibrary("sqlcipher", .{});
+    core.addLibraryPath(.{ .cwd_relative = b.pathJoin(&.{ sdl_prefix, "lib" }) });
+    core.linkSystemLibrary("SDL3", .{});
     core.link_libc = true;
 
     const exe = b.addExecutable(.{
