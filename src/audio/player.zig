@@ -48,7 +48,7 @@ pub const Player = struct {
     }
 
     pub fn isPlaying(self: *const Player, track_id: u64) bool {
-        return self.holds(track_id) and !self.paused;
+        return self.child != null and self.holds(track_id) and !self.paused;
     }
 
     /// True only while samples are moving: a paused preview needs no repaint,
