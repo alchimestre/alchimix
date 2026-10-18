@@ -16,9 +16,7 @@ const Transition = pl.crate.Transition;
 const Candidate = pl.suggest.Candidate;
 
 const Lane = struct {
-    /// Crate index the lane stands for.
-    index: usize = 0,
-    track: Track = undefined,
+    track_id: u64 = 0,
     analysis: ?pl.analysis.Analysis = null,
     /// Beat at the left edge of the waveform.
     start_beat: f32 = 0,
@@ -54,9 +52,8 @@ pub const App = struct {
     in_range: usize = 0,
     /// Blocks picked for the previewer, by crate index. Empty means none.
     selected: std.ArrayListUnmanaged(usize) = .empty,
-    /// One lane per selected block, in selection order.
-    lanes: [3]Lane = @splat(.{}),
-    lane_count: usize = 0,
+    /// One grid lane per block, in crate order.
+    grid: std.ArrayListUnmanaged(Lane) = .empty,
 
     /// Tempo window for suggestions, as a percentage of the seed's BPM.
     bpm_pct: f32 = 5,
@@ -105,9 +102,10 @@ pub const App = struct {
     }
 
     pub fn deinit(self: *App) void {
-        for (self.lanes[0..self.lane_count]) |*lane| {
+        for (self.grid.items) |*lane| {
             if (lane.analysis) |*a| a.deinit(self.allocator);
         }
+        self.grid.deinit(self.allocator);
         self.selected.deinit(self.allocator);
         self.hit_map.deinit();
         self.player.deinit();
@@ -150,6 +148,7 @@ pub const App = struct {
         // The pointer pass reads the map the previous frame drew, then the map
         // is rebuilt from this frame's layout.
         self.handlePointer();
+        self.syncGrid();
         self.hit_map.reset();
 
         self.frameToolbar();
@@ -199,7 +198,6 @@ pub const App = struct {
 
         self.framePicker();
         self.frameCanvas();
-        if (self.lane_count > 0) self.frameLanes();
     }
 
     fn framePicker(self: *App) void {
@@ -406,7 +404,7 @@ pub const App = struct {
             // The canvas is created before the preview panel, so without a cap
             // it eats the width the panel needs and pushes it off the window.
             .max_size_content = .{
-                .w = @max(200, self.viewport_w - self.picker_w - lane_panel_width),
+                .w = @max(200, self.viewport_w - self.picker_w),
                 .h = 100000,
             },
         });
@@ -434,12 +432,21 @@ pub const App = struct {
 
         for (0..self.crate.len()) |index| {
             const track = self.crate.at(index).?;
-            const block = drawBlock(self, index, track.*);
-            switch (block.action) {
-                .remove => next_action = .{ .remove = index },
-                .none => {},
+            {
+                var row = dvui.box(@src(), .{ .dir = .horizontal }, .{
+                    .expand = .horizontal,
+                    .id_extra = 8000 + index,
+                });
+                defer row.deinit();
+
+                const block = drawBlock(self, index, track.*);
+                switch (block.action) {
+                    .remove => next_action = .{ .remove = index },
+                    .none => {},
+                }
+                self.dropLine(index, block.rect);
+                self.drawLane(index);
             }
-            self.dropLine(index, block.rect);
 
             if (self.crate.transition(index)) |step| connector(self.allocator, index, step);
         }
@@ -457,7 +464,6 @@ pub const App = struct {
                 if (self.crate.at(index)) |track| self.player.stopPreview(track.id);
                 self.crate.remove(index) catch {};
                 self.selected.clearRetainingCapacity();
-                self.syncLanes();
                 self.refresh() catch {};
                 dvui.refresh(null, @src(), null);
             },
@@ -516,13 +522,11 @@ pub const App = struct {
             .select_block => |index| self.pending_select = index,
             .toggle_block => |index| {
                 self.toggleSelected(index);
-                self.syncLanes();
                 dvui.refresh(null, @src(), null);
             },
             .drop_track => |drop| {
                 _ = self.crate.insertAt(drop.gap, drop.track) catch {};
                 self.selected.clearRetainingCapacity();
-                self.syncLanes();
                 self.refresh() catch {};
                 dvui.refresh(null, @src(), null);
             },
@@ -530,7 +534,6 @@ pub const App = struct {
                 if (self.crate.at(move.from)) |track| self.player.stopPreview(track.id);
                 self.crate.moveTo(move.from, move.gap) catch {};
                 self.selected.clearRetainingCapacity();
-                self.syncLanes();
                 self.refresh() catch {};
                 dvui.refresh(null, @src(), null);
             },
@@ -549,46 +552,32 @@ pub const App = struct {
         self.selected.append(self.allocator, index) catch {};
     }
 
-    /// Rebuilds the lanes after a selection or crate change, keeping the
-    /// loaded analyses of blocks that stayed.
-    fn syncLanes(self: *App) void {
-        var next: [3]Lane = @splat(.{});
-        var count: usize = 0;
-
-        for (self.selected.items) |index| {
-            if (index >= self.crate.len()) continue;
-            var lane = Lane{ .index = index, .track = self.crate.at(index).?.* };
-
-            for (self.lanes[0..self.lane_count]) |old| {
-                if (old.index != index) continue;
-                lane.analysis = old.analysis;
-                lane.start_beat = old.start_beat;
-                lane.start_raw = old.start_raw;
-                lane.missing = old.missing;
-                break;
-            }
-
-            if (lane.analysis == null and !lane.missing) {
-                lane.analysis = self.library.analysis(self.allocator, lane.track.id) catch null;
-                lane.missing = lane.analysis == null;
-            }
-
-            next[count] = lane;
-            count += 1;
-        }
-
-        for (self.lanes[0..self.lane_count]) |*old| {
-            if (old.analysis) |*a| {
-                var kept = false;
-                for (next[0..count]) |lane| {
-                    if (lane.index == old.index) kept = true;
+    /// Loads a grid lane for every block. Rebuilt only when the crate's tracks
+    /// change, keeping the analyses that are already loaded.
+    fn syncGrid(self: *App) void {
+        if (self.grid.items.len == self.crate.len()) {
+            var same = true;
+            for (0..self.crate.len()) |index| {
+                if (self.grid.items[index].track_id != self.crate.at(index).?.id) {
+                    same = false;
+                    break;
                 }
-                if (!kept) a.deinit(self.allocator);
             }
+            if (same) return;
         }
 
-        self.lanes = next;
-        self.lane_count = count;
+        for (self.grid.items) |*lane| {
+            if (lane.analysis) |*a| a.deinit(self.allocator);
+        }
+        self.grid.clearRetainingCapacity();
+
+        for (0..self.crate.len()) |index| {
+            const track = self.crate.at(index).?.*;
+            var lane = Lane{ .track_id = track.id };
+            lane.analysis = self.library.analysis(self.allocator, track.id) catch null;
+            lane.missing = lane.analysis == null;
+            self.grid.append(self.allocator, lane) catch {};
+        }
     }
 
     fn isSelected(self: *const App, index: usize) bool {
@@ -601,16 +590,16 @@ pub const App = struct {
     fn applyPull(self: *App, pull: hit.Drag.Pull) void {
         switch (pull.target) {
             .lane => |slot| {
-                if (slot >= self.lane_count) return;
-                const lane = &self.lanes[slot];
+                if (slot >= self.grid.items.len) return;
+                const lane = &self.grid.items[slot];
                 // Grab the wave: dragging right shows earlier audio.
                 lane.start_raw -= pull.dx * beats_visible / @max(1, lane.wave_w);
                 snapLane(lane);
                 dvui.refresh(null, @src(), null);
             },
             .nav => |slot| {
-                if (slot >= self.lane_count) return;
-                const lane = &self.lanes[slot];
+                if (slot >= self.grid.items.len) return;
+                const lane = &self.grid.items[slot];
                 const total: f32 = @floatFromInt(totalBeats(lane));
                 lane.start_raw += pull.dx / @max(1, lane.nav_w) * total;
                 snapLane(lane);
@@ -620,48 +609,28 @@ pub const App = struct {
         }
     }
 
-    /// The previewer: one lane per selected block.
-    fn frameLanes(self: *App) void {
-        var panel = dvui.box(@src(), .{ .dir = .vertical }, .{
+    /// The grid lane drawn beside a block, sharing the row's height.
+    fn drawLane(self: *App, index: usize) void {
+        if (index >= self.grid.items.len) return;
+        const lane = &self.grid.items[index];
+
+        var col = dvui.box(@src(), .{ .dir = .vertical }, .{
             .expand = .vertical,
-            .min_size_content = .{ .w = lane_panel_width },
-            .max_size_content = .{ .w = lane_panel_width, .h = 100000 },
-            .padding = .{ .x = 0, .y = 16 },
-            .background = true,
-            .color_fill = .{ .color = Palette.panel },
-        });
-        defer panel.deinit();
-
-        labelStyled(@src(), "preview", .{
-            .color_text = .{ .color = Palette.muted },
-            .font = metaFont(),
-            .margin = .{ .x = 16, .y = 4 },
-        });
-
-        for (self.lanes[0..self.lane_count], 0..) |*lane, slot| {
-            self.drawLane(lane, slot);
-        }
-    }
-
-    fn drawLane(self: *App, lane: *Lane, slot: usize) void {
-        var lane_box = dvui.box(@src(), .{ .dir = .vertical }, .{
-            .expand = .horizontal,
-            .min_size_content = .{ .w = 0, .h = 100 },
-            .max_size_content = .{ .w = lane_panel_width - 16, .h = 100000 },
-            .padding = .{ .x = 12, .y = 10 },
+            .min_size_content = .{ .w = 420, .h = 0 },
+            .max_size_content = .{ .w = 420, .h = 100000 },
             .margin = .{ .x = 8, .y = 6 },
+            .padding = .{ .x = 8, .y = 4 },
             .background = true,
-            .color_fill = .{ .color = Palette.block },
-            .id_extra = 5000 + slot,
+            .color_fill = .{ .color = Palette.field },
+            .id_extra = 9000 + index,
         });
-        defer lane_box.deinit();
+        defer col.deinit();
 
         {
             var wave = dvui.box(@src(), .{ .dir = .horizontal }, .{
-                .expand = .horizontal,
-                .min_size_content = .{ .w = 0, .h = 64 },
-                .margin = .{ .y = 4 },
-                .id_extra = 5300 + slot,
+                .expand = .both,
+                .min_size_content = .{ .w = 0, .h = 0 },
+                .id_extra = 9100 + index,
             });
             defer wave.deinit();
             const wave_rect = rectFrom(wave.data().contentRectScale().r);
@@ -673,18 +642,18 @@ pub const App = struct {
                 labelStyled(@src(), "no analysis", .{
                     .color_text = .{ .color = Palette.muted },
                     .font = metaFont(),
-                    .margin = .{ .x = 6, .y = 6 },
-                    .id_extra = 5400 + slot,
+                    .margin = .{ .x = 6, .y = 2 },
+                    .id_extra = 9200 + index,
                 });
             }
-            self.hit_map.append(wave_rect, .{ .lane = slot });
+            self.hit_map.append(wave_rect, .{ .lane = index });
         }
 
         {
             var bar = dvui.box(@src(), .{ .dir = .horizontal }, .{
                 .expand = .horizontal,
                 .min_size_content = .{ .w = 0, .h = 16 },
-                .id_extra = 5500 + slot,
+                .id_extra = 9300 + index,
             });
             defer bar.deinit();
             const bar_rect = rectFrom(bar.data().contentRectScale().r);
@@ -698,7 +667,7 @@ pub const App = struct {
             const track_y = bar_rect.y + 4;
             fillRect(self.allocator, bar_rect.x, track_y, bar_rect.w, 8, fade(Palette.muted, 55));
             fillRect(self.allocator, bar_rect.x + bar_rect.w * start, track_y, @max(24, bar_rect.w * span), 8, Palette.green);
-            self.hit_map.append(bar_rect, .{ .nav = slot });
+            self.hit_map.append(bar_rect, .{ .nav = index });
         }
     }
 
@@ -939,8 +908,6 @@ fn drawBlock(app: *App, index: usize, track: Track) Block {
             .font = headingFont(),
             .id_extra = index * 16 + 1,
         });
-        _ = transportButton(app, track, index * 16 + 8);
-
         removed = dvui.button(@src(), "×", .{}, .{
             .min_size_content = .{ .w = 22, .h = 22 },
             .padding = .{ .x = 4, .y = 0 },
@@ -972,7 +939,11 @@ fn drawBlock(app: *App, index: usize, track: Track) Block {
         });
         defer bottom.deinit();
 
-        progressBar(app, track, index * 16 + 9, 4);
+        var spacer = dvui.box(@src(), .{ .dir = .horizontal }, .{
+            .expand = .horizontal,
+            .id_extra = index * 16 + 11,
+        });
+        spacer.deinit();
 
         if (track.genre.len > 0) {
             var genre_buffer: [34]u8 = undefined;
