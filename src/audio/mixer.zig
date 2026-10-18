@@ -15,6 +15,8 @@ pub const Lane = struct {
     filter: f32,
     /// Keep the pitch while the tempo changes; otherwise pitch follows speed.
     keylock: bool,
+    /// Silence inserted before the audio so the lane starts on a master bar.
+    delay_ms: u32 = 0,
 };
 
 pub const max_lanes = 64;
@@ -103,13 +105,19 @@ pub const Mixer = struct {
         defer self.allocator.free(start);
 
         const ratio = std.math.clamp(lane.tempo, 0.5, 2.0);
+        const delay = if (lane.delay_ms > 0)
+            std.fmt.allocPrint(self.allocator, "adelay={d}:all=1,", .{lane.delay_ms}) catch return null
+        else
+            "";
+        defer if (lane.delay_ms > 0) self.allocator.free(delay);
+
         const chain = if (lane.keylock)
-            std.fmt.allocPrint(self.allocator, "atempo={d:.3},lowpass=f={d:.0}", .{
-                ratio, lowPassHz(lane.filter),
+            std.fmt.allocPrint(self.allocator, "{s}atempo={d:.3},lowpass=f={d:.0}", .{
+                delay, ratio, lowPassHz(lane.filter),
             }) catch return null
         else
-            std.fmt.allocPrint(self.allocator, "asetrate={d:.0},aresample=48000,lowpass=f={d:.0}", .{
-                44100 * ratio, lowPassHz(lane.filter),
+            std.fmt.allocPrint(self.allocator, "{s}asetrate={d:.0},aresample=48000,lowpass=f={d:.0}", .{
+                delay, 44100 * ratio, lowPassHz(lane.filter),
             }) catch return null;
         defer self.allocator.free(chain);
 
