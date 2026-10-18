@@ -61,6 +61,8 @@ pub const Lane = struct {
     tempo: f32,
     /// Three-band EQ, applied in place without restarting the decoder.
     eq: EqParams = .{},
+    /// Keeps the lane playing and its clock running, but adds no samples.
+    muted: bool = false,
     /// Keep the pitch while the tempo changes; otherwise pitch follows speed.
     keylock: bool,
     /// Audio-clock time at which the lane may become audible, so it starts on
@@ -287,6 +289,7 @@ const Slot = struct {
     start_s: f64 = -1,
     tempo: f32 = 1,
     keylock: bool = true,
+    muted: bool = false,
     eq: EqParams = .{},
     /// Bands changed; recompute the shared coefficients before the next block.
     eq_dirty: bool = false,
@@ -494,6 +497,7 @@ pub const Mixer = struct {
 
         slot.eq = lane.eq;
         slot.eq_dirty = true;
+        slot.muted = lane.muted;
         slot.start_at_ns = lane.start_at_ns;
         return restarted;
     }
@@ -554,6 +558,7 @@ pub const Mixer = struct {
         slot.keylock = lane.keylock;
         slot.eq = lane.eq;
         slot.eq_dirty = true;
+        slot.muted = lane.muted;
         slot.head = 0;
         slot.tail = 0;
         slot.channel_cursor = 0;
@@ -674,6 +679,7 @@ pub const Mixer = struct {
                 if (bufferedFrames(slot) < prefill_frames and slot.file != null) continue;
                 slot.ready = true;
             }
+            if (slot.muted) @memset(&slot.spectrum, 0);
             if (slot.head == slot.tail) continue;
             // First audible frame: this is the time the transport must use,
             // whatever the decoder's own latency was.
@@ -692,6 +698,10 @@ pub const Mixer = struct {
             }
             var frame: usize = 0;
             while (frame < frames and slot.tail != slot.head) : (frame += 1) {
+                if (slot.muted) {
+                    slot.tail = (slot.tail + 1) % ring_frames;
+                    continue;
+                }
                 var mono: f32 = 0;
                 for (0..channels) |channel| {
                     const dry = slot.ring[slot.tail * channels + channel];
