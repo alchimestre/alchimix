@@ -25,7 +25,9 @@ const Lane = struct {
     slot: usize = 0,
     /// This lane's own process is running.
     playing: bool = false,
-    started_ns: i128 = 0,
+    /// Master beat when this lane started.
+    started_master: f32 = 0,
+    /// Wall clock when the audio should end.
     end_ns: i128 = 0,
     /// Filter moved while playing; restart on release.
     filter_dirty: bool = false,
@@ -79,6 +81,10 @@ pub const App = struct {
     poly: bool = false,
     /// Smoothed frame cost, shown next to the renderer switch.
     draw_ms: f32 = 0,
+    /// Master clock every playing lane is derived from.
+    clock_running: bool = false,
+    clock_started_ns: i128 = 0,
+    clock_beat: f32 = 0,
     /// Next mixer slot to hand out.
     next_slot: usize = 0,
     /// Lane held down with the pointer: jog pause, resume on release.
@@ -89,6 +95,7 @@ pub const App = struct {
     master_locked: bool = true,
     /// Keep the pitch while the tempo changes.
     pitch_lock: bool = true,
+
     /// Where the last press landed, for controls that act on absolute position.
     last_point: hit.Point = .{},
 
@@ -663,15 +670,35 @@ pub const App = struct {
         return std.Io.Timestamp.now(self.io, .awake).nanoseconds;
     }
 
-    fn elapsedBeatsSince(self: *const App, started: i128) f32 {
-        const elapsed_ns: f64 = @floatFromInt(@max(0, self.nowNs() - started));
-        return @as(f32, @floatCast(elapsed_ns / 1_000_000_000 * self.masterBpm() / 60));
+    /// Master beat: the one grid every playing lane follows.
+    fn masterBeat(self: *const App) f32 {
+        if (!self.clock_running) return self.clock_beat;
+        const now = self.nowNs();
+        const elapsed_ns: f64 = @floatFromInt(@max(0, now - self.clock_started_ns));
+        return self.clock_beat + @as(f32, @floatCast(elapsed_ns / 1_000_000_000 * self.masterBpm() / 60));
     }
 
-    /// Beat under the playhead, including whatever this lane has played.
+    fn startClock(self: *App) void {
+        if (self.clock_running) return;
+        // The clock starts on a bar of its own grid.
+        self.clock_beat = @round(self.clock_beat / 4) * 4;
+        self.clock_started_ns = self.nowNs();
+        self.clock_running = true;
+    }
+
+    fn stopClock(self: *App) void {
+        if (!self.clock_running) return;
+        self.clock_beat = self.masterBeat();
+        self.clock_running = false;
+    }
+
+    /// Beat under the playhead: the lane's base plus whatever the master clock
+    /// has advanced since the lane started.
     fn laneBeat(self: *const App, lane: *const Lane) f32 {
         if (!lane.playing) return lane.beat;
-        return lane.beat + self.elapsedBeatsSince(lane.started_ns);
+        const master = self.masterBeat();
+        if (master < lane.started_master) return lane.beat;
+        return lane.beat + (master - lane.started_master);
     }
 
     /// Beat at the left edge of a lane's window. Negative at the start of a
@@ -684,7 +711,7 @@ pub const App = struct {
     /// move the playhead.
     fn foldLane(self: *App, lane: *Lane) void {
         if (!lane.playing) return;
-        lane.beat = lane.beat + self.elapsedBeatsSince(lane.started_ns);
+        lane.beat = self.laneBeat(lane);
         lane.beat_raw = lane.beat;
     }
 
@@ -707,7 +734,7 @@ pub const App = struct {
         lane.beat = @round(lane.beat_raw);
     }
 
-    fn laneSpec(self: *App, index: usize) pl.mixer.Lane {
+    fn laneSpec(self: *App, index: usize, delay_ms: u32) pl.mixer.Lane {
         const track = self.crate.at(index).?.*;
         const bpm: f32 = if (track.bpm > 0) @floatCast(track.bpm) else 128;
         return .{
@@ -716,6 +743,7 @@ pub const App = struct {
             .tempo = self.masterBpm() / bpm,
             .filter = self.grid.items[index].filter,
             .keylock = self.pitch_lock,
+            .delay_ms = delay_ms,
         };
     }
 
@@ -725,14 +753,20 @@ pub const App = struct {
         if (lane.analysis == null) return;
         // Untouched lanes always launch on a bar.
         if (!lane.manual) snapBar(lane);
-        // Start the clock slightly after the processes so the playhead does not
-        // run ahead of the audio while ffplay opens the device.
-        const lead: i128 = 90_000_000;
-        lane.started_ns = self.nowNs() + lead;
+        const was_running = self.clock_running;
+        self.startClock();
+
+        // Mid-bar starts are delayed to the next master bar, so every lane's
+        // downbeats line up in time.
+        const phase = @mod(self.masterBeat(), 4);
+        const wait: f32 = if (was_running and phase > 0.01) 4 - phase else 0;
+        lane.started_master = self.masterBeat() + wait;
+
         const remaining: f32 = @as(f32, @floatFromInt(totalBeats(lane))) - lane.beat;
-        lane.end_ns = lane.started_ns + @as(i128, @intFromFloat(@max(0, remaining) * 60 / self.masterBpm() * 1_000_000_000));
+        lane.end_ns = self.nowNs() + @as(i128, @intFromFloat((wait + @max(0, remaining)) * 60 / self.masterBpm() * 1_000_000_000));
         lane.playing = true;
-        self.mixer.play(lane.slot, self.laneSpec(index));
+        const delay_ms: u32 = @intFromFloat(wait * 60 / self.masterBpm() * 1000);
+        self.mixer.play(lane.slot, self.laneSpec(index, delay_ms));
     }
 
     fn stopLane(self: *App, index: usize) void {
@@ -742,15 +776,20 @@ pub const App = struct {
         self.foldLane(lane);
         snapBar(lane);
         lane.playing = false;
+        if (!self.anyPlaying()) self.stopClock();
     }
 
     fn stopAllLanes(self: *App) void {
-        self.mixer.stopAll();
         for (self.grid.items) |*lane| {
-            self.foldLane(lane);
-            snapBar(lane);
-            lane.playing = false;
+            if (lane.playing) {
+                self.mixer.stop(lane.slot);
+                self.foldLane(lane);
+                snapBar(lane);
+                lane.playing = false;
+            }
         }
+        self.mixer.stopAll();
+        self.stopClock();
     }
 
     fn anyPlaying(self: *const App) bool {
@@ -776,6 +815,7 @@ pub const App = struct {
         if (index >= self.grid.items.len) return;
         const was_playing = self.grid.items[index].playing;
         self.mixer.stop(self.grid.items[index].slot);
+        self.foldLane(&self.grid.items[index]);
         self.grid.items[index].playing = false;
         self.grid.items[index].beat_raw = beat;
         snapLane(&self.grid.items[index]);
@@ -794,6 +834,7 @@ pub const App = struct {
         self.mixer.stop(lane.slot);
         self.foldLane(lane);
         lane.playing = false;
+        if (!self.anyPlaying()) self.stopClock();
         self.jog_lane = index;
     }
 
@@ -809,7 +850,7 @@ pub const App = struct {
             lane.filter_dirty = false;
             if (!lane.playing) continue;
             // Swap the audio only: the playhead keeps running.
-            self.mixer.swap(lane.slot, self.laneSpec(index));
+            self.mixer.swap(lane.slot, self.laneSpec(index, 0));
         }
     }
 
