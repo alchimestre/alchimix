@@ -1,11 +1,12 @@
-//! Plays the grid as one mixed stream.
+//! The internal mixer.
 //!
-//! A single ffmpeg decodes every lane, applies its tempo, filter and start
-//! offset in one filter graph, and mixes them sample-aligned; ffplay only plays
-//! the resulting PCM. One process pair means there is no inter-lane skew from
-//! separate players starting at different times.
+//! One SDL output stream plays a single mixed signal. Every lane is a decoder
+//! process piping `f32le` into a ring buffer, and this file does the summing and
+//! the filter. Lanes therefore share one clock: no player starts before another,
+//! and no change to one lane interrupts the rest.
 
 const std = @import("std");
+const device_mod = @import("device.zig");
 const Track = @import("../domain/track.zig").Track;
 
 pub const Lane = struct {
@@ -18,28 +19,206 @@ pub const Lane = struct {
     filter: f32,
     /// Keep the pitch while the tempo changes; otherwise pitch follows speed.
     keylock: bool,
-    /// Silence inserted before the audio so the lane starts on a master bar.
+    /// Silence before the audio, so the lane starts on a master bar.
     delay_ms: u32 = 0,
+};
+
+const sample_rate = device_mod.sample_rate;
+const channels = device_mod.channels;
+/// Ten milliseconds per pump tick.
+const tick_frames = sample_rate / 100;
+const ring_frames = sample_rate * 2;
+const max_lanes = 8;
+
+const Biquad = struct {
+    b0: f32 = 1,
+    b1: f32 = 0,
+    b2: f32 = 0,
+    a1: f32 = 0,
+    a2: f32 = 0,
+    z1: f32 = 0,
+    z2: f32 = 0,
+
+    fn setLowPass(self: *Biquad, cutoff_hz: f32) void {
+        const hz = std.math.clamp(cutoff_hz, 20, sample_rate * 0.45);
+        const w0 = 2 * std.math.pi * hz / sample_rate;
+        const cos = @cos(w0);
+        const alpha = @sin(w0) / (2 * 0.707);
+        const a0 = 1 + alpha;
+        self.b0 = ((1 - cos) / 2) / a0;
+        self.b1 = (1 - cos) / a0;
+        self.b2 = self.b0;
+        self.a1 = (-2 * cos) / a0;
+        self.a2 = (1 - alpha) / a0;
+    }
+
+    fn process(self: *Biquad, input: f32) f32 {
+        const out = self.b0 * input + self.z1;
+        self.z1 = self.b1 * input - self.a1 * out + self.z2;
+        self.z2 = self.b2 * input - self.a2 * out;
+        return out;
+    }
+};
+
+const Slot = struct {
+    active: bool = false,
+    track_id: u64 = 0,
+    start_s: f64 = -1,
+    tempo: f32 = 1,
+    keylock: bool = true,
+    filter: f32 = 1,
+    applied_filter: f32 = -1,
+    child: ?std.process.Child = null,
+    /// Decoder stdout, nonblocking, drained by the pump thread.
+    file: ?std.Io.File = null,
+    quit: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    ring: []f32 = &.{},
+    head: usize = 0,
+    tail: usize = 0,
+    /// Channel of the next sample, so a split read keeps frame alignment.
+    channel_cursor: usize = 0,
+    eq: [channels]Biquad = @splat(.{}),
+    mute_until_ns: i128 = 0,
 };
 
 pub const Mixer = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
-    decoder: ?std.process.Child = null,
-    player: ?std.process.Child = null,
+    mutex: std.Io.Mutex = .init,
+    device: device_mod.Device = .{},
+    slots: [max_lanes]Slot = undefined,
+    thread: ?std.Thread = null,
+    running: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    out: []f32 = &.{},
+    ticks: usize = 0,
 
     pub fn init(allocator: std.mem.Allocator, io: std.Io) Mixer {
-        return .{ .allocator = allocator, .io = io };
+        var self = Mixer{
+            .allocator = allocator,
+            .io = io,
+            .out = allocator.alloc(f32, tick_frames * channels) catch &.{},
+        };
+        for (&self.slots) |*slot| slot.* = .{};
+        for (&self.slots) |*slot| {
+            slot.ring = allocator.alloc(f32, ring_frames * channels) catch break;
+        }
+        return self;
     }
 
     pub fn deinit(self: *Mixer) void {
         self.stop();
+        self.running.store(false, .release);
+        if (self.thread) |thread| thread.join();
+        self.thread = null;
+        self.device.close();
+        for (&self.slots) |*slot| {
+            if (slot.ring.len > 0) self.allocator.free(slot.ring);
+        }
+        if (self.out.len > 0) self.allocator.free(self.out);
         self.* = undefined;
     }
 
+    /// Replaces the set of playing lanes. Lanes already playing keep their
+    /// decoder unless their position or tempo changed; filter changes are
+    /// applied in place, so they never interrupt the audio.
     pub fn play(self: *Mixer, lanes: []const Lane) void {
-        self.stop();
-        if (lanes.len == 0) return;
+        self.ensureThread();
+        self.device.open() catch return;
+
+        self.mutex.lockUncancelable(self.io);
+
+        var used: [max_lanes]bool = @splat(false);
+        var finished: [max_lanes]*Slot = @splat(undefined);
+        var finished_count: usize = 0;
+        for (lanes) |lane| {
+            var target: ?*Slot = null;
+            for (&self.slots, 0..) |*slot, index| {
+                if (!used[index] and slot.active and slot.track_id == lane.track.id) {
+                    used[index] = true;
+                    target = slot;
+                    break;
+                }
+            }
+            if (target == null) {
+                for (&self.slots, 0..) |*slot, index| {
+                    if (!used[index] and !slot.active) {
+                        used[index] = true;
+                        target = slot;
+                        break;
+                    }
+                }
+            }
+            if (target) |slot| self.apply(slot, lane);
+        }
+
+        for (&self.slots, 0..) |*slot, index| {
+            if (used[index] or !slot.active) continue;
+            self.beginRelease(slot);
+            finished[finished_count] = slot;
+            finished_count += 1;
+        }
+
+        self.mutex.unlock(self.io);
+        for (finished[0..finished_count]) |slot| self.endRelease(slot);
+    }
+
+    pub fn stop(self: *Mixer) void {
+        var finished: [max_lanes]*Slot = @splat(undefined);
+        var finished_count: usize = 0;
+
+        self.mutex.lockUncancelable(self.io);
+        for (&self.slots) |*slot| {
+            if (slot.active) {
+                self.beginRelease(slot);
+                finished[finished_count] = slot;
+                finished_count += 1;
+            }
+        }
+        self.mutex.unlock(self.io);
+
+        for (finished[0..finished_count]) |slot| self.endRelease(slot);
+    }
+
+    pub fn active(self: *const Mixer) bool {
+        for (&self.slots) |*slot| {
+            if (slot.active) return true;
+        }
+        return false;
+    }
+
+    fn ensureThread(self: *Mixer) void {
+        if (self.thread != null) return;
+        self.running.store(true, .release);
+        self.thread = std.Thread.spawn(.{}, pumpMain, .{self}) catch null;
+    }
+
+    fn apply(self: *Mixer, slot: *Slot, lane: Lane) void {
+        const same_track = slot.active and slot.track_id == lane.track.id;
+        const same_start = @abs(slot.start_s - lane.start_s) < 0.001;
+        const same_tempo = @abs(slot.tempo - lane.tempo) < 0.0005 and slot.keylock == lane.keylock;
+
+        std.debug.print("apply id={d} same_track={} same_start={} same_tempo={} old={d:.4} new={d:.4}\n", .{ lane.track.id, same_track, same_start, same_tempo, slot.tempo, lane.tempo });
+        if (!same_track or !same_start or !same_tempo) {
+            self.beginRelease(slot);
+            self.endRelease(slot);
+            self.start(slot, lane);
+        }
+
+        slot.filter = lane.filter;
+        if (lane.delay_ms > 0) {
+            slot.mute_until_ns = std.Io.Timestamp.now(self.io, .awake).nanoseconds +
+                @as(i128, lane.delay_ms) * std.time.ns_per_ms;
+        } else {
+            slot.mute_until_ns = 0;
+        }
+    }
+
+    fn start(self: *Mixer, slot: *Slot, lane: Lane) void {
+        if (lane.track.file_path.len == 0) return;
+        if (slot.ring.len == 0) return;
+
+        var argv: std.ArrayListUnmanaged([]const u8) = .empty;
+        defer argv.deinit(self.allocator);
 
         var owned: std.ArrayListUnmanaged([]const u8) = .empty;
         defer {
@@ -47,110 +226,157 @@ pub const Mixer = struct {
             owned.deinit(self.allocator);
         }
 
-        var decoder_argv: std.ArrayListUnmanaged([]const u8) = .empty;
-        defer decoder_argv.deinit(self.allocator);
+        const start_arg = std.fmt.allocPrint(self.allocator, "{d:.3}", .{lane.start_s}) catch return;
+        owned.append(self.allocator, start_arg) catch return;
 
-        decoder_argv.appendSlice(self.allocator, &.{ "ffmpeg", "-hide_banner", "-loglevel", "error" }) catch return;
+        const ratio = std.math.clamp(lane.tempo, 0.5, 2.0);
+        const chain = if (lane.keylock)
+            std.fmt.allocPrint(self.allocator, "atempo={d:.4}", .{ratio}) catch return
+        else
+            std.fmt.allocPrint(self.allocator, "asetrate={d:.0},aresample={d}", .{ 44100 * ratio, sample_rate }) catch return;
+        owned.append(self.allocator, chain) catch return;
 
-        for (lanes) |lane| {
-            const start = std.fmt.allocPrint(self.allocator, "{d:.3}", .{lane.start_s}) catch return;
-            owned.append(self.allocator, start) catch return;
-            decoder_argv.appendSlice(self.allocator, &.{ "-ss", start, "-i", lane.track.file_path }) catch return;
-        }
+        const rate = std.fmt.allocPrint(self.allocator, "{d}", .{sample_rate}) catch return;
+        owned.append(self.allocator, rate) catch return;
 
-        const graph = self.buildGraph(lanes, &owned) catch return;
-        decoder_argv.appendSlice(self.allocator, &.{
-            "-filter_complex", graph, "-map", "[mix]",
-            "-f",              "s16le", "-ac", "2",
-            "-ar",             "48000", "-",
+        argv.appendSlice(self.allocator, &.{
+            "ffmpeg",          "-hide_banner", "-loglevel", "error",
+            "-ss",             start_arg,     "-i",         lane.track.file_path,
+            "-af",             chain,         "-f",         "f32le",
+            "-ac",             "2",            "-ar",        rate,
+            "-",
         }) catch return;
 
-        const player_argv = [_][]const u8{
-            "ffplay",  "-hide_banner", "-loglevel", "error", "-nodisp",
-            "-autoexit", "-f",         "s16le",    "-ar",   "48000",
-            "-ch_layout", "stereo",    "-",
-        };
-
-        var fds: [2]std.posix.fd_t = undefined;
-        if (std.c.pipe(&fds) != 0) return;
-        const write_end = std.Io.File{ .handle = fds[1], .flags = .{ .nonblocking = false } };
-        const read_end = std.Io.File{ .handle = fds[0], .flags = .{ .nonblocking = false } };
-
-        self.decoder = std.process.spawn(self.io, .{
-            .argv = decoder_argv.items,
+        std.debug.print("spawn args={any}\n", .{argv.items});
+        _ = &argv;
+        const child = std.process.spawn(self.io, .{
+            .argv = argv.items,
             .stdin = .ignore,
-            .stdout = .{ .file = write_end },
-            .stderr = .ignore,
-        }) catch {
-            _ = std.c.close(fds[0]);
-            _ = std.c.close(fds[1]);
+            .stdout = .pipe,
+            .stderr = .inherit,
+        }) catch return;
+
+        slot.active = true;
+        slot.track_id = lane.track.id;
+        slot.start_s = lane.start_s;
+        slot.tempo = lane.tempo;
+        slot.keylock = lane.keylock;
+        slot.filter = lane.filter;
+        slot.applied_filter = -1;
+        slot.head = 0;
+        slot.tail = 0;
+        slot.channel_cursor = 0;
+        for (&slot.eq) |*eq| eq.* = .{};
+        slot.quit.store(false, .release);
+        slot.child = child;
+        const pipe = child.stdout orelse {
+            self.beginRelease(slot);
+            self.endRelease(slot);
             return;
         };
-        _ = std.c.close(fds[1]);
-
-        self.player = std.process.spawn(self.io, .{
-            .argv = &player_argv,
-            .stdin = .{ .file = read_end },
-            .stdout = .ignore,
-            .stderr = .ignore,
-        }) catch null;
-        _ = std.c.close(fds[0]);
+        // The descriptor itself must be nonblocking: the Io layer reads it
+        // directly, and a blocking read there stalls the whole pump.
+        _ = std.c.fcntl(pipe.handle, 4, @as(c_int, 0x0004));
+        slot.file = .{ .handle = pipe.handle, .flags = .{ .nonblocking = true } };
     }
 
-    pub fn stop(self: *Mixer) void {
-        for ([_]*?std.process.Child{ &self.decoder, &self.player }) |slot| {
-            if (slot.*) |*child| {
-                // kill reaps the process and clears its id.
-                child.kill(self.io);
-                slot.* = null;
+    fn beginRelease(self: *Mixer, slot: *Slot) void {
+        slot.active = false;
+        slot.quit.store(true, .release);
+        slot.file = null;
+        if (slot.child) |*child| child.kill(self.io);
+    }
+
+    fn endRelease(_: *Mixer, slot: *Slot) void {
+        slot.child = null;
+        slot.head = 0;
+        slot.tail = 0;
+        slot.channel_cursor = 0;
+    }
+
+    /// Moves what the decoder produced into the lane's ring, then stops at
+    /// WouldBlock. Runs on the pump thread with the lock held.
+    fn drain(self: *Mixer, slot: *Slot) void {
+        var buffer: [32768]u8 align(@alignOf(f32)) = undefined;
+        const file = slot.file orelse return;
+
+        while (true) {
+            const count = file.readStreaming(self.io, &.{&buffer}) catch |err| {
+                switch (err) {
+                    error.WouldBlock => return,
+                    else => {
+                        slot.file = null;
+                        return;
+                    },
+                }
+            };
+            if (count == 0) {
+                slot.file = null;
+                return;
+            }
+
+            const samples: []const f32 = @as([*]const f32, @ptrCast(@alignCast(&buffer)))[0 .. count / @sizeOf(f32)];
+            for (samples) |sample| {
+                const next = (slot.head + 1) % ring_frames;
+                if (next == slot.tail) return;
+                slot.ring[slot.head * channels + slot.channel_cursor] = sample;
+                if (slot.channel_cursor + 1 == channels) {
+                    slot.channel_cursor = 0;
+                    slot.head = next;
+                } else {
+                    slot.channel_cursor += 1;
+                }
             }
         }
     }
 
-    pub fn active(self: *const Mixer) bool {
-        return self.decoder != null or self.player != null;
-    }
+    fn pumpMain(self: *Mixer) void {
+        while (self.running.load(.acquire)) {
+            self.io.sleep(.{ .nanoseconds = 10 * std.time.ns_per_ms }, .awake) catch {};
+            @memset(self.out, 0);
 
-    /// Builds the filter graph: per lane tempo, filter and bar delay, mixed.
-    fn buildGraph(self: *Mixer, lanes: []const Lane, owned: *std.ArrayListUnmanaged([]const u8)) ![]const u8 {
-        var buffer: [16 * 1024]u8 = undefined;
-        var writer: std.Io.Writer = .fixed(&buffer);
-
-        for (lanes, 0..) |lane, index| {
-            const ratio = std.math.clamp(lane.tempo, 0.5, 2.0);
-            try writer.print("[{d}:a]", .{index});
-            if (lane.delay_ms > 0) try writer.print("adelay={d}:all=1,", .{lane.delay_ms});
-            if (lane.keylock) {
-                try writer.print("atempo={d:.3},", .{ratio});
-            } else {
-                try writer.print("asetrate={d:.0},aresample=48000,", .{44100 * ratio});
+            const now = std.Io.Timestamp.now(self.io, .awake).nanoseconds;
+            if (self.mutex.tryLock()) {
+                for (&self.slots) |*slot| {
+                    if (!slot.active) continue;
+                    self.drain(slot);
+                    if (slot.mute_until_ns > now) continue;
+                    if (slot.applied_filter != slot.filter) {
+                        slot.applied_filter = slot.filter;
+                        const cutoff = 200 * std.math.pow(f32, 100, std.math.clamp(slot.filter, 0, 1));
+                        for (&slot.eq) |*eq| eq.setLowPass(cutoff);
+                    }
+                    var frame: usize = 0;
+                    while (frame < tick_frames and slot.tail != slot.head) : (frame += 1) {
+                        for (0..channels) |channel| {
+                            const sample = slot.ring[slot.tail * channels + channel];
+                            self.out[frame * channels + channel] += slot.eq[channel].process(sample);
+                        }
+                        slot.tail = (slot.tail + 1) % ring_frames;
+                    }
+                }
+                self.mutex.unlock(self.io);
             }
-            try writer.print("lowpass=f={d:.0}[l{d}];", .{ lowPassHz(lane.filter), index });
-        }
-        for (lanes, 0..) |_, index| try writer.print("[l{d}]", .{index});
-        try writer.print("amix=inputs={d}:duration=longest:dropout_transition=0:normalize=0,alimiter=limit=0.95", .{lanes.len});
-        try writer.writeAll("[mix]");
 
-        const graph = try self.allocator.dupe(u8, writer.buffered());
-        try owned.append(self.allocator, graph);
-        return graph;
+            for (self.out) |*sample| {
+                sample.* = std.math.tanh(sample.* * 0.8) * 0.9;
+            }
+            self.device.write(self.out);
+            self.ticks += 1;
+            if (self.ticks % 100 == 0) {
+                var live: usize = 0;
+                for (&self.slots) |*slot| {
+                    if (slot.active) live += 1;
+                }
+                var room: usize = 0;
+                for (&self.slots) |*slot| {
+                    if (slot.active) room += (slot.head + ring_frames - slot.tail) % ring_frames;
+                }
+                var sum: f64 = 0;
+                for (self.out) |sample| sum += @as(f64, sample) * sample;
+                const rms = @sqrt(sum / @as(f64, @floatFromInt(self.out.len)));
+                std.debug.print("mix driver={s} lanes={d} queued={d} frames_buffered={d} rms={d:.4}\n", .{ self.device.driver(), live, self.device.queued(), room, rms });
+            }
+        }
     }
 };
-
-fn writeQuoted(writer: anytype, text: []const u8) !void {
-    try writer.writeByte('\'');
-    for (text) |byte| {
-        if (byte == '\'') {
-            try writer.writeAll("'\\''");
-        } else {
-            try writer.writeByte(byte);
-        }
-    }
-    try writer.writeByte('\'');
-}
-
-/// 200 Hz closed to 20 kHz open, evenly across the dial in octaves.
-fn lowPassHz(filter: f32) f32 {
-    const t = std.math.clamp(filter, 0, 1);
-    return 200 * std.math.pow(f32, 100, t);
-}
