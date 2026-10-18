@@ -15,11 +15,6 @@ pub const Beat = struct {
     position: u8,
 };
 
-/// A song-structure phrase rekordbox detected, starting at a 1-based beat.
-pub const Phrase = struct {
-    beat: u32,
-    kind: u8,
-};
 
 pub const Analysis = struct {
     beats: []Beat,
@@ -28,8 +23,6 @@ pub const Analysis = struct {
     /// Loudest sample in the waveform, so a track can be coloured against its
     /// own range rather than an absolute one.
     peak: u8,
-    /// Phrases in beat order; empty when the file has none.
-    phrases: []Phrase,
 
     pub const samples_per_second = 150;
 
@@ -70,7 +63,6 @@ pub const Analysis = struct {
     }
 
     pub fn deinit(self: *Analysis, allocator: std.mem.Allocator) void {
-        allocator.free(self.phrases);
         allocator.free(self.beats);
         allocator.free(self.waveform);
         self.* = undefined;
@@ -108,33 +100,11 @@ pub fn parse(allocator: std.mem.Allocator, dat: []const u8, ext: []const u8) !An
     var peak: u8 = 0;
     for (waveform) |sample| peak = @max(peak, sample);
 
-    const phrases = try parsePhrases(allocator, section(ext, "PSSI"));
-    errdefer allocator.free(phrases);
-
     return .{
         .beats = try beats.toOwnedSlice(allocator),
         .waveform = waveform,
         .peak = peak,
-        .phrases = phrases,
     };
-}
-
-/// PSSI: a 32-byte header, then 24-byte records holding the beat (u16 at +2)
-/// and the phrase kind (u16 at +4).
-fn parsePhrases(allocator: std.mem.Allocator, body: ?[]const u8) ![]Phrase {
-    const bytes = body orelse return &.{};
-    if (bytes.len < 32) return &.{};
-
-    var phrases: std.ArrayListUnmanaged(Phrase) = .empty;
-    errdefer phrases.deinit(allocator);
-
-    var offset: usize = 32;
-    while (offset + 6 <= bytes.len) : (offset += 24) {
-        const beat = std.mem.readInt(u16, bytes[offset + 2 ..][0..2], .big);
-        const kind = std.mem.readInt(u16, bytes[offset + 4 ..][0..2], .big);
-        try phrases.append(allocator, .{ .beat = beat, .kind = @intCast(@min(kind, 255)) });
-    }
-    return phrases.toOwnedSlice(allocator);
 }
 
 fn section(file: []const u8, tag: []const u8) ?[]const u8 {
@@ -194,7 +164,6 @@ test "reads the beat grid and the preview waveform" {
     try testing.expectEqual(@as(u32, 1000), analysis.beats[0].time_ms);
     try testing.expectApproxEqAbs(@as(f32, 128), analysis.bpm(), 0.001);
     try testing.expectEqualSlices(u8, &.{ 0, 40, 255 }, analysis.waveform);
-    try testing.expectEqual(@as(usize, 0), analysis.phrases.len);
     try testing.expectEqual(@as(u32, 1936), analysis.durationMs());
 }
 
