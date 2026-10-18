@@ -181,6 +181,7 @@ pub const App = struct {
         for (self.grid.items, 0..) |*lane, index| {
             if (lane.playing and self.nowNs() >= lane.end_ns) self.stopLane(index);
         }
+        self.mixer.reap(self.nowNs());
 
         // The pointer pass reads the map the previous frame drew, then the map
         // is rebuilt from this frame's layout.
@@ -666,10 +667,17 @@ pub const App = struct {
         return self.laneBeat(lane) - beats_visible / 2;
     }
 
+    /// Folds elapsed time without rounding: jog and filter changes must not
+    /// move the playhead.
     fn foldLane(self: *App, lane: *Lane) void {
         if (!lane.playing) return;
-        // Stopping lands on a bar, so lanes stay phase-aligned.
-        lane.beat = @round((lane.beat + self.elapsedBeatsSince(lane.started_ns)) / 4) * 4;
+        lane.beat = lane.beat + self.elapsedBeatsSince(lane.started_ns);
+        lane.beat_raw = lane.beat;
+    }
+
+    /// Stopping lands on a bar so lanes stay phase-aligned.
+    fn snapBar(lane: *Lane) void {
+        lane.beat = @round(lane.beat / 4) * 4;
         lane.beat_raw = lane.beat;
     }
 
@@ -714,6 +722,7 @@ pub const App = struct {
         const lane = &self.grid.items[index];
         self.mixer.stop(lane.slot);
         self.foldLane(lane);
+        snapBar(lane);
         lane.playing = false;
     }
 
@@ -721,6 +730,7 @@ pub const App = struct {
         self.mixer.stopAll();
         for (self.grid.items) |*lane| {
             self.foldLane(lane);
+            snapBar(lane);
             lane.playing = false;
         }
     }
@@ -776,10 +786,11 @@ pub const App = struct {
 
     fn restartDirty(self: *App) void {
         for (self.grid.items, 0..) |*lane, index| {
-            if (lane.filter_dirty) {
-                lane.filter_dirty = false;
-                self.restartLane(index);
-            }
+            if (!lane.filter_dirty) continue;
+            lane.filter_dirty = false;
+            if (!lane.playing) continue;
+            // Swap the audio only: the playhead keeps running.
+            self.mixer.swap(lane.slot, self.laneSpec(index));
         }
     }
 
@@ -1010,7 +1021,7 @@ pub const App = struct {
     fn applyPull(self: *App, pull: hit.Drag.Pull) void {
         switch (pull.target) {
             .lane => |slot| {
-                if (self.jog_lane != null or slot >= self.grid.items.len) return;
+                if (slot >= self.grid.items.len) return;
                 const lane = &self.grid.items[slot];
                 if (lane.playing) self.stopLane(slot);
                 // Grab the wave: dragging right shows earlier audio.

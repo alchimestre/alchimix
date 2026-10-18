@@ -23,6 +23,10 @@ pub const Mixer = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
     children: [max_lanes]?std.process.Child = @splat(null),
+    /// Replaced by a swap and kept alive briefly, so a filter change does not
+    /// leave a silence between the two processes.
+    pending: [max_lanes]?std.process.Child = @splat(null),
+    pending_at: [max_lanes]i128 = @splat(0),
 
     pub fn init(allocator: std.mem.Allocator, io: std.Io) Mixer {
         return .{ .allocator = allocator, .io = io };
@@ -40,6 +44,33 @@ pub const Mixer = struct {
         self.children[index] = self.spawn(lane);
     }
 
+    /// Starts a new process for the same lane and lets the old one finish a
+    /// beat later, so the playhead never stops.
+    pub fn swap(self: *Mixer, slot: usize, lane: Lane) void {
+        if (slot >= max_lanes) return;
+        self.reap(std.Io.Timestamp.now(self.io, .awake).nanoseconds);
+        if (self.pending[slot]) |*old| {
+            if (old.id) |pid| std.posix.kill(pid, std.posix.SIG.KILL) catch {};
+            _ = old.wait(self.io) catch {};
+            self.pending[slot] = null;
+        }
+        self.pending[slot] = self.children[slot];
+        self.pending_at[slot] = std.Io.Timestamp.now(self.io, .awake).nanoseconds;
+        self.children[slot] = self.spawn(lane);
+    }
+
+    /// Kills the previous process once the new one has taken over.
+    pub fn reap(self: *Mixer, now: i128) void {
+        for (0..max_lanes) |index| {
+            if (self.pending[index]) |*old| {
+                if (now - self.pending_at[index] < 150_000_000) continue;
+                if (old.id) |pid| std.posix.kill(pid, std.posix.SIG.KILL) catch {};
+                _ = old.wait(self.io) catch {};
+                self.pending[index] = null;
+            }
+        }
+    }
+
     pub fn stop(self: *Mixer, slot: usize) void {
         if (slot >= max_lanes) return;
         if (self.children[slot]) |*child| {
@@ -50,7 +81,14 @@ pub const Mixer = struct {
     }
 
     pub fn stopAll(self: *Mixer) void {
-        for (0..max_lanes) |index| self.stop(index);
+        for (0..max_lanes) |index| {
+            self.stop(index);
+            if (self.pending[index]) |*old| {
+                if (old.id) |pid| std.posix.kill(pid, std.posix.SIG.KILL) catch {};
+                _ = old.wait(self.io) catch {};
+                self.pending[index] = null;
+            }
+        }
     }
 
     pub fn running(self: *const Mixer, slot: usize) bool {
