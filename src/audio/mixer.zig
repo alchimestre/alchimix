@@ -479,9 +479,9 @@ pub const Mixer = struct {
         while (self.running.load(.acquire)) {
             self.io.sleep(.{ .nanoseconds = 5 * std.time.ns_per_ms }, .awake) catch {};
 
-            // Top the device queue up to ~40 ms and no further: mixing a fixed
-            // 10 ms per wake-up drifts against the device clock.
-            const target_bytes = sample_rate * channels * @sizeOf(f32) * 40 / 1000;
+            // 100 ms of runway: at 40 ms a late wake-up emptied the queue and
+            // clicked. The queue is capped so latency stays fixed.
+            const target_bytes = sample_rate * channels * @sizeOf(f32) * 100 / 1000;
             const queued = self.device.queued();
             if (queued >= target_bytes) continue;
             var frames = (target_bytes - queued) / (channels * @sizeOf(f32));

@@ -98,14 +98,21 @@ fn renderMix(init: std.process.Init, args: *std.process.Args.Iterator) !void {
 
     var lanes: [8]pl.mixer.Lane = undefined;
     var count: usize = 0;
-    while (args.next()) |path| {
+    while (args.next()) |spec| {
         if (count >= lanes.len) break;
+
+        // `file`, or `file@start_seconds@tempo`.
+        var parts = std.mem.splitScalar(u8, spec, '@');
+        const path = parts.next() orelse continue;
+        const start = if (parts.next()) |text| std.fmt.parseFloat(f64, text) catch 0 else 0;
+        const tempo = if (parts.next()) |text| std.fmt.parseFloat(f32, text) catch 1 else 1;
+
         var track = pl.track.Track.init(count + 1, "", "");
         track.file_path = path;
         lanes[count] = .{
             .track = track,
-            .start_s = 0,
-            .tempo = 1,
+            .start_s = start,
+            .tempo = tempo,
             .filter = 1,
             .keylock = true,
         };
