@@ -16,6 +16,12 @@ pub const Key = struct {
         return if (self.mode == Mode.minor) 'A' else 'B';
     }
 
+    /// The note name rekordbox prints for this position, in the spelling DJs
+    /// use for the wheel: minors on side A, majors on side B.
+    pub fn note(self: Key) []const u8 {
+        return wheel[self.number - 1][if (self.mode == .minor) 0 else 1];
+    }
+
     pub fn format(self: Key, writer: *std.Io.Writer) !void {
         try writer.print("{d}{c}", .{ self.number, self.side() });
     }
@@ -24,6 +30,22 @@ pub const Key = struct {
     pub fn isRelative(self: Key, other: Key) bool {
         return self.number == other.number and self.mode != other.mode;
     }
+};
+
+/// Row per wheel number: minor name, major name.
+const wheel = [12][2][]const u8{
+    .{ "Abm", "B" },
+    .{ "Ebm", "F#" },
+    .{ "Bbm", "Db" },
+    .{ "Fm", "Ab" },
+    .{ "Cm", "Eb" },
+    .{ "Gm", "Bb" },
+    .{ "Dm", "F" },
+    .{ "Am", "C" },
+    .{ "Em", "G" },
+    .{ "Bm", "D" },
+    .{ "F#m", "A" },
+    .{ "C#m", "E" },
 };
 
 pub const ParseError = error{Empty, BadNote, BadSuffix, BadLength};
@@ -224,4 +246,16 @@ test "distance wraps" {
     const b = try parse("Cm"); // 5A
     try std.testing.expectEqual(@as(i8, -3), distance(a, b));
     try std.testing.expectEqual(@as(i8, 3), distance(b, a));
+}
+
+test "note names round-trip through the wheel" {
+    var number: u8 = 1;
+    while (number <= 12) : (number += 1) {
+        for ([_]Mode{ .minor, .major }) |mode| {
+            const key = Key{ .number = number, .mode = mode };
+            const parsed = try parse(key.note());
+            try std.testing.expectEqual(key.number, parsed.number);
+            try std.testing.expectEqual(key.mode, parsed.mode);
+        }
+    }
 }

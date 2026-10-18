@@ -61,6 +61,8 @@ pub const Toggle = enum(u2) { hold, up, down };
 
 pub const Target = union(enum) {
     toggle: Toggle,
+    /// Switches the key display between wheel numbers and note names.
+    notation,
     row: Track,
     block: usize,
 };
@@ -128,6 +130,7 @@ pub const Drag = struct {
     pub const Action = union(enum) {
         none,
         toggle: Toggle,
+        toggle_notation,
         select_block: usize,
         move_block: struct { from: usize, gap: usize },
         drop_track: struct { gap: usize, track: Track },
@@ -137,6 +140,7 @@ pub const Drag = struct {
         self.* = .{ .press_at = p };
         return switch (target) {
             .toggle => |toggle| .{ .toggle = toggle },
+            .notation => .toggle_notation,
             .block => |index| blk: {
                 self.pressed = target;
                 break :blk .{ .select_block = index };
@@ -169,7 +173,7 @@ pub const Drag = struct {
         return switch (target) {
             .block => |from| .{ .move_block = .{ .from = from, .gap = to } },
             .row => |track| .{ .drop_track = .{ .gap = to, .track = track } },
-            .toggle => .none,
+            .toggle, .notation => .none,
         };
     }
 
@@ -337,6 +341,21 @@ test "a block drag reports the move and its source" {
         },
         else => return error.WrongAction,
     }
+}
+
+test "the notation toggle fires on the press and carries nothing" {
+    var map = HitMap.init(std.testing.allocator);
+    defer map.deinit();
+    map.append(.{ .x = 0, .y = 0, .w = 60, .h = 30 }, .notation);
+
+    var drag = Drag{};
+    const action = drag.press(.notation, .{ .x = 10, .y = 10 });
+    switch (action) {
+        .toggle_notation => {},
+        else => return error.WrongAction,
+    }
+    try std.testing.expect(!drag.motion(.{ .x = 90, .y = 60 }, 6, viewport, &map));
+    try std.testing.expect(isNone(drag.release()));
 }
 
 test "a toggle flips on the press and carries nothing" {

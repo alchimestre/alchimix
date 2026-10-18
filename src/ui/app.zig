@@ -29,6 +29,8 @@ pub const App = struct {
     filter_up: bool = true,
     filter_down: bool = true,
     filter_hold: bool = true,
+    /// Key display: wheel numbers by default, note names on request.
+    note_names: bool = false,
 
     /// Tempo window for suggestions, as a percentage of the seed's BPM.
     bpm_pct: f32 = 5,
@@ -314,6 +316,31 @@ pub const App = struct {
         self.hit_map.append(rectFrom(widget.rectScaleFromParent().r), .{ .toggle = toggle });
     }
 
+    /// The key chip doubles as the notation switch, so the current spelling is
+    /// always visible.
+    fn notationToggle(self: *App) void {
+        var chip = dvui.box(@src(), .{ .dir = .horizontal }, .{
+            .margin = .{ .x = 12, .y = 4 },
+            .padding = .{ .x = 8, .y = 2 },
+            .background = true,
+            .color_fill = .{ .color = Palette.field },
+            .id_extra = 90,
+        });
+        defer chip.deinit();
+
+        var buffer: [16]u8 = undefined;
+        const sample = if (self.note_names) "Am" else "8A";
+        const text = std.fmt.bufPrint(&buffer, "key {s}", .{sample}) catch "key";
+
+        labelStyled(@src(), text, .{
+            .color_text = .{ .color = Palette.secondary },
+            .font = metaFont(),
+            .id_extra = 91,
+        });
+
+        self.hit_map.append(rectFrom(chip.data().rectScaleFromParent().r), .notation);
+    }
+
     fn frameCanvas(self: *App) void {
         // Without an explicit fill the theme paints its own content surface,
         // which reads as a box stretching to the window edge.
@@ -418,6 +445,10 @@ pub const App = struct {
                 self.refresh() catch {};
                 dvui.refresh(null, @src(), null);
             },
+            .toggle_notation => {
+                self.note_names = !self.note_names;
+                dvui.refresh(null, @src(), null);
+            },
             .select_block => |index| self.pending_select = index,
             .drop_track => |drop| {
                 _ = self.crate.insertAt(drop.gap, drop.track) catch {};
@@ -495,7 +526,7 @@ pub const App = struct {
         });
 
         var meta_buffer: [32]u8 = undefined;
-        labelStyled(@src(), trackMeta(track, &meta_buffer), .{
+        labelStyled(@src(), trackMeta(track, &meta_buffer, self.note_names), .{
             .expand = .horizontal,
             .color_text = .{ .color = fade(Palette.ink, alpha) },
             .font = metaFont(),
@@ -524,7 +555,7 @@ fn cardColor(app: *const App, index: usize, is_seed: bool) dvui.Color {
 /// nothing, the drop does.
 fn pickRow(app: *App, row_index: usize, track: Track, step: ?Transition) void {
     var meta_buffer: [32]u8 = undefined;
-    const meta = trackMeta(track, &meta_buffer);
+    const meta = trackMeta(track, &meta_buffer, app.note_names);
 
     var outer = dvui.box(@src(), .{ .dir = .vertical }, .{
         .expand = .horizontal,
@@ -644,7 +675,7 @@ fn drawBlock(app: *App, index: usize, track: Track) Block {
     });
 
     var meta_buffer: [32]u8 = undefined;
-    labelStyled(@src(), trackMeta(track, &meta_buffer), .{
+    labelStyled(@src(), trackMeta(track, &meta_buffer, app.note_names), .{
         .expand = .horizontal,
         .color_text = .{ .color = Palette.ink },
         .font = metaFont(),
@@ -861,6 +892,7 @@ fn frameFooter(app: *App) void {
     app.energyToggle("=", Palette.green, &app.filter_hold, .hold);
     app.energyToggle("↑", Palette.orange, &app.filter_up, .up);
     app.energyToggle("↓", Palette.orange, &app.filter_down, .down);
+    app.notationToggle();
 
     var spacer = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal });
     spacer.deinit();
@@ -925,14 +957,15 @@ fn artistLine(track: Track, buffer: []u8) []const u8 {
 }
 
 /// Key then tempo, as rekordbox shows them.
-fn trackMeta(track: Track, buffer: []u8) []const u8 {
+fn trackMeta(track: Track, buffer: []u8, note_names: bool) []const u8 {
     const key = track.key orelse
         return std.fmt.bufPrint(buffer, "{d:.1} bpm", .{track.bpm}) catch "";
-    return std.fmt.bufPrint(buffer, "{d}{c} · {d:.1} bpm", .{
-        key.number,
-        key.side(),
-        track.bpm,
-    }) catch "";
+    var key_buffer: [8]u8 = undefined;
+    const label = if (note_names)
+        key.note()
+    else
+        std.fmt.bufPrint(&key_buffer, "{d}{c}", .{ key.number, key.side() }) catch "";
+    return std.fmt.bufPrint(buffer, "{s} · {d:.1} bpm", .{ label, track.bpm }) catch "";
 }
 
 fn stepColor(step: Transition) dvui.Color {
