@@ -712,17 +712,24 @@ pub const App = struct {
         lane.beat_raw = lane.beat;
     }
 
-    /// Stopping lands on a bar so lanes stay phase-aligned.
+    fn offsetOf(lane: *const Lane) f32 {
+        if (lane.analysis) |*analysis| return analysis.downbeatOffset();
+        return 0;
+    }
+
+    /// Stopping lands on a downbeat of the rekordbox bar, not on an arbitrary
+    /// multiple of four.
     fn snapBar(lane: *Lane) void {
-        lane.beat = @round(lane.beat / 4) * 4;
+        const offset = offsetOf(lane);
+        lane.beat = @round((lane.beat + offset) / 4) * 4 - offset;
         lane.beat_raw = lane.beat;
     }
 
     fn snapLane(lane: *Lane) void {
         const total: f32 = @floatFromInt(totalBeats(lane));
         lane.beat_raw = std.math.clamp(lane.beat_raw, 0, total);
-        // Bars: four beats per step.
-        lane.beat = @round(lane.beat_raw / 4) * 4;
+        const offset = offsetOf(lane);
+        lane.beat = @round((lane.beat_raw + offset) / 4) * 4 - offset;
     }
 
     fn snapBeat(lane: *Lane) void {
@@ -1203,9 +1210,9 @@ pub const App = struct {
                 const view = self.laneStart(lane);
                 if (lane.analysis) |*analysis| {
                     if (self.poly) {
-                        self.paintWavePoly(analysis, wave_rect, view);
+                        self.paintWavePoly(analysis, wave_rect, view, analysis.downbeatOffset());
                     } else {
-                        self.paintWave(analysis, wave_rect, view);
+                        self.paintWave(analysis, wave_rect, view, analysis.downbeatOffset());
                     }
                 } else {
                     labelStyled(@src(), "no analysis", .{
@@ -1279,7 +1286,7 @@ pub const App = struct {
     }
 
     /// Waveform and beat lines, drawn straight into the lane's rectangle.
-    fn paintWave(self: *App, analysis: *const pl.analysis.Analysis, rect: hit.Rect, start_beat: f32) void {
+    fn paintWave(self: *App, analysis: *const pl.analysis.Analysis, rect: hit.Rect, start_beat: f32, beat_offset: f32) void {
         if (rect.w <= 0 or rect.h <= 0) return;
         fillRect(self.allocator, rect.x, rect.y, rect.w, rect.h, Palette.field);
 
@@ -1313,12 +1320,12 @@ pub const App = struct {
             fillRectInto(&builder, rect.x + x, rect.bottom() - height, 6, height, bandColor(smoothed));
         }
 
-        self.paintBeats(rect, start_beat);
+        self.paintBeats(rect, start_beat, beat_offset);
     }
 
     /// The same waveform as filled heat bands: five concave polygons per lane
     /// instead of hundreds of rectangles.
-    fn paintWavePoly(self: *App, analysis: *const pl.analysis.Analysis, rect: hit.Rect, start_beat: f32) void {
+    fn paintWavePoly(self: *App, analysis: *const pl.analysis.Analysis, rect: hit.Rect, start_beat: f32, beat_offset: f32) void {
         if (rect.w <= 0 or rect.h <= 0) return;
         fillRect(self.allocator, rect.x, rect.y, rect.w, rect.h, Palette.field);
 
@@ -1378,18 +1385,18 @@ pub const App = struct {
             });
         }
 
-        self.paintBeats(rect, start_beat);
+        self.paintBeats(rect, start_beat, beat_offset);
     }
 
     fn totalBeatsF(analysis: *const pl.analysis.Analysis) f32 {
         return @floatFromInt(analysis.beats.len);
     }
 
-    fn paintBeats(self: *App, rect: hit.Rect, start_beat: f32) void {
+    fn paintBeats(self: *App, rect: hit.Rect, start_beat: f32, beat_offset: f32) void {
         var beat: f32 = @ceil(start_beat);
         while (beat < start_beat + beats_visible) : (beat += 1) {
             const bx = (beat - start_beat) / beats_visible * rect.w;
-            const bar = @mod(@as(i32, @intFromFloat(beat)), 4) == 0;
+            const bar = @mod(@as(i32, @intFromFloat(beat + beat_offset)), 4) == 0;
             fillRect(self.allocator, rect.x + bx, rect.y, if (bar) 2 else 1, rect.h, fade(Palette.muted, if (bar) 90 else 45));
         }
     }
