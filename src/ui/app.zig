@@ -872,8 +872,10 @@ pub const App = struct {
         if (index >= self.grid.items.len) return;
         const lane = &self.grid.items[index];
         self.foldLane(lane);
-        // A jog offset is deliberate: stopping must not snap it back to a bar.
-        if (!lane.manual) snapBar(lane);
+        // A stop always returns the lane to bar sync; the jog offset lives only
+        // while the lane keeps playing.
+        snapBar(lane);
+        lane.manual = false;
         lane.playing = false;
         self.rebuildMix();
         if (!self.anyPlaying()) self.stopClock();
@@ -883,7 +885,8 @@ pub const App = struct {
         for (self.grid.items) |*lane| {
             if (lane.playing) {
                 self.foldLane(lane);
-                if (!lane.manual) snapBar(lane);
+                snapBar(lane);
+                lane.manual = false;
                 lane.playing = false;
             }
         }
