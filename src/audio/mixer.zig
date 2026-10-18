@@ -142,7 +142,7 @@ pub const Mixer = struct {
         var finished: [max_lanes]*Slot = @splat(undefined);
         var finished_count: usize = 0;
         var reused = false;
-        var restarted = false;
+        var restarted_count: usize = 0;
         for (lanes) |lane| {
             var target: ?*Slot = null;
             for (&self.slots, 0..) |*slot, index| {
@@ -163,7 +163,7 @@ pub const Mixer = struct {
                 }
             }
             if (target) |slot| {
-                if (self.apply(slot, lane)) restarted = true;
+                if (self.apply(slot, lane)) restarted_count += 1;
             }
         }
 
@@ -176,9 +176,13 @@ pub const Mixer = struct {
 
         // Only a batch where nothing was already playing needs the joint gate;
         // a lane joining a running mix must not stall the others.
-        // A fresh batch and a retune both restart decoders; either way every
-        // restarted lane must begin on the same tick.
-        if ((!reused and lanes.len > 0) or restarted) self.gate = true;
+        // Gate only when every audible lane was restarted by this call: a
+        // single joining lane must not stall the lanes already playing.
+        var active_count: usize = 0;
+        for (&self.slots) |*slot| {
+            if (slot.active) active_count += 1;
+        }
+        if (active_count > 0 and restarted_count >= active_count) self.gate = true;
 
         self.mutex.unlock(self.io);
         for (finished[0..finished_count]) |slot| self.endRelease(slot);
@@ -199,6 +203,19 @@ pub const Mixer = struct {
         self.mutex.unlock(self.io);
 
         for (finished[0..finished_count]) |slot| self.endRelease(slot);
+    }
+
+    /// True when every audible lane has its prefill. The app holds its clock
+    /// until this is true, so the playhead starts with the sound.
+    pub fn ready(self: *Mixer) bool {
+        if (!self.mutex.tryLock()) return false;
+        defer self.mutex.unlock(self.io);
+
+        for (&self.slots) |*slot| {
+            if (!slot.active) continue;
+            if (slot.file != null and bufferedFrames(slot) < prefill_frames) return false;
+        }
+        return true;
     }
 
     pub fn active(self: *const Mixer) bool {
