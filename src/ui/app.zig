@@ -629,7 +629,7 @@ pub const App = struct {
     fn drawLane(self: *App, lane: *Lane, slot: usize) void {
         var lane_box = dvui.box(@src(), .{ .dir = .vertical }, .{
             .expand = .horizontal,
-            .min_size_content = .{ .w = 380, .h = 140 },
+            .min_size_content = .{ .w = 356, .h = 140 },
             .padding = .{ .x = 12, .y = 10 },
             .margin = .{ .y = 6 },
             .background = true,
@@ -658,38 +658,44 @@ pub const App = struct {
             .id_extra = 5200 + slot,
         });
 
-        var wave = dvui.box(@src(), .{ .dir = .horizontal }, .{
-            .expand = .horizontal,
-            .min_size_content = .{ .w = 380, .h = 64 },
-            .margin = .{ .y = 8 },
-            .id_extra = 5300 + slot,
-        });
-        defer wave.deinit();
-        const wave_rect = rectFrom(wave.data().contentRectScale().r);
-        lane.wave_w = wave_rect.w;
-
-        if (lane.analysis) |*analysis| {
-            self.paintWave(lane, analysis, wave_rect);
-        } else {
-            labelStyled(@src(), "no analysis", .{
-                .color_text = .{ .color = Palette.muted },
-                .font = metaFont(),
-                .margin = .{ .x = 6, .y = 6 },
-                .id_extra = 5400 + slot,
+        {
+            var wave = dvui.box(@src(), .{ .dir = .horizontal }, .{
+                .expand = .horizontal,
+                .min_size_content = .{ .w = 330, .h = 64 },
+                .margin = .{ .y = 8 },
+                .id_extra = 5300 + slot,
             });
-        }
-        self.hit_map.append(wave_rect, .{ .lane = slot });
+            defer wave.deinit();
+            const wave_rect = rectFrom(wave.data().contentRectScale().r);
+            lane.wave_w = wave_rect.w;
 
-        var bar = dvui.box(@src(), .{ .dir = .horizontal }, .{
-            .expand = .horizontal,
-            .min_size_content = .{ .w = 380, .h = 14 },
-            .id_extra = 5500 + slot,
-        });
-        defer bar.deinit();
-        const bar_rect = rectFrom(bar.data().contentRectScale().r);
-        fillRect(self.allocator, bar_rect.x, bar_rect.y + 5, bar_rect.w, 4, Palette.field);
-        fillRect(self.allocator, bar_rect.x, bar_rect.y + 5, bar_rect.w * lane.filter, 4, Palette.green);
-        self.hit_map.append(bar_rect, .{ .slider = slot });
+            if (lane.analysis) |*analysis| {
+                self.paintWave(lane, analysis, wave_rect);
+            } else {
+                labelStyled(@src(), "no analysis", .{
+                    .color_text = .{ .color = Palette.muted },
+                    .font = metaFont(),
+                    .margin = .{ .x = 6, .y = 6 },
+                    .id_extra = 5400 + slot,
+                });
+            }
+            self.hit_map.append(wave_rect, .{ .lane = slot });
+        }
+
+        {
+            var bar = dvui.box(@src(), .{ .dir = .horizontal }, .{
+                .expand = .horizontal,
+                .min_size_content = .{ .w = 330, .h = 18 },
+                .id_extra = 5500 + slot,
+            });
+            defer bar.deinit();
+            const bar_rect = rectFrom(bar.data().contentRectScale().r);
+            const track_y = bar_rect.y + 6;
+            fillRect(self.allocator, bar_rect.x, track_y, bar_rect.w, 6, Palette.hover);
+            fillRect(self.allocator, bar_rect.x, track_y, bar_rect.w * lane.filter, 6, Palette.green);
+            fillRect(self.allocator, bar_rect.x + bar_rect.w * lane.filter - 3, bar_rect.y + 2, 6, 14, Palette.ink);
+            self.hit_map.append(bar_rect, .{ .slider = slot });
+        }
     }
 
     /// Waveform and beat lines, drawn straight into the lane's rectangle.

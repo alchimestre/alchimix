@@ -141,7 +141,7 @@ pub const Source = struct {
             if (t.analysis_path.len == 0) return error.NoAnalysis;
 
             const root = std.fs.path.dirname(self.path) orelse return error.NoAnalysis;
-            const dat_path = try std.fmt.allocPrint(allocator, "{s}{s}", .{ root, t.analysis_path });
+            const dat_path = try std.fmt.allocPrint(allocator, "{s}/share{s}", .{ root, t.analysis_path });
             defer allocator.free(dat_path);
             const ext_path = try std.mem.replaceOwned(u8, allocator, dat_path, ".DAT", ".EXT");
             defer allocator.free(ext_path);
