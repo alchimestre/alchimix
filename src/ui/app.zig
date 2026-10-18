@@ -741,7 +741,9 @@ pub const App = struct {
         } else if (track.bpm > 0) @floatCast(track.bpm) else 128;
 
         // Seconds come from the analysed grid: the first beat is rarely at 0.
-        const beat = self.laneBeat(lane);
+        // A playing lane keeps its base beat: the mixer already started the
+        // decoder there, and resending the advanced position would restart it.
+        const beat = lane.beat;
         const start_s: f64 = if (lane.analysis) |*analysis|
             analysis.beatTimeMs(beat) / 1000
         else
@@ -806,10 +808,13 @@ pub const App = struct {
         // downbeats line up in time.
         const phase = @mod(self.masterBeat(), 4);
         const wait: f32 = if (!immediate and was_running and phase > 0.25) 4 - phase else 0;
-        lane.started_master = self.masterBeat() + wait;
+        // The decoder needs a moment to fill before it produces sound; the
+        // clock starts where the audio will, not where the process did.
+        const lead: f32 = @as(f32, @floatFromInt(pl.mixer.prefill_ms)) / 1000 * self.masterBpm() / 60;
+        lane.started_master = self.masterBeat() + wait + lead;
 
         const remaining: f32 = @as(f32, @floatFromInt(totalBeats(lane))) - lane.beat;
-        lane.end_ns = self.nowNs() + @as(i128, @intFromFloat((wait + @max(0, remaining)) * 60 / self.masterBpm() * 1_000_000_000));
+        lane.end_ns = self.nowNs() + @as(i128, @intFromFloat((wait + lead + @max(0, remaining)) * 60 / self.masterBpm() * 1_000_000_000));
         lane.playing = true;
         const delay_ms: u32 = @intFromFloat(wait * 60 / self.masterBpm() * 1000);
         self.rebuildMixDelayed(index, delay_ms);
@@ -901,14 +906,15 @@ pub const App = struct {
         self.rebuildMix();
     }
 
+    /// Filter changes go to the running mix; no decoder is restarted.
     fn restartDirty(self: *App) void {
+        var dirty = false;
         for (self.grid.items) |*lane| {
             if (!lane.filter_dirty) continue;
             lane.filter_dirty = false;
-            if (!lane.playing) continue;
-            // Rebuild the mix: the playhead keeps running.
-            self.rebuildMix();
+            if (lane.playing) dirty = true;
         }
+        if (dirty) self.rebuildMix();
     }
 
     /// Loads a grid lane for every block. Lanes survive edits: a lane matched

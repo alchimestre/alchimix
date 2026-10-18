@@ -16,6 +16,9 @@ pub fn main(init: std.process.Init) !void {
     if (std.mem.eql(u8, command, "suggest")) {
         return showSuggestions(init, args.next() orelse "");
     }
+    if (std.mem.eql(u8, command, "mix")) {
+        return renderMix(init, &args);
+    }
     usage();
 }
 
@@ -40,6 +43,7 @@ fn usage() void {
         \\  (no command)       open the block canvas
         \\  library            report what the collection holds
         \\  suggest <text>     rank what could follow the first match
+        \\  mix <out> <s> <files...>  render the mixer to raw f32le, no window
         \\
     , .{});
 }
@@ -81,6 +85,38 @@ fn resolveKey(init: std.process.Init, home: []const u8) ![]const u8 {
     const cache = try pl.rekordbox.cachedKeyPath(init.gpa, home);
     defer init.gpa.free(cache);
     return pl.rekordbox.readCachedKey(init.gpa, init.io, cache);
+}
+
+/// Renders the mixer's own output to a raw file so it can be compared with a
+/// reference render. No window, no audio device.
+fn renderMix(init: std.process.Init, args: *std.process.Args.Iterator) !void {
+    const out_path = args.next() orelse return error.MissingOutput;
+    const seconds = try std.fmt.parseFloat(f64, args.next() orelse "5");
+
+    var mixer = pl.mixer.Mixer.init(init.gpa, init.io);
+    defer mixer.deinit();
+
+    var lanes: [8]pl.mixer.Lane = undefined;
+    var count: usize = 0;
+    while (args.next()) |path| {
+        if (count >= lanes.len) break;
+        var track = pl.track.Track.init(count + 1, "", "");
+        track.file_path = path;
+        lanes[count] = .{
+            .track = track,
+            .start_s = 0,
+            .tempo = 1,
+            .filter = 1,
+            .keylock = true,
+        };
+        count += 1;
+    }
+    if (count == 0) return error.NoInputs;
+
+    const file = try std.Io.Dir.cwd().createFile(init.io, out_path, .{});
+    defer file.close(init.io);
+    try mixer.render(lanes[0..count], seconds, file);
+    std.debug.print("rendered\n", .{});
 }
 
 fn showLibrary(init: std.process.Init) !void {
