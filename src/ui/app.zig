@@ -75,6 +75,8 @@ pub const App = struct {
     filter_hold: bool = true,
     /// Key display: wheel numbers by default, note names on request.
     note_names: bool = false,
+    /// Beats shown across a preview lane: 16, 32 or 64.
+    beats_visible: u8 = 16,
     /// Candidates the tempo window admits, so the field shows its effect even
     /// when the top of the list looks the same.
     in_range: usize = 0,
@@ -122,8 +124,6 @@ pub const App = struct {
 
     /// Every visible row is a real widget, so the list is capped.
     const visible_rows = 60;
-    /// Beats shown across a preview lane.
-    const beats_visible: f32 = 16;
     const lane_panel_width: f32 = 380;
     /// Toolbar plus footer, measured once and fixed: reading them back made a
     /// resize lag a frame and flicker.
@@ -210,7 +210,7 @@ pub const App = struct {
 
         self.hit_map.reset();
 
-        frameToolbar();
+        frameToolbar(self);
         self.frameBody();
         frameFooter(self);
         self.drawGhost();
@@ -226,7 +226,7 @@ pub const App = struct {
         return true;
     }
 
-    fn frameToolbar() void {
+    fn frameToolbar(self: *App) void {
         var bar = dvui.box(@src(), .{ .dir = .horizontal }, .{
             .expand = .horizontal,
             .padding = .{ .x = 16, .y = 8 },
@@ -241,8 +241,47 @@ pub const App = struct {
             .margin = .{ .x = 4 },
         });
 
+        self.frameWidthSelector();
+
         var spacer = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal });
         spacer.deinit();
+    }
+
+    /// Three fixed spans. The active one is filled, so the current width reads
+    /// at a glance.
+    fn frameWidthSelector(self: *App) void {
+        var group = dvui.box(@src(), .{ .dir = .horizontal }, .{
+            .margin = .{ .x = 12, .y = 4 },
+            .padding = .{ .x = 2, .y = 2 },
+            .background = true,
+            .color_fill = .{ .color = Palette.field },
+            .id_extra = 95,
+        });
+        defer group.deinit();
+
+        for (hit.widths, 0..) |beats, slot| {
+            const active = self.beats_visible == beats;
+            var cell = dvui.box(@src(), .{ .dir = .horizontal }, .{
+                .min_size_content = .{ .w = 30, .h = 20 },
+                .margin = .{ .x = 2, .y = 1 },
+                .padding = .{ .x = 6, .y = 1 },
+                .background = true,
+                .color_fill = .{ .color = if (active) Palette.green else Palette.field },
+                .id_extra = 96 + slot,
+            });
+            defer cell.deinit();
+
+            var buffer: [4]u8 = undefined;
+            const text = std.fmt.bufPrint(&buffer, "{d}", .{beats}) catch "";
+            labelStyled(@src(), text, .{
+                .color_text = .{ .color = if (active) Palette.background else Palette.secondary },
+                .font = metaFont(),
+                .gravity_x = 0.5,
+                .gravity_y = 0.5,
+                .id_extra = 100 + slot,
+            });
+            self.hit_map.append(rectFrom(cell.data().contentRectScale().r), .{ .width = beats });
+        }
     }
 
     fn frameBody(self: *App) void {
@@ -599,6 +638,11 @@ pub const App = struct {
                 self.transport.seek(index, beat);
                 dvui.refresh(null, @src(), null);
             },
+            .set_width => |beats| {
+                if (!hit.isWidth(beats)) return;
+                self.beats_visible = beats;
+                dvui.refresh(null, @src(), null);
+            },
             .toggle_master_lock => {
                 self.master_locked = !self.master_locked;
                 if (!self.master_locked) self.master_bpm = self.masterBpm();
@@ -675,7 +719,11 @@ pub const App = struct {
     /// Beat at the left edge of a lane's window. Negative at the start of a
     /// track, before the first bar.
     fn laneStart(self: *App, index: usize) f32 {
-        return self.transport.beat(index) - beats_visible / 2;
+        return self.transport.beat(index) - self.visibleBeats() / 2;
+    }
+
+    fn visibleBeats(self: *const App) f32 {
+        return @floatFromInt(self.beats_visible);
     }
 
     pub fn animating(self: *const App) bool {
@@ -905,7 +953,7 @@ pub const App = struct {
         switch (pull.target) {
             .lane => |slot| {
                 if (slot >= self.grid.items.len) return;
-                const delta = self.hit_map.waveformDragBeats(slot, pull.dx, beats_visible) orelse return;
+                const delta = self.hit_map.waveformDragBeats(slot, pull.dx, self.visibleBeats()) orelse return;
                 if (self.transport.isPlaying(slot)) self.transport.jogPause(slot, .now);
                 self.transport.dragBeats(slot, delta);
                 dvui.refresh(null, @src(), null);
@@ -1043,7 +1091,7 @@ pub const App = struct {
             const bar_rect = rectFrom(bar.data().contentRectScale().r).clipped(col_rect);
 
             const total = totalBeats(lane);
-            const visible: f32 = @min(beats_visible, @as(f32, @floatFromInt(total)));
+            const visible: f32 = @min(self.visibleBeats(), @as(f32, @floatFromInt(total)));
             const window_start = @max(0, self.laneStart(index));
             const start = if (total > 0) window_start / @as(f32, @floatFromInt(total)) else 0;
             const span = if (total > 0)
@@ -1131,7 +1179,7 @@ pub const App = struct {
         const scale: f32 = 255 / @as(f32, @floatFromInt(@max(1, analysis.peak)));
         const samples_per_beat: f32 = @as(f32, pl.analysis.Analysis.samples_per_second) * 60 / bpm;
         const start_sample = start_beat * samples_per_beat;
-        const samples_per_px = samples_per_beat * beats_visible / rect.w;
+        const samples_per_px = samples_per_beat * self.visibleBeats() / rect.w;
 
         var builder = dvui.Path.Builder.init(self.allocator);
         defer builder.deinit();
@@ -1161,9 +1209,10 @@ pub const App = struct {
     }
 
     fn paintBeats(self: *App, rect: hit.Rect, start_beat: f32, beat_offset: f32) void {
+        const visible = self.visibleBeats();
         var beat: f32 = @ceil(start_beat);
-        while (beat < start_beat + beats_visible) : (beat += 1) {
-            const bx = (beat - start_beat) / beats_visible * rect.w;
+        while (beat < start_beat + visible) : (beat += 1) {
+            const bx = (beat - start_beat) / visible * rect.w;
             const bar = @mod(@as(i32, @intFromFloat(beat + beat_offset)), 4) == 0;
             fillRect(self.allocator, rect.x + bx, rect.y, if (bar) 2 else 1, rect.h, fade(Palette.muted, if (bar) 90 else 45));
         }
