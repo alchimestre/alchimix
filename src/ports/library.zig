@@ -3,6 +3,7 @@
 
 const std = @import("std");
 const Track = @import("../domain/track.zig").Track;
+const Analysis = @import("../domain/analysis.zig").Analysis;
 
 pub const Library = struct {
     ctx: *anyopaque,
@@ -15,6 +16,9 @@ pub const Library = struct {
         /// Tracks whose title or artist contains `needle`. An empty needle
         /// returns `all`.
         search: *const fn (ctx: *anyopaque, needle: []const u8) anyerror![]const Track,
+        /// The beat grid and preview waveform for one track. The caller owns
+        /// the result and must `deinit` it with the same allocator.
+        analysis: *const fn (ctx: *anyopaque, allocator: std.mem.Allocator, track_id: u64) anyerror!Analysis,
         /// Shown in the UI so the active source is never a guess.
         name: *const fn (ctx: *anyopaque) []const u8,
         deinit: *const fn (ctx: *anyopaque) void,
@@ -26,6 +30,10 @@ pub const Library = struct {
 
     pub fn search(self: Library, needle: []const u8) ![]const Track {
         return self.vtable.search(self.ctx, needle);
+    }
+
+    pub fn analysis(self: Library, allocator: std.mem.Allocator, track_id: u64) !Analysis {
+        return self.vtable.analysis(self.ctx, allocator, track_id);
     }
 
     pub fn name(self: Library) []const u8 {
