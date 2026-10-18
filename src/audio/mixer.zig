@@ -33,18 +33,19 @@ pub const Mixer = struct {
         self.* = undefined;
     }
 
-    pub fn play(self: *Mixer, index: usize, lane: Lane) void {
-        self.stop(index);
+    pub fn play(self: *Mixer, slot: usize, lane: Lane) void {
+        self.stop(slot);
+        const index = slot;
         if (index >= max_lanes) return;
         self.children[index] = self.spawn(lane);
     }
 
-    pub fn stop(self: *Mixer, index: usize) void {
-        if (index >= max_lanes) return;
-        if (self.children[index]) |*child| {
+    pub fn stop(self: *Mixer, slot: usize) void {
+        if (slot >= max_lanes) return;
+        if (self.children[slot]) |*child| {
             if (child.id) |pid| std.posix.kill(pid, std.posix.SIG.KILL) catch {};
             _ = child.wait(self.io) catch {};
-            self.children[index] = null;
+            self.children[slot] = null;
         }
     }
 
@@ -52,9 +53,9 @@ pub const Mixer = struct {
         for (0..max_lanes) |index| self.stop(index);
     }
 
-    pub fn running(self: *const Mixer, index: usize) bool {
-        if (index >= max_lanes) return false;
-        return self.children[index] != null;
+    pub fn running(self: *const Mixer, slot: usize) bool {
+        if (slot >= max_lanes) return false;
+        return self.children[slot] != null;
     }
 
     fn spawn(self: *Mixer, lane: Lane) ?std.process.Child {
