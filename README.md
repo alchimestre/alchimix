@@ -34,8 +34,7 @@ zig build test        # domain tests
 `ffplay`. Pause stops the process and remembers the offset, so play resumes from
 there; a stopped process would keep the audio device open. Starting another track stops the first.
 
-Each block carries a bar along its bottom: it fills as the snippet runs, and a
-click jumps to that point and plays the rest of it.
+Each block carries a bar along its bottom that fills as the snippet runs.
 
 ## Editing a crate
 
