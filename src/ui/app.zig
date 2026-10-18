@@ -1178,7 +1178,9 @@ pub const App = struct {
             .lane => |slot| {
                 if (slot >= self.grid.items.len) return;
                 const lane = &self.grid.items[slot];
-                if (lane.playing) self.stopLane(slot);
+                // Jog: pause for the duration of the drag and resume on
+                // release, instead of leaving the lane stopped.
+                if (lane.playing) self.jogPause(slot);
                 // Grab the wave: dragging right shows earlier audio.
                 lane.beat_raw -= pull.dx * beats_visible / @max(1, lane.wave_w);
                 snapBeat(lane);
@@ -1188,7 +1190,7 @@ pub const App = struct {
             .nav => |slot| {
                 if (slot >= self.grid.items.len) return;
                 const lane = &self.grid.items[slot];
-                if (lane.playing) self.stopLane(slot);
+                if (lane.playing) self.jogPause(slot);
                 const total: f32 = @floatFromInt(totalBeats(lane));
                 lane.beat_raw += pull.dx / @max(1, lane.nav_w) * total;
                 snapLane(lane);
