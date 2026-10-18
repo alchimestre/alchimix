@@ -39,6 +39,21 @@ pub const Analysis = struct {
         return @intCast(self.waveform.len * 1000 / samples_per_second);
     }
 
+    /// Time of a (possibly fractional) beat, from the analysed grid rather than
+    /// a nominal BPM. This is what the audio must be seeked to.
+    pub fn beatTimeMs(self: Analysis, beat: f32) f64 {
+        if (self.beats.len == 0 or beat <= 0) return 0;
+        const index: usize = @intFromFloat(@floor(beat));
+        if (index >= self.beats.len - 1) {
+            return @floatFromInt(self.beats[self.beats.len - 1].time_ms);
+        }
+        const a = self.beats[index];
+        const b = self.beats[index + 1];
+        const fraction: f64 = @floatCast(beat - @as(f32, @floatFromInt(index)));
+        return @as(f64, @floatFromInt(a.time_ms)) +
+            (@as(f64, @floatFromInt(b.time_ms)) - @as(f64, @floatFromInt(a.time_ms))) * fraction;
+    }
+
     pub fn bpm(self: Analysis) f32 {
         if (self.beats.len == 0) return 0;
         return self.beats[0].bpm;
