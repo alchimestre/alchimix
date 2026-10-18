@@ -825,9 +825,18 @@ pub const App = struct {
         if (index >= self.grid.items.len or index >= self.crate.len()) return;
         const lane = &self.grid.items[index];
         if (lane.analysis == null) return;
-        // A fresh lane starts on its grid's first beat, which is what rekordbox
-        // aligns. Snapping it to a bar would shift it by up to three beats
-        // against the other lane.
+        // A lane starts on its grid's first downbeat. Starting on beat 1 of
+        // the grid instead leaves the bars of two tracks up to three beats
+        // apart, which is visible and audible as unsynced.
+        if (!lane.manual) {
+            if (lane.analysis) |*analysis| {
+                const first: f32 = @floatFromInt(analysis.firstDownbeat());
+                if (lane.beat < first) {
+                    lane.beat = first;
+                    lane.beat_raw = first;
+                }
+            }
+        }
         const was_running = self.clock_running;
         if (was_running) {
             self.startClock();
