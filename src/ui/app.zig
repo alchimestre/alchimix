@@ -37,6 +37,10 @@ const Lane = struct {
     filter_h: f32 = 1,
     /// Left edge and width of the scrub bar, for click-to-seek.
     nav_x: f32 = 0,
+    /// Top edge of the filter strip, for click-to-set.
+    filter_y: f32 = 0,
+    /// The waveform was moved by hand, so this lane carries an offset.
+    manual: bool = false,
     /// Full width of the whole-track navigator, in physical pixels.
     nav_w: f32 = 1,
     /// Set when the source has no analysis for this track.
@@ -569,11 +573,19 @@ pub const App = struct {
                 self.note_names = !self.note_names;
                 dvui.refresh(null, @src(), null);
             },
+            .set_filter => |index| {
+                if (index >= self.grid.items.len) return;
+                const lane = &self.grid.items[index];
+                const from_top = std.math.clamp((self.last_point.y - lane.filter_y) / @max(1, lane.filter_h), 0, 1);
+                lane.filter = 1 - from_top;
+                if (lane.playing) lane.filter_dirty = true;
+                dvui.refresh(null, @src(), null);
+            },
             .seek_nav => |index| {
                 if (index >= self.grid.items.len) return;
                 const total: f32 = @floatFromInt(totalBeats(&self.grid.items[index]));
                 const fraction = std.math.clamp((self.last_point.x - self.grid.items[index].nav_x) / @max(1, self.grid.items[index].nav_w), 0, 1);
-                self.seekLane(index, fraction * total);
+                self.seekAll(self.grid.items[index].beat, fraction * total);
                 dvui.refresh(null, @src(), null);
             },
             .toggle_master_lock => {
@@ -651,7 +663,7 @@ pub const App = struct {
     }
 
     fn elapsedBeatsSince(self: *const App, started: i128) f32 {
-        const elapsed_ns: f64 = @floatFromInt(self.nowNs() - started);
+        const elapsed_ns: f64 = @floatFromInt(@max(0, self.nowNs() - started));
         return @as(f32, @floatCast(elapsed_ns / 1_000_000_000 * self.masterBpm() / 60));
     }
 
@@ -710,7 +722,12 @@ pub const App = struct {
         if (index >= self.grid.items.len or index >= self.crate.len()) return;
         const lane = &self.grid.items[index];
         if (lane.analysis == null) return;
-        lane.started_ns = self.nowNs();
+        // Untouched lanes always launch on a bar.
+        if (!lane.manual) snapBar(lane);
+        // Start the clock slightly after the processes so the playhead does not
+        // run ahead of the audio while ffplay opens the device.
+        const lead: i128 = 90_000_000;
+        lane.started_ns = self.nowNs() + lead;
         const remaining: f32 = @as(f32, @floatFromInt(totalBeats(lane))) - lane.beat;
         lane.end_ns = lane.started_ns + @as(i128, @intFromFloat(@max(0, remaining) * 60 / self.masterBpm() * 1_000_000_000));
         lane.playing = true;
@@ -751,6 +768,18 @@ pub const App = struct {
         self.foldLane(lane);
         self.mixer.stop(lane.slot);
         self.startLane(index);
+    }
+
+    /// Moves every lane by the same delta and snaps them to bars, so the grid
+    /// stays in phase. Lanes keep their relative offsets.
+    fn seekAll(self: *App, from: f32, to: f32) void {
+        const delta = to - from;
+        for (self.grid.items, 0..) |*lane, index| {
+            if (lane.playing) self.stopLane(index);
+            lane.beat = lane.beat + delta;
+            lane.beat_raw = lane.beat;
+            snapBar(lane);
+        }
     }
 
     /// Seek: the lane stops, moves, and resumes if it was running.
@@ -1027,15 +1056,14 @@ pub const App = struct {
                 // Grab the wave: dragging right shows earlier audio.
                 lane.beat_raw -= pull.dx * beats_visible / @max(1, lane.wave_w);
                 snapBeat(lane);
+                lane.manual = true;
                 dvui.refresh(null, @src(), null);
             },
             .nav => |slot| {
                 if (slot >= self.grid.items.len) return;
                 const lane = &self.grid.items[slot];
-                if (lane.playing) self.stopLane(slot);
                 const total: f32 = @floatFromInt(totalBeats(lane));
-                lane.beat_raw += pull.dx / @max(1, lane.nav_w) * total;
-                snapLane(lane);
+                self.seekAll(lane.beat, lane.beat + pull.dx / @max(1, lane.nav_w) * total);
                 dvui.refresh(null, @src(), null);
             },
             .filter => |slot| {
@@ -1122,9 +1150,10 @@ pub const App = struct {
                 .x = col_rect.x + col_rect.w - 18,
                 .y = col_rect.y,
                 .w = 18,
-                .h = @max(0, col_rect.h - 20),
+                .h = @max(0, col_rect.h - 24),
             };
             lane.filter_h = strip_rect.h;
+            lane.filter_y = strip_rect.y;
             fillRect(self.allocator, strip_rect.x + 6, strip_rect.y, 6, strip_rect.h, fade(Palette.muted, 55));
             const knob_y = strip_rect.y + (1 - lane.filter) * @max(0, strip_rect.h - 12);
             fillRect(self.allocator, strip_rect.x + 2, knob_y, 14, 12, Palette.green);

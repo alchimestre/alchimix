@@ -154,6 +154,8 @@ pub const Drag = struct {
         toggle_lane_play: usize,
         /// A press on a lane's scrub bar: jump the window to that point.
         seek_nav: usize,
+        /// A press on a lane's filter strip: set the value at that height.
+        set_filter: usize,
         select_block: usize,
         toggle_block: usize,
         move_block: struct { from: usize, gap: usize },
@@ -181,7 +183,11 @@ pub const Drag = struct {
                 self.pressed = target;
                 break :blk .{ .seek_nav = index };
             },
-            .row, .lane, .filter => blk: {
+            .filter => |index| blk: {
+                self.pressed = target;
+                break :blk .{ .set_filter = index };
+            },
+            .row, .lane => blk: {
                 self.pressed = target;
                 break :blk .none;
             },
