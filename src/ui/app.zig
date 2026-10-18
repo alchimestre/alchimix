@@ -41,6 +41,7 @@ pub const App = struct {
     io: std.Io,
     library: pl.library.Library,
     player: pl.player.Player,
+    mixer: pl.mixer.Mixer,
     crate: pl.crate.Crate,
 
     query: std.ArrayList(u8) = .empty,
@@ -64,6 +65,8 @@ pub const App = struct {
     /// window, and the playhead stays at the centre of each lane.
     grid_playing: bool = false,
     grid_started_at: i128 = 0,
+    /// When the current grid snippet runs out.
+    mix_end_ns: i128 = 0,
     /// Bars or polygon fills, for A/B comparison.
     poly: bool = false,
     /// Smoothed frame cost, shown next to the renderer switch.
@@ -110,12 +113,14 @@ pub const App = struct {
             .io = io,
             .library = library,
             .player = pl.player.Player.init(io, allocator),
+            .mixer = pl.mixer.Mixer.init(allocator, io),
             .crate = pl.crate.Crate.init(allocator),
             .hit_map = hit.HitMap.init(allocator),
         };
     }
 
     pub fn deinit(self: *App) void {
+        self.mixer.deinit();
         for (self.grid.items) |*lane| {
             if (lane.analysis) |*a| a.deinit(self.allocator);
         }
@@ -158,6 +163,9 @@ pub const App = struct {
         self.scale_hint = root_scale.s;
 
         self.player.poll();
+        if (self.grid_playing and std.Io.Timestamp.now(self.io, .awake).nanoseconds >= self.mix_end_ns) {
+            self.stopTransport();
+        }
 
         // The pointer pass reads the map the previous frame drew, then the map
         // is rebuilt from this frame's layout.
@@ -537,7 +545,7 @@ pub const App = struct {
             },
             .seek_nav => |index| {
                 if (index >= self.grid.items.len) return;
-                self.foldElapsed();
+                if (self.grid_playing) self.stopTransport() else self.foldElapsed();
                 const lane = &self.grid.items[index];
                 const total: f32 = @floatFromInt(totalBeats(lane));
                 const fraction = std.math.clamp((self.last_point.x - lane.nav_x) / @max(1, lane.nav_w), 0, 1);
@@ -551,11 +559,13 @@ pub const App = struct {
             },
             .toggle_transport => {
                 if (self.grid_playing) {
-                    self.foldElapsed();
-                    self.grid_playing = false;
+                    self.stopTransport();
                 } else {
-                    self.grid_started_at = std.Io.Timestamp.now(self.io, .awake).nanoseconds;
+                    const now = std.Io.Timestamp.now(self.io, .awake).nanoseconds;
+                    self.grid_started_at = now;
+                    self.mix_end_ns = now + @as(i128, pl.mixer.snippet_s) * 1_000_000_000;
                     self.grid_playing = true;
+                    self.startMix();
                 }
                 dvui.refresh(null, @src(), null);
             },
@@ -578,6 +588,46 @@ pub const App = struct {
                 dvui.refresh(null, @src(), null);
             },
         }
+    }
+
+    fn masterBpm(self: *const App) f32 {
+        if (self.crate.seedTrack()) |track| {
+            if (track.bpm > 0) return @floatCast(track.bpm);
+        }
+        for (self.grid.items) |*lane| {
+            if (lane.analysis) |*analysis| {
+                if (analysis.bpm() > 0) return analysis.bpm();
+            }
+        }
+        return 128;
+    }
+
+    /// Hands every lane to the mixer, starting on the playhead beat.
+    fn startMix(self: *App) void {
+        var lanes: [64]pl.mixer.Lane = undefined;
+        var count: usize = 0;
+        const master = self.masterBpm();
+
+        for (self.grid.items, 0..) |*lane, index| {
+            if (lane.analysis == null or index >= self.crate.len()) continue;
+            const track = self.crate.at(index).?.*;
+            const bpm: f32 = if (track.bpm > 0) @floatCast(track.bpm) else 128;
+            const beat = lane.start_beat + beats_visible / 2;
+            lanes[count] = .{
+                .track = track,
+                .start_s = beat * 60 / bpm,
+                .tempo = master / bpm,
+                .filter = lane.filter,
+            };
+            count += 1;
+        }
+        self.mixer.play(lanes[0..count]);
+    }
+
+    fn stopTransport(self: *App) void {
+        self.mixer.stop();
+        self.foldElapsed();
+        self.grid_playing = false;
     }
 
     fn elapsedBeats(self: *const App) f32 {
@@ -748,7 +798,7 @@ pub const App = struct {
         switch (pull.target) {
             .lane => |slot| {
                 if (slot >= self.grid.items.len) return;
-                self.foldElapsed();
+                if (self.grid_playing) self.stopTransport() else self.foldElapsed();
                 const lane = &self.grid.items[slot];
                 // Grab the wave: dragging right shows earlier audio.
                 lane.start_raw -= pull.dx * beats_visible / @max(1, lane.wave_w);
@@ -757,7 +807,7 @@ pub const App = struct {
             },
             .nav => |slot| {
                 if (slot >= self.grid.items.len) return;
-                self.foldElapsed();
+                if (self.grid_playing) self.stopTransport() else self.foldElapsed();
                 const lane = &self.grid.items[slot];
                 const total: f32 = @floatFromInt(totalBeats(lane));
                 lane.start_raw += pull.dx / @max(1, lane.nav_w) * total;
