@@ -39,6 +39,10 @@ pub fn build(b: *std.Build) void {
     });
     core.addLibraryPath(.{ .cwd_relative = b.pathJoin(&.{ prefix, "lib" }) });
     core.linkSystemLibrary("sqlcipher", .{});
+    // The audio stream must bind to the same SDL the window uses; without this
+    // the stream pointer comes back from a mismatched dynapi table.
+    core.addLibraryPath(.{ .cwd_relative = b.pathJoin(&.{ sdl_prefix, "lib" }) });
+    core.linkSystemLibrary("SDL3", .{});
     core.link_libc = true;
 
     const exe = b.addExecutable(.{
