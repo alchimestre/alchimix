@@ -31,6 +31,9 @@ pub const App = struct {
     filter_hold: bool = true,
     /// Key display: wheel numbers by default, note names on request.
     note_names: bool = false,
+    /// Candidates the tempo window admits, so the field shows its effect even
+    /// when the top of the list looks the same.
+    in_range: usize = 0,
 
     /// Tempo window for suggestions, as a percentage of the seed's BPM.
     bpm_pct: f32 = 5,
@@ -92,6 +95,7 @@ pub const App = struct {
         self.ranked = try pl.suggest.rank(self.allocator, seed.*, self.found, .{
             .tolerance_bpm = tolerance,
         });
+        self.in_range = self.ranked.len;
     }
 
     pub fn frame(self: *App) bool {
@@ -300,6 +304,14 @@ pub const App = struct {
         });
         const changed = entry.text_changed;
         entry.deinit();
+
+        var count_buffer: [24]u8 = undefined;
+        const count = std.fmt.bufPrint(&count_buffer, "{d} in range", .{self.in_range}) catch "";
+        labelStyled(@src(), count, .{
+            .color_text = .{ .color = Palette.muted },
+            .font = metaFont(),
+            .margin = .{ .x = 6, .y = 6 },
+        });
 
         if (!changed) return;
         const parsed = std.fmt.parseFloat(f32, std.mem.trim(u8, self.bpm_text.items, " ")) catch return;
