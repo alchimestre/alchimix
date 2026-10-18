@@ -71,6 +71,10 @@ pub const App = struct {
     poly: bool = false,
     /// Smoothed frame cost, shown next to the renderer switch.
     draw_ms: f32 = 0,
+    /// Master tempo: follows the seed while locked, manual otherwise.
+    master_bpm: f32 = 128,
+    master_text: std.ArrayList(u8) = .empty,
+    master_locked: bool = true,
     /// Where the last press landed, for controls that act on absolute position.
     last_point: hit.Point = .{},
 
@@ -126,6 +130,7 @@ pub const App = struct {
         }
         self.grid.deinit(self.allocator);
         self.selected.deinit(self.allocator);
+        self.master_text.deinit(self.allocator);
         self.hit_map.deinit();
         self.player.deinit();
         self.bpm_text.deinit(self.allocator);
@@ -553,6 +558,11 @@ pub const App = struct {
                 snapLane(lane);
                 dvui.refresh(null, @src(), null);
             },
+            .toggle_master_lock => {
+                self.master_locked = !self.master_locked;
+                if (!self.master_locked) self.master_bpm = self.masterBpm();
+                dvui.refresh(null, @src(), null);
+            },
             .toggle_wave_mode => {
                 self.poly = !self.poly;
                 dvui.refresh(null, @src(), null);
@@ -591,6 +601,7 @@ pub const App = struct {
     }
 
     fn masterBpm(self: *const App) f32 {
+        if (!self.master_locked) return self.master_bpm;
         if (self.crate.seedTrack()) |track| {
             if (track.bpm > 0) return @floatCast(track.bpm);
         }
@@ -745,6 +756,69 @@ pub const App = struct {
         return self.grid_playing;
     }
 
+    /// Master tempo at the right corner, with a lock that ties it to the seed.
+    fn frameMaster(self: *App) void {
+        var spacer = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal });
+        spacer.deinit();
+
+        labelStyled(@src(), "master", .{
+            .color_text = .{ .color = Palette.muted },
+            .font = metaFont(),
+            .margin = .{ .x = 12, .y = 6 },
+        });
+
+        if (self.master_locked) {
+            var buffer: [8]u8 = undefined;
+            const text = std.fmt.bufPrint(&buffer, "{d:.0}", .{self.masterBpm()}) catch "";
+            if (!std.mem.eql(u8, self.master_text.items, text)) {
+                self.master_text.clearRetainingCapacity();
+                self.master_text.appendSlice(self.allocator, text) catch {};
+            }
+        }
+        if (self.master_text.items.len == 0) {
+            self.master_text.appendSlice(self.allocator, "128") catch {};
+        }
+
+        var entry = dvui.textEntry(@src(), .{ .text = .{ .array_list = .{
+            .backing = &self.master_text,
+            .allocator = self.allocator,
+        } } }, .{
+            .min_size_content = .{ .w = 52, .h = 26 },
+            .padding = .{ .x = 6, .y = 2 },
+            .margin = .{ .x = 2, .y = 2 },
+            .background = true,
+            .color_fill = .{ .color = Palette.field },
+            .color_text = .{ .color = Palette.ink },
+            .font = metaFont(),
+            .id_extra = 70,
+        });
+        const changed = entry.text_changed;
+        entry.deinit();
+
+        if (changed) {
+            const parsed = std.fmt.parseFloat(f32, self.master_text.items) catch null;
+            if (parsed) |value| self.master_bpm = std.math.clamp(value, 40, 220);
+            self.master_locked = false;
+        }
+
+        {
+            var chip = dvui.box(@src(), .{ .dir = .horizontal }, .{
+                .margin = .{ .x = 6, .y = 4 },
+                .padding = .{ .x = 8, .y = 2 },
+                .background = true,
+                .color_fill = .{ .color = Palette.field },
+                .id_extra = 72,
+            });
+            defer chip.deinit();
+            labelStyled(@src(), if (self.master_locked) "locked" else "free", .{
+                .color_text = .{ .color = if (self.master_locked) Palette.green else Palette.secondary },
+                .font = metaFont(),
+                .id_extra = 73,
+            });
+            self.hit_map.append(rectFrom(chip.data().rectScaleFromParent().r), .master_lock);
+        }
+    }
+
     fn waveModeChip(self: *App) void {
         var chip = dvui.box(@src(), .{ .dir = .horizontal }, .{
             .margin = .{ .x = 8, .y = 4 },
@@ -848,6 +922,10 @@ pub const App = struct {
                 .id_extra = 9050 + index,
             });
             defer wave_row.deinit();
+
+            if (index < self.crate.len()) {
+                _ = transportButton(self, self.crate.at(index).?.*, 7000 + index);
+            }
 
             {
                 var wave = dvui.box(@src(), .{ .dir = .horizontal }, .{
@@ -1576,6 +1654,8 @@ fn frameFooter(app: *App) void {
             .id_extra = 100 + index,
         });
     }
+
+    app.frameMaster();
 }
 
 /// The list shows exactly the directions enabled in the footer.
