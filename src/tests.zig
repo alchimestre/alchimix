@@ -2,4 +2,5 @@
 
 test {
     _ = @import("ui/hit.zig");
+    _ = @import("ui/wave.zig");
 }

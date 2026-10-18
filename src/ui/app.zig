@@ -1599,7 +1599,7 @@ fn drawPauseBars(allocator: std.mem.Allocator, cx: f32, cy: f32, size: f32) void
 }
 
 /// Same colour at a given opacity, for the block being carried.
-fn fade(color: dvui.Color, alpha: u8) dvui.Color {
+pub fn fade(color: dvui.Color, alpha: u8) dvui.Color {
     var dimmed = color;
     dimmed.a = alpha;
     return dimmed;
@@ -1609,7 +1609,7 @@ fn fade(color: dvui.Color, alpha: u8) dvui.Color {
 /// the colour through orange towards white.
 /// Heat map: quiet reads indigo, body red and orange, peaks yellow. The
 /// waveform carries one amplitude byte, so loudness is the only information.
-fn bandColor(level: f32) dvui.Color {
+pub fn bandColor(level: f32) dvui.Color {
     const t = std.math.clamp(level, 0, 1);
     if (t < 0.25) return mixColor(Palette.heat0, Palette.heat1, t / 0.25);
     if (t < 0.5) return mixColor(Palette.heat1, Palette.heat2, (t - 0.25) / 0.25);
@@ -1617,7 +1617,7 @@ fn bandColor(level: f32) dvui.Color {
     return mixColor(Palette.heat3, Palette.heat4, (t - 0.75) / 0.25);
 }
 
-fn mixColor(a: dvui.Color, b: dvui.Color, t: f32) dvui.Color {
+pub fn mixColor(a: dvui.Color, b: dvui.Color, t: f32) dvui.Color {
     const f = std.math.clamp(t, 0, 1);
     return .{
         .r = @intFromFloat(@as(f32, @floatFromInt(a.r)) + (@as(f32, @floatFromInt(b.r)) - @as(f32, @floatFromInt(a.r))) * f),
@@ -1629,7 +1629,7 @@ fn mixColor(a: dvui.Color, b: dvui.Color, t: f32) dvui.Color {
 
 /// Same as `fillRect`, but reuses the builder: a waveform is hundreds of
 /// columns per frame and allocating a path for each one stalls the UI.
-fn fillRectInto(builder: *dvui.Path.Builder, x: f32, y: f32, w: f32, h: f32, color: dvui.Color) void {
+pub fn fillRectInto(builder: *dvui.Path.Builder, x: f32, y: f32, w: f32, h: f32, color: dvui.Color) void {
     builder.points.clearRetainingCapacity();
     builder.addPoint(.{ .x = x, .y = y });
     builder.addPoint(.{ .x = x + w, .y = y });
@@ -1842,30 +1842,30 @@ const Ghost = struct {
     const alpha: u8 = 0xaa;
 };
 
-const Palette = struct {
+pub const Palette = struct {
     /// One surface for the whole window: a second shade behind the canvas read
     /// as a box stretching to the edge.
-    const background = dvui.Color{ .r = 0x1e, .g = 0x1f, .b = 0x27, .a = 0xff };
-    const panel = dvui.Color{ .r = 0x1e, .g = 0x1f, .b = 0x27, .a = 0xff };
-    const block = dvui.Color{ .r = 0x34, .g = 0x37, .b = 0x46, .a = 0xff };
-    const selection = dvui.Color{ .r = 0x44, .g = 0x47, .b = 0x5a, .a = 0xff };
-    const hover = dvui.Color{ .r = 0x3a, .g = 0x3d, .b = 0x4d, .a = 0xff };
+    pub const background = dvui.Color{ .r = 0x1e, .g = 0x1f, .b = 0x27, .a = 0xff };
+    pub const panel = dvui.Color{ .r = 0x1e, .g = 0x1f, .b = 0x27, .a = 0xff };
+    pub const block = dvui.Color{ .r = 0x34, .g = 0x37, .b = 0x46, .a = 0xff };
+    pub const selection = dvui.Color{ .r = 0x44, .g = 0x47, .b = 0x5a, .a = 0xff };
+    pub const hover = dvui.Color{ .r = 0x3a, .g = 0x3d, .b = 0x4d, .a = 0xff };
     /// Heat ramp for loudness: deep indigo through red and orange to yellow.
-    const heat0 = dvui.Color{ .r = 0x1a, .g = 0x1f, .b = 0x4b, .a = 0xff };
-    const heat1 = dvui.Color{ .r = 0x6a, .g = 0x2c, .b = 0x8f, .a = 0xff };
-    const heat2 = dvui.Color{ .r = 0xc0, .g = 0x3a, .b = 0x2b, .a = 0xff };
-    const heat3 = dvui.Color{ .r = 0xf2, .g = 0x8f, .b = 0x24, .a = 0xff };
-    const heat4 = dvui.Color{ .r = 0xff, .g = 0xd7, .b = 0x5e, .a = 0xff };
-    const field = dvui.Color{ .r = 0x21, .g = 0x22, .b = 0x2c, .a = 0xff };
-    const ink = dvui.Color{ .r = 0xf8, .g = 0xf8, .b = 0xf2, .a = 0xff };
+    pub const heat0 = dvui.Color{ .r = 0x1a, .g = 0x1f, .b = 0x4b, .a = 0xff };
+    pub const heat1 = dvui.Color{ .r = 0x6a, .g = 0x2c, .b = 0x8f, .a = 0xff };
+    pub const heat2 = dvui.Color{ .r = 0xc0, .g = 0x3a, .b = 0x2b, .a = 0xff };
+    pub const heat3 = dvui.Color{ .r = 0xf2, .g = 0x8f, .b = 0x24, .a = 0xff };
+    pub const heat4 = dvui.Color{ .r = 0xff, .g = 0xd7, .b = 0x5e, .a = 0xff };
+    pub const field = dvui.Color{ .r = 0x21, .g = 0x22, .b = 0x2c, .a = 0xff };
+    pub const ink = dvui.Color{ .r = 0xf8, .g = 0xf8, .b = 0xf2, .a = 0xff };
     /// Dracula's own comment blue is about 3:1 on this background, which is too
     /// faint for anything but decoration. These two carry text.
-    const secondary = dvui.Color{ .r = 0xc3, .g = 0xc7, .b = 0xd9, .a = 0xff };
-    const muted = dvui.Color{ .r = 0x92, .g = 0x99, .b = 0xb8, .a = 0xff };
-    const green = dvui.Color{ .r = 0x50, .g = 0xfa, .b = 0x7b, .a = 0xff };
-    const yellow = dvui.Color{ .r = 0xf1, .g = 0xfa, .b = 0x8c, .a = 0xff };
-    const orange = dvui.Color{ .r = 0xff, .g = 0xb8, .b = 0x6c, .a = 0xff };
-    const purple = dvui.Color{ .r = 0xbd, .g = 0x93, .b = 0xf9, .a = 0xff };
-    const red = dvui.Color{ .r = 0xff, .g = 0x55, .b = 0x55, .a = 0xff };
+    pub const secondary = dvui.Color{ .r = 0xc3, .g = 0xc7, .b = 0xd9, .a = 0xff };
+    pub const muted = dvui.Color{ .r = 0x92, .g = 0x99, .b = 0xb8, .a = 0xff };
+    pub const green = dvui.Color{ .r = 0x50, .g = 0xfa, .b = 0x7b, .a = 0xff };
+    pub const yellow = dvui.Color{ .r = 0xf1, .g = 0xfa, .b = 0x8c, .a = 0xff };
+    pub const orange = dvui.Color{ .r = 0xff, .g = 0xb8, .b = 0x6c, .a = 0xff };
+    pub const purple = dvui.Color{ .r = 0xbd, .g = 0x93, .b = 0xf9, .a = 0xff };
+    pub const red = dvui.Color{ .r = 0xff, .g = 0x55, .b = 0x55, .a = 0xff };
 
 };
