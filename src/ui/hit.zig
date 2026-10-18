@@ -140,6 +140,8 @@ pub const Drag = struct {
         toggle: Toggle,
         toggle_notation,
         toggle_transport,
+        /// A press on a lane's scrub bar: jump the window to that point.
+        seek_nav: usize,
         select_block: usize,
         toggle_block: usize,
         move_block: struct { from: usize, gap: usize },
@@ -159,7 +161,11 @@ pub const Drag = struct {
                 self.pressed = target;
                 break :blk .{ .select_block = index };
             },
-            .row, .lane, .nav, .filter => blk: {
+            .nav => |index| blk: {
+                self.pressed = target;
+                break :blk .{ .seek_nav = index };
+            },
+            .row, .lane, .filter => blk: {
                 self.pressed = target;
                 break :blk .none;
             },

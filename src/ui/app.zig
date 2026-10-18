@@ -26,6 +26,8 @@ const Lane = struct {
     filter: f32 = 1,
     /// Height of the filter strip, in physical pixels.
     filter_h: f32 = 1,
+    /// Left edge and width of the scrub bar, for click-to-seek.
+    nav_x: f32 = 0,
     /// Full width of the whole-track navigator, in physical pixels.
     nav_w: f32 = 1,
     /// Set when the source has no analysis for this track.
@@ -62,6 +64,8 @@ pub const App = struct {
     grid_playing: bool = false,
     grid_beat: f32 = 0,
     grid_started_at: i128 = 0,
+    /// Where the last press landed, for controls that act on absolute position.
+    last_point: hit.Point = .{},
 
     /// Tempo window for suggestions, as a percentage of the seed's BPM.
     bpm_pct: f32 = 5,
@@ -484,6 +488,7 @@ pub const App = struct {
                 .press => {
                     if (!mouse.button.pointer()) continue;
                     const target = self.hit_map.hit(p) orelse continue;
+                    self.last_point = p;
                     self.apply(self.drag.press(target, p, mouse.mod.shift()));
                 },
                 .motion => {
@@ -518,6 +523,15 @@ pub const App = struct {
             },
             .toggle_notation => {
                 self.note_names = !self.note_names;
+                dvui.refresh(null, @src(), null);
+            },
+            .seek_nav => |index| {
+                if (index >= self.grid.items.len) return;
+                const lane = &self.grid.items[index];
+                const total: f32 = @floatFromInt(totalBeats(lane));
+                const fraction = std.math.clamp((self.last_point.x - lane.nav_x) / @max(1, lane.nav_w), 0, 1);
+                lane.start_raw = fraction * total;
+                snapLane(lane);
                 dvui.refresh(null, @src(), null);
             },
             .toggle_transport => {
@@ -665,8 +679,8 @@ pub const App = struct {
 
         var col = dvui.box(@src(), .{ .dir = .vertical }, .{
             .expand = .vertical,
-            .min_size_content = .{ .w = 420, .h = 0 },
-            .max_size_content = .{ .w = 420, .h = 100000 },
+            .min_size_content = .{ .w = 630, .h = 0 },
+            .max_size_content = .{ .w = 630, .h = 100000 },
             .margin = .{ .x = 8, .y = 6 },
             .padding = .{ .x = 8, .y = 4 },
             .background = true,
@@ -674,6 +688,7 @@ pub const App = struct {
             .id_extra = 9000 + index,
         });
         defer col.deinit();
+        const col_rect = rectFrom(col.data().contentRectScale().r);
 
         {
             var wave_row = dvui.box(@src(), .{ .dir = .horizontal }, .{
@@ -689,7 +704,7 @@ pub const App = struct {
                     .id_extra = 9100 + index,
                 });
                 defer wave.deinit();
-                const wave_rect = rectFrom(wave.data().contentRectScale().r);
+                const wave_rect = rectFrom(wave.data().contentRectScale().r).clipped(col_rect);
                 lane.wave_w = wave_rect.w;
 
                 if (lane.analysis) |*analysis| {
@@ -722,7 +737,7 @@ pub const App = struct {
                     .id_extra = 9400 + index,
                 });
                 defer strip.deinit();
-                const strip_rect = rectFrom(strip.data().contentRectScale().r);
+                const strip_rect = rectFrom(strip.data().contentRectScale().r).clipped(col_rect);
                 lane.filter_h = strip_rect.h;
                 fillRect(self.allocator, strip_rect.x + 6, strip_rect.y, 6, strip_rect.h, fade(Palette.muted, 55));
                 const knob_y = strip_rect.y + (1 - lane.filter) * @max(0, strip_rect.h - 12);
@@ -738,8 +753,9 @@ pub const App = struct {
                 .id_extra = 9300 + index,
             });
             defer bar.deinit();
-            const bar_rect = rectFrom(bar.data().contentRectScale().r);
+            const bar_rect = rectFrom(bar.data().contentRectScale().r).clipped(col_rect);
             lane.nav_w = bar_rect.w;
+            lane.nav_x = bar_rect.x;
 
             const total = totalBeats(lane);
             const visible: f32 = @min(beats_visible, @as(f32, @floatFromInt(total)));
@@ -784,6 +800,7 @@ pub const App = struct {
         const samples_per_px = samples_per_beat * beats_visible / rect.w;
 
         var x: f32 = 0;
+        var smoothed: f32 = 0.5;
         while (x < rect.w) : (x += 2) {
             const from: usize = @intFromFloat(@max(0, start_sample + x * samples_per_px));
             if (from >= analysis.waveform.len) break;
@@ -796,8 +813,14 @@ pub const App = struct {
                 sum += value;
             }
             const mean: f32 = @floatFromInt(sum);
-            const height = rect.h * (@as(f32, @floatFromInt(peak)) / 255);
-            fillRect(self.allocator, rect.x + x, rect.bottom() - height, 1.5, height, waveColor(mean / @as(f32, @floatFromInt(@max(1, to - from))), peak));
+            const average = mean / @as(f32, @floatFromInt(@max(1, to - from)));
+            // The envelope follows the average so the shape reads as a
+            // waveform; peak-only columns saturate into a solid block.
+            const level = average * 0.7 + @as(f32, @floatFromInt(peak)) * 0.3;
+            const height = rect.h * (level / 255);
+            const ratio = 1 - mean / @as(f32, @floatFromInt(@max(1, peak)));
+            smoothed = smoothed * 0.65 + ratio * 0.35;
+            fillRect(self.allocator, rect.x + x, rect.bottom() - height, 1.5, height, bandColor(smoothed));
         }
 
         var beat: f32 = @ceil(lane.start_beat);
@@ -827,7 +850,8 @@ pub const App = struct {
             }
             const mean: f32 = @floatFromInt(sum);
             const height = rect.h * (@as(f32, @floatFromInt(peak)) / 255);
-            fillRect(allocator, rect.x + x, rect.bottom() - height, 1.5, height, waveColor(mean / @as(f32, @floatFromInt(@max(1, to - from))), peak));
+            const ratio = 1 - mean / @as(f32, @floatFromInt(@max(1, peak)));
+            fillRect(allocator, rect.x + x, rect.bottom() - height, 2, height, bandColor(ratio));
         }
     }
 
@@ -1236,9 +1260,7 @@ fn fade(color: dvui.Color, alpha: u8) dvui.Color {
 
 /// Pioneer's colour waveform in spirit: steady bass reads blue, transients push
 /// the colour through orange towards white.
-fn waveColor(mean: f32, peak: u8) dvui.Color {
-    if (peak == 0) return Palette.bass;
-    const ratio = 1 - mean / @as(f32, @floatFromInt(peak));
+fn bandColor(ratio: f32) dvui.Color {
     if (ratio < 0.5) return mixColor(Palette.bass, Palette.mid, ratio * 2);
     return mixColor(Palette.mid, Palette.high, (ratio - 0.5) * 2);
 }
