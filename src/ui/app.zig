@@ -153,12 +153,6 @@ pub const App = struct {
 
         var spacer = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal });
         spacer.deinit();
-
-        labelStyled(@src(), self.library.name(), .{ .color_text = .{ .color = Palette.secondary } });
-        labelFmt(@src(), "{d} in the crate", .{self.crate.len()}, .{
-            .color_text = .{ .color = Palette.secondary },
-            .margin = .{ .x = 16 },
-        });
     }
 
     fn frameBody(self: *App) void {
