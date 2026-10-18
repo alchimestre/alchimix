@@ -872,7 +872,8 @@ pub const App = struct {
         if (index >= self.grid.items.len) return;
         const lane = &self.grid.items[index];
         self.foldLane(lane);
-        snapBar(lane);
+        // A jog offset is deliberate: stopping must not snap it back to a bar.
+        if (!lane.manual) snapBar(lane);
         lane.playing = false;
         self.rebuildMix();
         if (!self.anyPlaying()) self.stopClock();
@@ -882,7 +883,7 @@ pub const App = struct {
         for (self.grid.items) |*lane| {
             if (lane.playing) {
                 self.foldLane(lane);
-                snapBar(lane);
+                if (!lane.manual) snapBar(lane);
                 lane.playing = false;
             }
         }
@@ -917,7 +918,7 @@ pub const App = struct {
         self.grid.items[index].beat_raw = beat;
         snapLane(&self.grid.items[index]);
         self.grid.items[index].manual = false;
-        if (was_playing) self.startLane(index);
+        if (was_playing) self.startLaneJoin(index, true);
     }
 
     pub fn animating(self: *const App) bool {
@@ -938,7 +939,9 @@ pub const App = struct {
     fn jogResume(self: *App) void {
         const index = self.jog_lane orelse return;
         self.jog_lane = null;
-        if (index < self.grid.items.len) self.startLane(index);
+        // Resume on the beat the jog left the lane at, without waiting for
+        // the next master bar: the jog is the only way to leave bar sync.
+        if (index < self.grid.items.len) self.startLaneJoin(index, true);
     }
 
     /// Pins the clock to its current beat, so a tempo change does not jump it.
