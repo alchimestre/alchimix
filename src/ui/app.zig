@@ -89,8 +89,6 @@ pub const App = struct {
     master_locked: bool = true,
     /// Keep the pitch while the tempo changes.
     pitch_lock: bool = true,
-    demo_started: bool = false,
-    demo_frames: usize = 0,
     /// The master field had keyboard focus last frame, to detect leaving it.
     master_focus: bool = false,
 
@@ -192,26 +190,8 @@ pub const App = struct {
 
         // The pointer pass reads the map the previous frame drew, then the map
         // is rebuilt from this frame's layout.
-        if (self.crate.len() == 0) {
-            self.refresh() catch {};
-            if (self.found.len >= 3) {
-                for (0..3) |i| _ = self.crate.insertAt(i, self.found[i]) catch {};
-            }
-        }
         self.handlePointer();
         self.syncGrid();
-        if (!self.demo_started and self.grid.items.len >= 2) {
-            self.demo_started = true;
-            self.startLaneJoin(0, true);
-            self.startLaneJoin(1, true);
-        }
-        self.demo_frames += 1;
-        if (self.demo_frames == 100) {
-            std.debug.print("demo: tempo change\n", .{});
-            self.master_locked = false;
-            self.master_bpm = 132;
-            self.retunePlaying();
-        }
 
         self.hit_map.reset();
 
@@ -809,7 +789,6 @@ pub const App = struct {
         }
 
         // Nothing audible changed: leave the running pipeline alone.
-        std.debug.print("rebuild count={d} key={d} old={d} active={} master={d:.2}\n", .{ count, key, self.mix_key, self.mixer.active(), self.masterBpm() });
         if (count > 0 and key == self.mix_key and self.mixer.active()) return;
 
         self.mix_key = key;
@@ -829,10 +808,13 @@ pub const App = struct {
         // downbeats line up in time.
         const phase = @mod(self.masterBeat(), 4);
         const wait: f32 = if (!immediate and was_running and phase > 0.25) 4 - phase else 0;
-        lane.started_master = self.masterBeat() + wait;
+        // The decoder needs a moment to fill before it produces sound; the
+        // clock starts where the audio will, not where the process did.
+        const lead: f32 = @as(f32, @floatFromInt(pl.mixer.prefill_ms)) / 1000 * self.masterBpm() / 60;
+        lane.started_master = self.masterBeat() + wait + lead;
 
         const remaining: f32 = @as(f32, @floatFromInt(totalBeats(lane))) - lane.beat;
-        lane.end_ns = self.nowNs() + @as(i128, @intFromFloat((wait + @max(0, remaining)) * 60 / self.masterBpm() * 1_000_000_000));
+        lane.end_ns = self.nowNs() + @as(i128, @intFromFloat((wait + lead + @max(0, remaining)) * 60 / self.masterBpm() * 1_000_000_000));
         lane.playing = true;
         const delay_ms: u32 = @intFromFloat(wait * 60 / self.masterBpm() * 1000);
         self.rebuildMixDelayed(index, delay_ms);
