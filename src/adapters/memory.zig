@@ -4,6 +4,7 @@ const std = @import("std");
 const track = @import("../domain/track.zig");
 const camelot = @import("../domain/camelot.zig");
 const library = @import("../ports/library.zig");
+const analysis = @import("../domain/analysis.zig");
 
 const Track = track.Track;
 
@@ -41,6 +42,11 @@ pub const Source = struct {
         return ctxOf(ctx).items.items;
     }
 
+    /// The demo library carries no audio, so it has no grid to offer.
+    fn analysisFn(_: *anyopaque, _: std.mem.Allocator, _: u64) anyerror!analysis.Analysis {
+        return error.NoAnalysis;
+    }
+
     fn searchFn(ctx: *anyopaque, needle: []const u8) anyerror![]const Track {
         const self = ctxOf(ctx);
         self.hits.clearRetainingCapacity();
@@ -64,6 +70,7 @@ pub const Source = struct {
     const vtable = library.Library.VTable{
         .all = allFn,
         .search = searchFn,
+        .analysis = analysisFn,
         .name = nameFn,
         .deinit = deinitFn,
     };

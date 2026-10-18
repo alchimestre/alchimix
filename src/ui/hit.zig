@@ -65,6 +65,10 @@ pub const Target = union(enum) {
     notation,
     row: Track,
     block: usize,
+    /// The waveform of a preview lane: dragging moves its start beat.
+    lane: usize,
+    /// The filter slider of a preview lane.
+    slider: usize,
 };
 
 /// Screen rectangles for one frame, with what each one means.
@@ -149,16 +153,39 @@ pub const Drag = struct {
                 self.pressed = target;
                 break :blk .{ .select_block = index };
             },
-            .row => blk: {
+            .row, .lane, .slider => blk: {
                 self.pressed = target;
                 break :blk .none;
             },
         };
     }
 
+    pub const Pull = struct {
+        target: Target,
+        /// Movement since the previous call, in screen units.
+        dx: f32,
+    };
+
+    /// Horizontal movement of a lane or a slider, measured incrementally so the
+    /// caller can apply it without knowing the press point.
+    pub fn pull(self: *Drag, p: Point) ?Pull {
+        const pressed = self.pressed orelse return null;
+        switch (pressed) {
+            .lane, .slider => {},
+            else => return null,
+        }
+        const dx = p.x - self.press_at.x;
+        self.press_at = p;
+        return .{ .target = pressed, .dx = dx };
+    }
+
     /// True when the frame has something new to draw.
     pub fn motion(self: *Drag, p: Point, threshold: f32, canvas: Rect, hit_map: *const HitMap) bool {
         const pressed = self.pressed orelse return false;
+        switch (pressed) {
+            .lane, .slider => return false,
+            else => {},
+        }
         if (self.carrying == null) {
             if (!moved(self.press_at, p, threshold)) return false;
             self.carrying = pressed;
@@ -177,7 +204,7 @@ pub const Drag = struct {
         return switch (target) {
             .block => |from| .{ .move_block = .{ .from = from, .gap = to } },
             .row => |track| .{ .drop_track = .{ .gap = to, .track = track } },
-            .toggle, .notation => .none,
+            .toggle, .notation, .lane, .slider => .none,
         };
     }
 
@@ -390,4 +417,37 @@ test "a shift press toggles the block without carrying it" {
     }
     try std.testing.expect(!drag.motion(.{ .x = 10, .y = 200 }, 6, viewport, &map));
     try std.testing.expect(isNone(drag.release()));
+}
+
+test "a lane press pulls horizontal movement and carries nothing" {
+    var map = HitMap.init(std.testing.allocator);
+    defer map.deinit();
+    map.append(.{ .x = 0, .y = 0, .w = 400, .h = 80 }, .{ .lane = 1 });
+
+    var drag = Drag{};
+    _ = drag.press(.{ .lane = 1 }, .{ .x = 100, .y = 20 }, false);
+
+    const pull = drag.pull(.{ .x = 130, .y = 20 }).?;
+    try std.testing.expectEqual(@as(f32, 30), pull.dx);
+    switch (pull.target) {
+        .lane => |lane| try std.testing.expectEqual(@as(usize, 1), lane),
+        else => return error.WrongTarget,
+    }
+
+    const second = drag.pull(.{ .x = 140, .y = 20 }).?;
+    try std.testing.expectEqual(@as(f32, 10), second.dx);
+    try std.testing.expect(drag.carriedTrack() == null);
+    try std.testing.expect(isNone(drag.release()));
+}
+
+test "a slider press pulls without a gap" {
+    var map = HitMap.init(std.testing.allocator);
+    defer map.deinit();
+    map.append(.{ .x = 0, .y = 0, .w = 400, .h = 20 }, .{ .slider = 0 });
+
+    var drag = Drag{};
+    _ = drag.press(.{ .slider = 0 }, .{ .x = 10, .y = 10 }, false);
+    const pull = drag.pull(.{ .x = 25, .y = 10 }).?;
+    try std.testing.expectEqual(@as(f32, 15), pull.dx);
+    try std.testing.expect(drag.gapIndex() == null);
 }
