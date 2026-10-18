@@ -75,8 +75,6 @@ pub const App = struct {
     /// One grid lane per block, in crate order.
     grid: std.ArrayListUnmanaged(Lane) = .empty,
     
-    /// Smoothed frame cost, shown next to the renderer switch.
-    draw_ms: f32 = 0,
     /// Fingerprint of the last mix, so unrelated UI work never restarts audio.
     mix_key: u64 = 0,
     /// Master clock every playing lane is derived from.
@@ -174,7 +172,6 @@ pub const App = struct {
     }
 
     pub fn frame(self: *App) bool {
-        const frame_started = std.Io.Timestamp.now(self.io, .awake).nanoseconds;
         var root = dvui.box(@src(), .{ .dir = .vertical }, .{
             .expand = .both,
             .background = true,
@@ -211,9 +208,6 @@ pub const App = struct {
             dvui.refresh(null, @src(), null);
         }
 
-        const frame_ended = std.Io.Timestamp.now(self.io, .awake).nanoseconds;
-        const frame_ms: f32 = @floatCast(@as(f64, @floatFromInt(frame_ended - frame_started)) / 1_000_000);
-        self.draw_ms = self.draw_ms * 0.85 + frame_ms * 0.15;
         return true;
     }
 
@@ -1797,19 +1791,40 @@ fn pointFrom(point: dvui.Point.Physical) hit.Point {
 
 /// Along the bottom: the direction filters on the left, the tempo window and
 /// the colour key on the right.
+/// The strip under the suggestion column: the direction filters centred in the
+/// column's width, matching the list above.
+fn frameSuggestFooter(app: *App) void {
+    var col = dvui.box(@src(), .{ .dir = .horizontal }, .{
+        .min_size_content = .{ .w = 420 },
+        .max_size_content = .{ .w = 420, .h = 100000 },
+        .expand = .vertical,
+    });
+    defer col.deinit();
+
+    var left = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal });
+    left.deinit();
+
+    app.energyToggle("=", Palette.green, &app.filter_hold, .hold);
+    app.energyToggle("↑", Palette.orange, &app.filter_up, .up);
+    app.energyToggle("↓", Palette.orange, &app.filter_down, .down);
+
+    var right = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal });
+    right.deinit();
+}
+
 fn frameFooter(app: *App) void {
     var bar = dvui.box(@src(), .{ .dir = .horizontal }, .{
         .expand = .horizontal,
         .min_size_content = .{ .h = 40 },
-        .padding = .{ .x = 20, .y = 6 },
+        .padding = .{ .x = 0, .y = 6 },
         .background = true,
         .color_fill = .{ .color = Palette.panel },
     });
     defer bar.deinit();
 
-    app.energyToggle("=", Palette.green, &app.filter_hold, .hold);
-    app.energyToggle("↑", Palette.orange, &app.filter_up, .up);
-    app.energyToggle("↓", Palette.orange, &app.filter_down, .down);
+    frameSuggestFooter(app);
+
+    // Key and tempo sit past the suggestion column, not under it.
     app.notationToggle();
     app.frameBpmWindow();
 
