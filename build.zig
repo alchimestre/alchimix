@@ -39,8 +39,6 @@ pub fn build(b: *std.Build) void {
     });
     core.addLibraryPath(.{ .cwd_relative = b.pathJoin(&.{ prefix, "lib" }) });
     core.linkSystemLibrary("sqlcipher", .{});
-    core.addLibraryPath(.{ .cwd_relative = b.pathJoin(&.{ sdl_prefix, "lib" }) });
-    core.linkSystemLibrary("SDL3", .{});
     core.link_libc = true;
 
     const exe = b.addExecutable(.{
