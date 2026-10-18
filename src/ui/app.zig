@@ -43,6 +43,9 @@ pub const App = struct {
     pointer: hit.Point = .{},
     /// Visible area of the canvas: a track only lands when released over it.
     canvas: hit.Rect = .{},
+    /// Heights of the fixed strips, so the body cannot push the footer away.
+    toolbar_h: f32 = 0,
+    footer_h: f32 = 0,
     /// Visible area of the suggestion list, so a row scrolled out of sight
     /// keeps its presses inside it.
     list: hit.Rect = .{},
@@ -133,6 +136,7 @@ pub const App = struct {
             .color_fill = .{ .color = Palette.background },
         });
         defer bar.deinit();
+        self.toolbar_h = bar.data().borderRectScale().r.h / bar.data().borderRectScale().s;
 
         labelStyled(@src(), "playlister", .{
             .font = titleFont(),
@@ -151,7 +155,13 @@ pub const App = struct {
     }
 
     fn frameBody(self: *App) void {
-        var body = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .both });
+        // The body gets exactly the space the strips leave; without the cap a
+        // tall canvas grows the layout and the footer leaves the window.
+        var body = dvui.box(@src(), .{ .dir = .horizontal }, .{
+            .expand = .both,
+            .min_size_content = .{ .h = 0 },
+            .max_size_content = .{ .w = 100000, .h = @max(120, self.viewport_h - self.toolbar_h - self.footer_h) },
+        });
         defer body.deinit();
 
         self.framePicker();
@@ -349,6 +359,7 @@ pub const App = struct {
             .padding = .{ .x = 24, .y = 24 },
             .background = true,
             .color_fill = .{ .color = Palette.background },
+            .min_size_content = .{ .h = 0 },
         });
         defer canvas.deinit();
         self.canvas = rectFrom(canvas.data().borderRectScale().r);
@@ -883,6 +894,7 @@ fn frameFooter(app: *App) void {
         .color_fill = .{ .color = Palette.panel },
     });
     defer bar.deinit();
+    app.footer_h = bar.data().borderRectScale().r.h / app.scale_hint;
 
     labelStyled(@src(), "energy", .{
         .color_text = .{ .color = Palette.muted },
