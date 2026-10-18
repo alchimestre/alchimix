@@ -22,6 +22,10 @@ const Lane = struct {
     start_beat: f32 = 0,
     /// Unrounded drag position, so sub-beat movements are not lost to snapping.
     start_raw: f32 = 0,
+    /// Band filter, 0 closed to 1 open.
+    filter: f32 = 1,
+    /// Height of the filter strip, in physical pixels.
+    filter_h: f32 = 1,
     /// Full width of the whole-track navigator, in physical pixels.
     nav_w: f32 = 1,
     /// Set when the source has no analysis for this track.
@@ -54,6 +58,10 @@ pub const App = struct {
     selected: std.ArrayListUnmanaged(usize) = .empty,
     /// One grid lane per block, in crate order.
     grid: std.ArrayListUnmanaged(Lane) = .empty,
+    /// Shared grid transport: a beat clock both lanes follow.
+    grid_playing: bool = false,
+    grid_beat: f32 = 0,
+    grid_started_at: i128 = 0,
 
     /// Tempo window for suggestions, as a percentage of the seed's BPM.
     bpm_pct: f32 = 5,
@@ -66,12 +74,7 @@ pub const App = struct {
     pointer: hit.Point = .{},
     /// Visible area of the canvas: a track only lands when released over it.
     canvas: hit.Rect = .{},
-    /// Heights of the fixed strips, so the body cannot push the footer away.
-    toolbar_h: f32 = 0,
-    footer_h: f32 = 0,
-    /// Widths of the side panels, so the canvas leaves them room.
-    viewport_w: f32 = 0,
-    picker_w: f32 = 0,
+
     /// Visible area of the suggestion list, so a row scrolled out of sight
     /// keeps its presses inside it.
     list: hit.Rect = .{},
@@ -89,6 +92,9 @@ pub const App = struct {
     /// Beats shown across a preview lane.
     const beats_visible: f32 = 16;
     const lane_panel_width: f32 = 380;
+    /// Toolbar plus footer, measured once and fixed: reading them back made a
+    /// resize lag a frame and flicker.
+    const chrome_height: f32 = 104;
 
     pub fn init(allocator: std.mem.Allocator, library: pl.library.Library, io: std.Io) App {
         return .{
@@ -140,7 +146,6 @@ pub const App = struct {
 
         const root_scale = root.data().contentRectScale();
         self.viewport_h = root_scale.r.h / root_scale.s;
-        self.viewport_w = root_scale.r.w / root_scale.s;
         self.scale_hint = root_scale.s;
 
         self.player.poll();
@@ -151,7 +156,7 @@ pub const App = struct {
         self.syncGrid();
         self.hit_map.reset();
 
-        self.frameToolbar();
+        frameToolbar();
         self.frameBody();
         frameFooter(self);
         self.drawGhost();
@@ -166,7 +171,7 @@ pub const App = struct {
         return true;
     }
 
-    fn frameToolbar(self: *App) void {
+    fn frameToolbar() void {
         var bar = dvui.box(@src(), .{ .dir = .horizontal }, .{
             .expand = .horizontal,
             .padding = .{ .x = 16, .y = 8 },
@@ -174,7 +179,6 @@ pub const App = struct {
             .color_fill = .{ .color = Palette.background },
         });
         defer bar.deinit();
-        self.toolbar_h = bar.data().borderRectScale().r.h / bar.data().borderRectScale().s;
 
         labelStyled(@src(), "playlister", .{
             .font = titleFont(),
@@ -187,12 +191,12 @@ pub const App = struct {
     }
 
     fn frameBody(self: *App) void {
-        // The body gets exactly the space the strips leave; without the cap a
-        // tall canvas grows the layout and the footer leaves the window.
+        // A minimum of zero lets the body shrink to the window; measuring the
+        // strips instead made every resize lag a frame.
         var body = dvui.box(@src(), .{ .dir = .horizontal }, .{
             .expand = .both,
             .min_size_content = .{ .h = 0 },
-            .max_size_content = .{ .w = 100000, .h = @max(120, self.viewport_h - self.toolbar_h - self.footer_h) },
+            .max_size_content = .{ .w = 100000, .h = @max(120, self.viewport_h - chrome_height) },
         });
         defer body.deinit();
 
@@ -210,7 +214,6 @@ pub const App = struct {
             .padding = .{ .x = 0, .y = 0 },
         });
         defer panel.deinit();
-        self.picker_w = panel.data().borderRectScale().r.w / panel.data().borderRectScale().s;
 
         self.frameSearch();
         self.framePickerHeading();
@@ -401,12 +404,6 @@ pub const App = struct {
             .background = true,
             .color_fill = .{ .color = Palette.background },
             .min_size_content = .{ .h = 0 },
-            // The canvas is created before the preview panel, so without a cap
-            // it eats the width the panel needs and pushes it off the window.
-            .max_size_content = .{
-                .w = @max(200, self.viewport_w - self.picker_w),
-                .h = 100000,
-            },
         });
         defer canvas.deinit();
         self.canvas = rectFrom(canvas.data().borderRectScale().r);
@@ -419,7 +416,11 @@ pub const App = struct {
             return;
         }
 
-        var scroll = dvui.scrollArea(@src(), .{}, .{ .expand = .both, .background = false });
+        var scroll = dvui.scrollArea(@src(), .{}, .{
+            .expand = .both,
+            .min_size_content = .{ .h = 0 },
+            .background = false,
+        });
         defer scroll.deinit();
 
         var stack = dvui.box(@src(), .{ .dir = .vertical }, .{
@@ -519,6 +520,16 @@ pub const App = struct {
                 self.note_names = !self.note_names;
                 dvui.refresh(null, @src(), null);
             },
+            .toggle_transport => {
+                if (self.grid_playing) {
+                    self.grid_beat = self.gridPosition();
+                    self.grid_playing = false;
+                } else {
+                    self.grid_started_at = std.Io.Timestamp.now(self.io, .awake).nanoseconds;
+                    self.grid_playing = true;
+                }
+                dvui.refresh(null, @src(), null);
+            },
             .select_block => |index| self.pending_select = index,
             .toggle_block => |index| {
                 self.toggleSelected(index);
@@ -580,6 +591,38 @@ pub const App = struct {
         }
     }
 
+    /// Beat the grid transport is at, in track beats.
+    fn gridPosition(self: *const App) f32 {
+        if (!self.grid_playing) return self.grid_beat;
+        const now = std.Io.Timestamp.now(self.io, .awake).nanoseconds;
+        const elapsed_ms: f64 = @floatFromInt(now - self.grid_started_at);
+        const bpm = if (self.crate.seedTrack()) |track| track.bpm else 120;
+        const beat_increment: f32 = @floatCast(elapsed_ms / 1000 * bpm / 60);
+        return self.grid_beat + beat_increment;
+    }
+
+    pub fn animating(self: *const App) bool {
+        return self.grid_playing;
+    }
+
+    fn transportToggle(self: *App) void {
+        var chip = dvui.box(@src(), .{ .dir = .horizontal }, .{
+            .margin = .{ .x = 8, .y = 4 },
+            .padding = .{ .x = 10, .y = 2 },
+            .background = true,
+            .color_fill = .{ .color = Palette.field },
+            .id_extra = 80,
+        });
+        defer chip.deinit();
+
+        labelStyled(@src(), if (self.grid_playing) "stop" else "play", .{
+            .color_text = .{ .color = if (self.grid_playing) Palette.green else Palette.secondary },
+            .font = metaFont(),
+            .id_extra = 81,
+        });
+        self.hit_map.append(rectFrom(chip.data().rectScaleFromParent().r), .transport);
+    }
+
     fn isSelected(self: *const App, index: usize) bool {
         for (self.selected.items) |value| {
             if (value == index) return true;
@@ -605,6 +648,12 @@ pub const App = struct {
                 snapLane(lane);
                 dvui.refresh(null, @src(), null);
             },
+            .filter => |slot| {
+                if (slot >= self.grid.items.len) return;
+                const lane = &self.grid.items[slot];
+                lane.filter = std.math.clamp(lane.filter - pull.dy / @max(1, lane.filter_h), 0, 1);
+                dvui.refresh(null, @src(), null);
+            },
             else => {},
         }
     }
@@ -627,26 +676,59 @@ pub const App = struct {
         defer col.deinit();
 
         {
-            var wave = dvui.box(@src(), .{ .dir = .horizontal }, .{
+            var wave_row = dvui.box(@src(), .{ .dir = .horizontal }, .{
                 .expand = .both,
-                .min_size_content = .{ .w = 0, .h = 0 },
-                .id_extra = 9100 + index,
+                .id_extra = 9050 + index,
             });
-            defer wave.deinit();
-            const wave_rect = rectFrom(wave.data().contentRectScale().r);
-            lane.wave_w = wave_rect.w;
+            defer wave_row.deinit();
 
-            if (lane.analysis) |*analysis| {
-                self.paintWave(lane, analysis, wave_rect);
-            } else {
-                labelStyled(@src(), "no analysis", .{
-                    .color_text = .{ .color = Palette.muted },
-                    .font = metaFont(),
-                    .margin = .{ .x = 6, .y = 2 },
-                    .id_extra = 9200 + index,
+            {
+                var wave = dvui.box(@src(), .{ .dir = .horizontal }, .{
+                    .expand = .both,
+                    .min_size_content = .{ .w = 0, .h = 0 },
+                    .id_extra = 9100 + index,
                 });
+                defer wave.deinit();
+                const wave_rect = rectFrom(wave.data().contentRectScale().r);
+                lane.wave_w = wave_rect.w;
+
+                if (lane.analysis) |*analysis| {
+                    self.paintWave(lane, analysis, wave_rect);
+                } else {
+                    labelStyled(@src(), "no analysis", .{
+                        .color_text = .{ .color = Palette.muted },
+                        .font = metaFont(),
+                        .margin = .{ .x = 6, .y = 2 },
+                        .id_extra = 9200 + index,
+                    });
+                }
+                if (lane.analysis != null) {
+                    const beat = self.gridPosition();
+                    const span = lane.start_beat + beats_visible;
+                    if (beat >= lane.start_beat and beat <= span) {
+                        const x = wave_rect.x + (beat - lane.start_beat) / beats_visible * wave_rect.w;
+                        fillRect(self.allocator, x - 1, wave_rect.y, 2.5, wave_rect.h, Palette.ink);
+                    }
+                }
+                self.hit_map.append(wave_rect, .{ .lane = index });
             }
-            self.hit_map.append(wave_rect, .{ .lane = index });
+
+            {
+                var strip = dvui.box(@src(), .{ .dir = .vertical }, .{
+                    .expand = .vertical,
+                    .min_size_content = .{ .w = 18, .h = 0 },
+                    .max_size_content = .{ .w = 18, .h = 100000 },
+                    .margin = .{ .x = 6 },
+                    .id_extra = 9400 + index,
+                });
+                defer strip.deinit();
+                const strip_rect = rectFrom(strip.data().contentRectScale().r);
+                lane.filter_h = strip_rect.h;
+                fillRect(self.allocator, strip_rect.x + 6, strip_rect.y, 6, strip_rect.h, fade(Palette.muted, 55));
+                const knob_y = strip_rect.y + (1 - lane.filter) * @max(0, strip_rect.h - 12);
+                fillRect(self.allocator, strip_rect.x + 2, knob_y, 14, 12, Palette.green);
+                self.hit_map.append(strip_rect, .{ .filter = index });
+            }
         }
 
         {
@@ -664,9 +746,16 @@ pub const App = struct {
             const start = if (total > 0) lane.start_beat / @as(f32, @floatFromInt(total)) else 0;
             const span = if (total > 0) visible / @as(f32, @floatFromInt(total)) else 1;
 
-            const track_y = bar_rect.y + 4;
-            fillRect(self.allocator, bar_rect.x, track_y, bar_rect.w, 8, fade(Palette.muted, 55));
-            fillRect(self.allocator, bar_rect.x + bar_rect.w * start, track_y, @max(24, bar_rect.w * span), 8, Palette.green);
+            fillRect(self.allocator, bar_rect.x, bar_rect.y, bar_rect.w, bar_rect.h, Palette.field);
+            if (lane.analysis) |*analysis| {
+                paintOverview(self.allocator, analysis, bar_rect);
+            }
+
+            const window_x = bar_rect.x + bar_rect.w * start;
+            const window_w = @max(18, bar_rect.w * span);
+            fillRect(self.allocator, window_x, bar_rect.y, window_w, bar_rect.h, fade(Palette.ink, 26));
+            fillRect(self.allocator, window_x, bar_rect.y, 1.5, bar_rect.h, Palette.ink);
+            fillRect(self.allocator, window_x + window_w - 1.5, bar_rect.y, 1.5, bar_rect.h, Palette.ink);
             self.hit_map.append(bar_rect, .{ .nav = index });
         }
     }
@@ -701,9 +790,14 @@ pub const App = struct {
             const to: usize = @min(analysis.waveform.len, @as(usize, @intFromFloat(@max(0, start_sample + (x + 2) * samples_per_px))));
 
             var peak: u8 = 0;
-            for (analysis.waveform[from..to]) |value| peak = @max(peak, value);
+            var sum: usize = 0;
+            for (analysis.waveform[from..to]) |value| {
+                peak = @max(peak, value);
+                sum += value;
+            }
+            const mean: f32 = @floatFromInt(sum);
             const height = rect.h * (@as(f32, @floatFromInt(peak)) / 255);
-            fillRect(self.allocator, rect.x + x, rect.bottom() - height, 1.5, height, fade(Palette.purple, 70 + peak / 2));
+            fillRect(self.allocator, rect.x + x, rect.bottom() - height, 1.5, height, waveColor(mean / @as(f32, @floatFromInt(@max(1, to - from))), peak));
         }
 
         var beat: f32 = @ceil(lane.start_beat);
@@ -711,6 +805,29 @@ pub const App = struct {
             const bx = (beat - lane.start_beat) / beats_visible * rect.w;
             const bar = @mod(@as(i32, @intFromFloat(beat)), 4) == 0;
             fillRect(self.allocator, rect.x + bx, rect.y, if (bar) 2 else 1, rect.h, fade(Palette.muted, if (bar) 90 else 45));
+        }
+    }
+
+    /// The whole track at the lane's width, so the navigator reads as a
+    /// waveform rather than a slider.
+    fn paintOverview(allocator: std.mem.Allocator, analysis: *const pl.analysis.Analysis, rect: hit.Rect) void {
+        if (rect.w <= 0 or rect.h <= 0 or analysis.waveform.len == 0) return;
+        const len: f32 = @floatFromInt(analysis.waveform.len);
+
+        var x: f32 = 0;
+        while (x < rect.w) : (x += 2) {
+            const from: usize = @intFromFloat(@min(len - 1, x / rect.w * len));
+            const to: usize = @min(analysis.waveform.len, @as(usize, @intFromFloat(@max(@as(f32, @floatFromInt(from + 1)), (x + 2) / rect.w * len))));
+
+            var peak: u8 = 0;
+            var sum: usize = 0;
+            for (analysis.waveform[from..to]) |value| {
+                peak = @max(peak, value);
+                sum += value;
+            }
+            const mean: f32 = @floatFromInt(sum);
+            const height = rect.h * (@as(f32, @floatFromInt(peak)) / 255);
+            fillRect(allocator, rect.x + x, rect.bottom() - height, 1.5, height, waveColor(mean / @as(f32, @floatFromInt(@max(1, to - from))), peak));
         }
     }
 
@@ -1117,6 +1234,25 @@ fn fade(color: dvui.Color, alpha: u8) dvui.Color {
     return dimmed;
 }
 
+/// Pioneer's colour waveform in spirit: steady bass reads blue, transients push
+/// the colour through orange towards white.
+fn waveColor(mean: f32, peak: u8) dvui.Color {
+    if (peak == 0) return Palette.bass;
+    const ratio = 1 - mean / @as(f32, @floatFromInt(peak));
+    if (ratio < 0.5) return mixColor(Palette.bass, Palette.mid, ratio * 2);
+    return mixColor(Palette.mid, Palette.high, (ratio - 0.5) * 2);
+}
+
+fn mixColor(a: dvui.Color, b: dvui.Color, t: f32) dvui.Color {
+    const f = std.math.clamp(t, 0, 1);
+    return .{
+        .r = @intFromFloat(@as(f32, @floatFromInt(a.r)) + (@as(f32, @floatFromInt(b.r)) - @as(f32, @floatFromInt(a.r))) * f),
+        .g = @intFromFloat(@as(f32, @floatFromInt(a.g)) + (@as(f32, @floatFromInt(b.g)) - @as(f32, @floatFromInt(a.g))) * f),
+        .b = @intFromFloat(@as(f32, @floatFromInt(a.b)) + (@as(f32, @floatFromInt(b.b)) - @as(f32, @floatFromInt(a.b))) * f),
+        .a = 0xff,
+    };
+}
+
 fn rectFrom(rect: dvui.Rect.Physical) hit.Rect {
     return .{ .x = rect.x, .y = rect.y, .w = rect.w, .h = rect.h };
 }
@@ -1136,7 +1272,6 @@ fn frameFooter(app: *App) void {
         .color_fill = .{ .color = Palette.panel },
     });
     defer bar.deinit();
-    app.footer_h = bar.data().borderRectScale().r.h / app.scale_hint;
 
     labelStyled(@src(), "energy", .{
         .color_text = .{ .color = Palette.muted },
@@ -1144,6 +1279,7 @@ fn frameFooter(app: *App) void {
         .margin = .{ .x = 4, .y = 6 },
     });
 
+    app.transportToggle();
     app.energyToggle("=", Palette.green, &app.filter_hold, .hold);
     app.energyToggle("↑", Palette.orange, &app.filter_up, .up);
     app.energyToggle("↓", Palette.orange, &app.filter_down, .down);
@@ -1338,6 +1474,10 @@ const Palette = struct {
     const block = dvui.Color{ .r = 0x34, .g = 0x37, .b = 0x46, .a = 0xff };
     const selection = dvui.Color{ .r = 0x44, .g = 0x47, .b = 0x5a, .a = 0xff };
     const hover = dvui.Color{ .r = 0x3a, .g = 0x3d, .b = 0x4d, .a = 0xff };
+    /// Pioneer's three-band waveform: lows blue, mids orange, highs white.
+    const bass = dvui.Color{ .r = 0x2e, .g = 0x6b, .b = 0xf0, .a = 0xff };
+    const mid = dvui.Color{ .r = 0xff, .g = 0x9a, .b = 0x3c, .a = 0xff };
+    const high = dvui.Color{ .r = 0xf2, .g = 0xf2, .b = 0xf2, .a = 0xff };
     const field = dvui.Color{ .r = 0x21, .g = 0x22, .b = 0x2c, .a = 0xff };
     const ink = dvui.Color{ .r = 0xf8, .g = 0xf8, .b = 0xf2, .a = 0xff };
     /// Dracula's own comment blue is about 3:1 on this background, which is too
