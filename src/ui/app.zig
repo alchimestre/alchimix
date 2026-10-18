@@ -605,13 +605,20 @@ pub const App = struct {
         }
     }
 
+    /// Beat shown at the left edge of every lane. While the transport runs,
+    /// every lane shows the same window so the playhead stacks.
+    fn viewStart(self: *const App, lane: *const Lane) f32 {
+        if (self.grid_playing) return self.gridPosition() - beats_visible / 2;
+        return lane.start_beat;
+    }
+
     /// Beat the grid transport is at, in track beats.
     fn gridPosition(self: *const App) f32 {
         if (!self.grid_playing) return self.grid_beat;
         const now = std.Io.Timestamp.now(self.io, .awake).nanoseconds;
-        const elapsed_ms: f64 = @floatFromInt(now - self.grid_started_at);
+        const elapsed_ns: f64 = @floatFromInt(now - self.grid_started_at);
         const bpm = if (self.crate.seedTrack()) |track| track.bpm else 120;
-        const beat_increment: f32 = @floatCast(elapsed_ms / 1000 * bpm / 60);
+        const beat_increment: f32 = @floatCast(elapsed_ns / 1_000_000_000 * bpm / 60);
         return self.grid_beat + beat_increment;
     }
 
@@ -647,7 +654,7 @@ pub const App = struct {
     fn applyPull(self: *App, pull: hit.Drag.Pull) void {
         switch (pull.target) {
             .lane => |slot| {
-                if (slot >= self.grid.items.len) return;
+                if (self.grid_playing or slot >= self.grid.items.len) return;
                 const lane = &self.grid.items[slot];
                 // Grab the wave: dragging right shows earlier audio.
                 lane.start_raw -= pull.dx * beats_visible / @max(1, lane.wave_w);
@@ -655,7 +662,7 @@ pub const App = struct {
                 dvui.refresh(null, @src(), null);
             },
             .nav => |slot| {
-                if (slot >= self.grid.items.len) return;
+                if (self.grid_playing or slot >= self.grid.items.len) return;
                 const lane = &self.grid.items[slot];
                 const total: f32 = @floatFromInt(totalBeats(lane));
                 lane.start_raw += pull.dx / @max(1, lane.nav_w) * total;
@@ -707,8 +714,9 @@ pub const App = struct {
                 const wave_rect = rectFrom(wave.data().contentRectScale().r).clipped(col_rect);
                 lane.wave_w = wave_rect.w;
 
+                const view = self.viewStart(lane);
                 if (lane.analysis) |*analysis| {
-                    self.paintWave(lane, analysis, wave_rect);
+                    self.paintWave(analysis, wave_rect, view);
                 } else {
                     labelStyled(@src(), "no analysis", .{
                         .color_text = .{ .color = Palette.muted },
@@ -719,9 +727,10 @@ pub const App = struct {
                 }
                 if (lane.analysis != null) {
                     const beat = self.gridPosition();
-                    const span = lane.start_beat + beats_visible;
-                    if (beat >= lane.start_beat and beat <= span) {
-                        const x = wave_rect.x + (beat - lane.start_beat) / beats_visible * wave_rect.w;
+                    if (self.grid_playing) {
+                        fillRect(self.allocator, wave_rect.x + wave_rect.w / 2 - 1, wave_rect.y, 2.5, wave_rect.h, Palette.ink);
+                    } else if (beat >= view and beat <= view + beats_visible) {
+                        const x = wave_rect.x + (beat - view) / beats_visible * wave_rect.w;
                         fillRect(self.allocator, x - 1, wave_rect.y, 2.5, wave_rect.h, Palette.ink);
                     }
                 }
@@ -759,7 +768,8 @@ pub const App = struct {
 
             const total = totalBeats(lane);
             const visible: f32 = @min(beats_visible, @as(f32, @floatFromInt(total)));
-            const start = if (total > 0) lane.start_beat / @as(f32, @floatFromInt(total)) else 0;
+            const view = self.viewStart(lane);
+            const start = if (total > 0) view / @as(f32, @floatFromInt(total)) else 0;
             const span = if (total > 0) visible / @as(f32, @floatFromInt(total)) else 1;
 
             fillRect(self.allocator, bar_rect.x, bar_rect.y, bar_rect.w, bar_rect.h, Palette.field);
@@ -790,21 +800,21 @@ pub const App = struct {
     }
 
     /// Waveform and beat lines, drawn straight into the lane's rectangle.
-    fn paintWave(self: *App, lane: *const Lane, analysis: *const pl.analysis.Analysis, rect: hit.Rect) void {
+    fn paintWave(self: *App, analysis: *const pl.analysis.Analysis, rect: hit.Rect, start_beat: f32) void {
         if (rect.w <= 0 or rect.h <= 0) return;
         fillRect(self.allocator, rect.x, rect.y, rect.w, rect.h, Palette.field);
 
         const bpm = if (analysis.bpm() > 0) analysis.bpm() else 128;
         const samples_per_beat: f32 = @as(f32, pl.analysis.Analysis.samples_per_second) * 60 / bpm;
-        const start_sample = lane.start_beat * samples_per_beat;
+        const start_sample = start_beat * samples_per_beat;
         const samples_per_px = samples_per_beat * beats_visible / rect.w;
 
         var x: f32 = 0;
         var smoothed: f32 = 0.5;
-        while (x < rect.w) : (x += 2) {
+        while (x < rect.w) : (x += 1) {
             const from: usize = @intFromFloat(@max(0, start_sample + x * samples_per_px));
             if (from >= analysis.waveform.len) break;
-            const to: usize = @min(analysis.waveform.len, @as(usize, @intFromFloat(@max(0, start_sample + (x + 2) * samples_per_px))));
+            const to: usize = @min(analysis.waveform.len, @as(usize, @intFromFloat(@max(0, start_sample + (x + 1) * samples_per_px))));
 
             var peak: u8 = 0;
             var sum: usize = 0;
@@ -812,20 +822,17 @@ pub const App = struct {
                 peak = @max(peak, value);
                 sum += value;
             }
-            const mean: f32 = @floatFromInt(sum);
-            const average = mean / @as(f32, @floatFromInt(@max(1, to - from)));
-            // The envelope follows the average so the shape reads as a
-            // waveform; peak-only columns saturate into a solid block.
-            const level = average * 0.7 + @as(f32, @floatFromInt(peak)) * 0.3;
-            const height = rect.h * (level / 255);
-            const ratio = 1 - mean / @as(f32, @floatFromInt(@max(1, peak)));
-            smoothed = smoothed * 0.65 + ratio * 0.35;
-            fillRect(self.allocator, rect.x + x, rect.bottom() - height, 1.5, height, bandColor(smoothed));
+            const average = @as(f32, @floatFromInt(sum)) / @as(f32, @floatFromInt(@max(1, to - from)));
+            const level = @min(255, @max(average * 1.3, @as(f32, @floatFromInt(peak)) * 0.7)) / 255;
+            // Smoothing along x turns the per-column spikes into hills.
+            smoothed = smoothed * 0.55 + level * 0.45;
+            const height = rect.h * smoothed;
+            fillRect(self.allocator, rect.x + x, rect.bottom() - height, 1, height, bandColor(smoothed));
         }
 
-        var beat: f32 = @ceil(lane.start_beat);
-        while (beat < lane.start_beat + beats_visible) : (beat += 1) {
-            const bx = (beat - lane.start_beat) / beats_visible * rect.w;
+        var beat: f32 = @ceil(start_beat);
+        while (beat < start_beat + beats_visible) : (beat += 1) {
+            const bx = (beat - start_beat) / beats_visible * rect.w;
             const bar = @mod(@as(i32, @intFromFloat(beat)), 4) == 0;
             fillRect(self.allocator, rect.x + bx, rect.y, if (bar) 2 else 1, rect.h, fade(Palette.muted, if (bar) 90 else 45));
         }
@@ -848,10 +855,10 @@ pub const App = struct {
                 peak = @max(peak, value);
                 sum += value;
             }
-            const mean: f32 = @floatFromInt(sum);
-            const height = rect.h * (@as(f32, @floatFromInt(peak)) / 255);
-            const ratio = 1 - mean / @as(f32, @floatFromInt(@max(1, peak)));
-            fillRect(allocator, rect.x + x, rect.bottom() - height, 2, height, bandColor(ratio));
+            const average = @as(f32, @floatFromInt(sum)) / @as(f32, @floatFromInt(@max(1, to - from)));
+            const level = @min(255, @max(average * 1.8, @as(f32, @floatFromInt(peak)) * 0.9));
+            const height = rect.h * (level / 255);
+            fillRect(allocator, rect.x + x, rect.bottom() - height, 2, height, bandColor(level / 255));
         }
     }
 
@@ -1260,9 +1267,12 @@ fn fade(color: dvui.Color, alpha: u8) dvui.Color {
 
 /// Pioneer's colour waveform in spirit: steady bass reads blue, transients push
 /// the colour through orange towards white.
-fn bandColor(ratio: f32) dvui.Color {
-    if (ratio < 0.5) return mixColor(Palette.bass, Palette.mid, ratio * 2);
-    return mixColor(Palette.mid, Palette.high, (ratio - 0.5) * 2);
+/// Quiet passages blue, body orange, peaks white. The waveform carries one
+/// amplitude byte, so loudness is the only band information available.
+fn bandColor(level: f32) dvui.Color {
+    const t = std.math.clamp(level, 0, 1);
+    if (t < 0.55) return mixColor(Palette.bass, Palette.mid, t / 0.55);
+    return mixColor(Palette.mid, Palette.high, (t - 0.55) / 0.45);
 }
 
 fn mixColor(a: dvui.Color, b: dvui.Color, t: f32) dvui.Color {
