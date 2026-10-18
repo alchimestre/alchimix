@@ -21,6 +21,8 @@ const Lane = struct {
     /// Beat under the playhead: what playback starts on and what the window
     /// is centred around.
     beat: f32 = 0,
+    /// Stable mixer slot, so reordering blocks does not touch the audio.
+    slot: usize = 0,
     /// This lane's own process is running.
     playing: bool = false,
     started_ns: i128 = 0,
@@ -73,6 +75,8 @@ pub const App = struct {
     poly: bool = false,
     /// Smoothed frame cost, shown next to the renderer switch.
     draw_ms: f32 = 0,
+    /// Next mixer slot to hand out.
+    next_slot: usize = 0,
     /// Master tempo: follows the seed while locked, manual otherwise.
     master_bpm: f32 = 128,
     master_text: std.ArrayList(u8) = .empty,
@@ -660,8 +664,14 @@ pub const App = struct {
     fn snapLane(lane: *Lane) void {
         const total: f32 = @floatFromInt(totalBeats(lane));
         lane.beat_raw = std.math.clamp(lane.beat_raw, 0, total);
-        // Bars, not beats: four beats per step.
+        // Bars: four beats per step.
         lane.beat = @round(lane.beat_raw / 4) * 4;
+    }
+
+    fn snapBeat(lane: *Lane) void {
+        const total: f32 = @floatFromInt(totalBeats(lane));
+        lane.beat_raw = std.math.clamp(lane.beat_raw, 0, total);
+        lane.beat = @round(lane.beat_raw);
     }
 
     fn laneSpec(self: *App, index: usize) pl.mixer.Lane {
@@ -684,13 +694,13 @@ pub const App = struct {
         const remaining: f32 = @as(f32, @floatFromInt(totalBeats(lane))) - lane.beat;
         lane.end_ns = lane.started_ns + @as(i128, @intFromFloat(@max(0, remaining) * 60 / self.masterBpm() * 1_000_000_000));
         lane.playing = true;
-        self.mixer.play(index, self.laneSpec(index));
+        self.mixer.play(lane.slot, self.laneSpec(index));
     }
 
     fn stopLane(self: *App, index: usize) void {
         if (index >= self.grid.items.len) return;
-        self.mixer.stop(index);
         const lane = &self.grid.items[index];
+        self.mixer.stop(lane.slot);
         self.foldLane(lane);
         lane.playing = false;
     }
@@ -713,8 +723,11 @@ pub const App = struct {
     /// Restarts a lane at its playhead, picking up tempo or filter changes.
     fn restartLane(self: *App, index: usize) void {
         if (index >= self.grid.items.len) return;
-        if (!self.grid.items[index].playing) return;
-        self.mixer.stop(index);
+        const lane = &self.grid.items[index];
+        if (!lane.playing) return;
+        // Resume from where the audio has reached, not from the last start.
+        self.foldLane(lane);
+        self.mixer.stop(lane.slot);
         self.startLane(index);
     }
 
@@ -722,7 +735,7 @@ pub const App = struct {
     fn seekLane(self: *App, index: usize, beat: f32) void {
         if (index >= self.grid.items.len) return;
         const was_playing = self.grid.items[index].playing;
-        self.mixer.stop(index);
+        self.mixer.stop(self.grid.items[index].slot);
         self.grid.items[index].playing = false;
         self.grid.items[index].beat_raw = beat;
         snapLane(&self.grid.items[index]);
@@ -743,20 +756,15 @@ pub const App = struct {
         }
     }
 
-    /// Picks a block for the previewer; three lanes is the cap.
-    fn toggleSelected(self: *App, index: usize) void {
-        for (self.selected.items, 0..) |value, slot| {
-            if (value == index) {
-                _ = self.selected.orderedRemove(slot);
-                return;
-            }
-        }
-        if (self.selected.items.len >= 3) return;
-        self.selected.append(self.allocator, index) catch {};
+    fn takeSlot(self: *App) usize {
+        const slot = self.next_slot % pl.mixer.max_lanes;
+        self.next_slot += 1;
+        return slot;
     }
 
-    /// Loads a grid lane for every block. Rebuilt only when the crate's tracks
-    /// change, keeping the analyses that are already loaded.
+    /// Loads a grid lane for every block. Lanes survive edits: a lane matched
+    /// by track keeps its audio, position and analysis, and a new block starts
+    /// paused.
     fn syncGrid(self: *App) void {
         if (self.grid.items.len == self.crate.len()) {
             var same = true;
@@ -769,58 +777,53 @@ pub const App = struct {
             if (same) return;
         }
 
-        for (self.grid.items) |*lane| {
-            if (lane.analysis) |*a| a.deinit(self.allocator);
-        }
-        self.grid.clearRetainingCapacity();
+        const consumed = self.allocator.alloc(bool, self.grid.items.len) catch return;
+        defer self.allocator.free(consumed);
+        @memset(consumed, false);
 
+        var next: std.ArrayListUnmanaged(Lane) = .empty;
         for (0..self.crate.len()) |index| {
             const track = self.crate.at(index).?.*;
             var lane = Lane{ .track_id = track.id };
-            lane.analysis = self.library.analysis(self.allocator, track.id) catch null;
-            lane.missing = lane.analysis == null;
-            self.grid.append(self.allocator, lane) catch {};
+            var reused = false;
+
+            for (self.grid.items, 0..) |old, old_index| {
+                if (consumed[old_index] or old.track_id != track.id) continue;
+                consumed[old_index] = true;
+                lane = old;
+                reused = true;
+                break;
+            }
+
+            if (!reused) {
+                lane.slot = self.takeSlot();
+                lane.analysis = self.library.analysis(self.allocator, track.id) catch null;
+                lane.missing = lane.analysis == null;
+            }
+
+            next.append(self.allocator, lane) catch {};
         }
-    }
 
-    /// Beat at the left edge of the shared window.
-    fn gridStart(self: *const App) f32 {
-        if (!self.grid_playing) return self.grid_start;
-        const now = std.Io.Timestamp.now(self.io, .awake).nanoseconds;
-        const elapsed_ns: f64 = @floatFromInt(now - self.grid_started_at);
-        const bpm = if (self.crate.seedTrack()) |track| track.bpm else 120;
-        return self.grid_start + @as(f32, @floatCast(elapsed_ns / 1_000_000_000 * bpm / 60));
-    }
-
-    /// The playhead never moves: it is the middle of the window.
-    fn gridPosition(self: *const App) f32 {
-        return self.gridStart() + beats_visible / 2;
-    }
-
-    /// Fold elapsed time into the position before moving the window by hand.
-    fn rebaseClock(self: *App) void {
-        if (!self.grid_playing) return;
-        self.grid_start = self.gridStart();
-        self.grid_start_raw = self.grid_start;
-        self.grid_started_at = std.Io.Timestamp.now(self.io, .awake).nanoseconds;
-    }
-
-    fn gridTotal(self: *const App) usize {
-        var total: usize = std.math.maxInt(usize);
-        var seen = false;
-        for (self.grid.items) |*lane| {
-            const beats = totalBeats(lane);
-            if (beats == 0) continue;
-            total = @min(total, beats);
-            seen = true;
+        for (self.grid.items, 0..) |*old, old_index| {
+            if (consumed[old_index]) continue;
+            if (old.playing) self.mixer.stop(old.slot);
+            if (old.analysis) |*a| a.deinit(self.allocator);
         }
-        return if (seen) total else 0;
+
+        self.grid.deinit(self.allocator);
+        self.grid = next;
     }
 
-    fn snapGrid(self: *App) void {
-        const last: f32 = @max(0, @as(f32, @floatFromInt(self.gridTotal())) - beats_visible);
-        self.grid_start_raw = std.math.clamp(self.grid_start_raw, 0, last);
-        self.grid_start = @round(self.grid_start_raw);
+    /// Picks a block for the previewer; three lanes is the cap.
+    fn toggleSelected(self: *App, index: usize) void {
+        for (self.selected.items, 0..) |value, slot| {
+            if (value == index) {
+                _ = self.selected.orderedRemove(slot);
+                return;
+            }
+        }
+        if (self.selected.items.len >= 3) return;
+        self.selected.append(self.allocator, index) catch {};
     }
 
     /// Master tempo at the right corner, with a lock that ties it to the seed.
@@ -985,7 +988,7 @@ pub const App = struct {
                 if (lane.playing) self.stopLane(slot);
                 // Grab the wave: dragging right shows earlier audio.
                 lane.beat_raw -= pull.dx * beats_visible / @max(1, lane.wave_w);
-                snapLane(lane);
+                snapBeat(lane);
                 dvui.refresh(null, @src(), null);
             },
             .nav => |slot| {
