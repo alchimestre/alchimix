@@ -77,6 +77,8 @@ pub const App = struct {
     draw_ms: f32 = 0,
     /// Next mixer slot to hand out.
     next_slot: usize = 0,
+    /// Lane held down with the pointer: jog pause, resume on release.
+    jog_lane: ?usize = null,
     /// Master tempo: follows the seed while locked, manual otherwise.
     master_bpm: f32 = 128,
     master_text: std.ArrayList(u8) = .empty,
@@ -521,6 +523,14 @@ pub const App = struct {
                     const target = self.hit_map.hit(p) orelse continue;
                     self.last_point = p;
                     self.apply(self.drag.press(target, p, mouse.mod.shift()));
+                    switch (target) {
+                        .lane => |index| {
+                            if (index < self.grid.items.len and self.grid.items[index].playing) {
+                                self.jogPause(index);
+                            }
+                        },
+                        else => {},
+                    }
                 },
                 .motion => {
                     if (self.drag.motion(p, 6 * self.scale_hint, self.canvas, &self.hit_map)) {
@@ -531,6 +541,7 @@ pub const App = struct {
                 .release => {
                     if (!mouse.button.pointer()) continue;
                     self.apply(self.drag.release());
+                    self.jogResume();
                     self.restartDirty();
                 },
                 else => {},
@@ -657,7 +668,8 @@ pub const App = struct {
 
     fn foldLane(self: *App, lane: *Lane) void {
         if (!lane.playing) return;
-        lane.beat = lane.beat + self.elapsedBeatsSince(lane.started_ns);
+        // Stopping lands on a bar, so lanes stay phase-aligned.
+        lane.beat = @round((lane.beat + self.elapsedBeatsSince(lane.started_ns)) / 4) * 4;
         lane.beat_raw = lane.beat;
     }
 
@@ -747,6 +759,21 @@ pub const App = struct {
     }
 
     /// After a filter drag, put the new cutoff into the audio.
+    /// Holding a playing lane pauses it; releasing resumes from the same beat.
+    fn jogPause(self: *App, index: usize) void {
+        const lane = &self.grid.items[index];
+        self.mixer.stop(lane.slot);
+        self.foldLane(lane);
+        lane.playing = false;
+        self.jog_lane = index;
+    }
+
+    fn jogResume(self: *App) void {
+        const index = self.jog_lane orelse return;
+        self.jog_lane = null;
+        if (index < self.grid.items.len) self.startLane(index);
+    }
+
     fn restartDirty(self: *App) void {
         for (self.grid.items, 0..) |*lane, index| {
             if (lane.filter_dirty) {
@@ -983,7 +1010,7 @@ pub const App = struct {
     fn applyPull(self: *App, pull: hit.Drag.Pull) void {
         switch (pull.target) {
             .lane => |slot| {
-                if (slot >= self.grid.items.len) return;
+                if (self.jog_lane != null or slot >= self.grid.items.len) return;
                 const lane = &self.grid.items[slot];
                 if (lane.playing) self.stopLane(slot);
                 // Grab the wave: dragging right shows earlier audio.
@@ -1047,7 +1074,13 @@ pub const App = struct {
                     .id_extra = 9100 + index,
                 });
                 defer wave.deinit();
-                const wave_rect = rectFrom(wave.data().contentRectScale().r).clipped(col_rect);
+                const full_rect = rectFrom(wave.data().contentRectScale().r).clipped(col_rect);
+                const wave_rect = hit.Rect{
+                    .x = full_rect.x,
+                    .y = full_rect.y,
+                    .w = @max(0, full_rect.w - 20),
+                    .h = full_rect.h,
+                };
                 lane.wave_w = wave_rect.w;
 
                 const view = self.laneStart(lane);
@@ -1071,22 +1104,20 @@ pub const App = struct {
                 self.hit_map.append(wave_rect, .{ .lane = index });
             }
 
-            {
-                var strip = dvui.box(@src(), .{ .dir = .vertical }, .{
-                    .expand = .vertical,
-                    .min_size_content = .{ .w = 18, .h = 0 },
-                    .max_size_content = .{ .w = 18, .h = 100000 },
-                    .margin = .{ .x = 6 },
-                    .id_extra = 9400 + index,
-                });
-                defer strip.deinit();
-                const strip_rect = rectFrom(strip.data().contentRectScale().r).clipped(col_rect);
-                lane.filter_h = strip_rect.h;
-                fillRect(self.allocator, strip_rect.x + 6, strip_rect.y, 6, strip_rect.h, fade(Palette.muted, 55));
-                const knob_y = strip_rect.y + (1 - lane.filter) * @max(0, strip_rect.h - 12);
-                fillRect(self.allocator, strip_rect.x + 2, knob_y, 14, 12, Palette.green);
-                self.hit_map.append(strip_rect, .{ .filter = index });
-            }
+        }
+
+        {
+            const strip_rect = hit.Rect{
+                .x = col_rect.x + col_rect.w - 18,
+                .y = col_rect.y,
+                .w = 18,
+                .h = @max(0, col_rect.h - 20),
+            };
+            lane.filter_h = strip_rect.h;
+            fillRect(self.allocator, strip_rect.x + 6, strip_rect.y, 6, strip_rect.h, fade(Palette.muted, 55));
+            const knob_y = strip_rect.y + (1 - lane.filter) * @max(0, strip_rect.h - 12);
+            fillRect(self.allocator, strip_rect.x + 2, knob_y, 14, 12, Palette.green);
+            self.hit_map.append(strip_rect, .{ .filter = index });
         }
 
         {
