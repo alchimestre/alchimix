@@ -7,6 +7,7 @@ pub const crate = @import("domain/crate.zig");
 pub const suggest = @import("domain/suggest.zig");
 pub const analysis = @import("domain/analysis.zig");
 pub const mixer = @import("audio/mixer.zig");
+pub const transport = @import("audio/transport.zig");
 
 pub const library = @import("ports/library.zig");
 pub const player = @import("audio/player.zig");
@@ -22,5 +23,6 @@ test {
     _ = crate;
     _ = library;
     _ = player;
+    _ = transport;
     _ = memory;
 }

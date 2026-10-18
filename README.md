@@ -19,7 +19,7 @@ zig build && ./zig-out/bin/playlister
 ```
 
 ```sh
-zig build test        # domain tests
+zig build test        # domain, transport and pointer tests
 ```
 
 | Command | What it prints |
@@ -35,6 +35,14 @@ zig build test        # domain tests
 there; a stopped process would keep the audio device open. Starting another track stops the first.
 
 Each block carries a bar along its bottom that fills as the snippet runs.
+
+Lane playback uses one mixer clock. The playhead waits for decoded audio; up to
+eight lanes can play together. Drag the waveform to jog, or the overview to seek
+by bars; releasing a jog lands on the nearest beat. Stop snaps the position to a
+bar. A small live spectrum sits beside the waveform with three draggable EQ
+nodes (low shelf, bell, high shelf); LPF, HPF and BPF presets load a shape, and
+clicking the active preset clears the EQ. Changes apply without restarting the
+decoder.
 
 ## Editing a crate
 
@@ -64,8 +72,10 @@ To read the collection from another source, implement the port in `src/ports/lib
 | `src/adapters/rekordbox.zig` | SQLCipher reader for rekordbox 6 |
 | `src/adapters/memory.zig` | in-memory source for tests and the demo |
 | `src/ui/app.zig` | block canvas, picker, toolbar |
-| `src/ui/hit.zig` | hit map and the press–drag–drop rules |
+| `src/ui/hit.zig` | hit rectangles, pointer-to-beat conversion and drag rules |
 | `src/ui/run.zig` | window and frame loop |
+| `src/audio/transport.zig` | playback positions, bar joins, jog and retune transitions |
+| `src/audio/mixer.zig` | decoder buffers, shared output clock and lane start times |
 
 ## Arrows
 

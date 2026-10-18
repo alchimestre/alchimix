@@ -69,8 +69,12 @@ pub const Target = union(enum) {
     lane: usize,
     /// The whole-track navigator under a preview lane.
     nav: usize,
-    /// The band filter beside a lane's waveform.
-    filter: usize,
+    /// The EQ plot: spectrum and the curve the nodes sit on.
+    eq_plot: usize,
+    /// One draggable band node.
+    eq_node: struct { lane: usize, band: usize },
+    /// One preset choice left of the plot.
+    eq_preset: struct { lane: usize, preset: pl.mixer.EqPreset },
     /// Starts and stops the grid's shared transport.
     transport,
     /// Freezes the master tempo to the seed's BPM, or frees it.
@@ -118,6 +122,68 @@ pub const HitMap = struct {
         return null;
     }
 
+    const Surface = enum { wave, nav };
+
+    /// The rectangle the current frame drew for one lane surface.
+    fn surfaceRect(self: *const HitMap, surface: Surface, index: usize) ?Rect {
+        for (self.entries.items) |entry| {
+            const matches = switch (entry.target) {
+                .lane => |at| surface == .wave and at == index,
+                .nav => |at| surface == .nav and at == index,
+                else => false,
+            };
+            if (matches and !entry.rect.isEmpty()) return entry.rect;
+        }
+        return null;
+    }
+
+    /// How far a waveform drag moves the window, in beats. Dragging left shows
+    /// later audio.
+    pub fn waveformDragBeats(self: *const HitMap, index: usize, dx: f32, visible_beats: f32) ?f32 {
+        const rect = self.surfaceRect(.wave, index) orelse return null;
+        if (!(visible_beats > 0)) return null;
+        return -dx * visible_beats / rect.w;
+    }
+
+    /// How far a navigator drag moves the playhead, in beats.
+    pub fn navDragBeats(self: *const HitMap, index: usize, dx: f32, total_beats: f32) ?f32 {
+        const rect = self.surfaceRect(.nav, index) orelse return null;
+        if (!(total_beats > 0)) return null;
+        return dx * total_beats / rect.w;
+    }
+
+    /// The beat under a press on the navigator, clamped to the whole track.
+    pub fn navBeatAt(self: *const HitMap, index: usize, x: f32, total_beats: f32) ?f32 {
+        const rect = self.surfaceRect(.nav, index) orelse return null;
+        if (!(total_beats > 0)) return null;
+        return horizontalFraction(rect, x) * total_beats;
+    }
+
+    pub fn eqPlotRect(self: *const HitMap, lane: usize) ?Rect {
+        for (self.entries.items) |entry| {
+            switch (entry.target) {
+                .eq_plot => |at| if (at == lane and !entry.rect.isEmpty()) return entry.rect,
+                else => {},
+            }
+        }
+        return null;
+    }
+
+    pub const EqPoint = struct { freq_hz: f32, gain_db: f32 };
+
+    /// Maps a pointer position inside the plot to the frequency and gain the
+    /// node should take. X is logarithmic from `eq_min_hz` to `eq_max_hz`.
+    pub fn eqPointAt(self: *const HitMap, lane: usize, p: Point) ?EqPoint {
+        const rect = self.eqPlotRect(lane) orelse return null;
+        const fx = std.math.clamp((p.x - rect.x) / rect.w, 0, 1);
+        const fy = std.math.clamp((p.y - rect.y) / rect.h, 0, 1);
+        const freq = pl.mixer.eq_min_hz * std.math.pow(f32, pl.mixer.eq_max_hz / pl.mixer.eq_min_hz, fx);
+        return .{
+            .freq_hz = freq,
+            .gain_db = (0.5 - fy) * 2 * pl.mixer.eq_max_gain_db,
+        };
+    }
+
     /// The gap nearest `y`: how many block middles sit above it.
     pub fn gapAt(self: *const HitMap, y: f32) usize {
         var gap: usize = 0;
@@ -151,8 +217,10 @@ pub const Drag = struct {
         toggle_lane_play: usize,
         /// A press on a lane's scrub bar: jump the window to that point.
         seek_nav: usize,
-        /// A press on a lane's filter strip: set the value at that height.
-        set_filter: usize,
+        /// A press on a band node: the drag moves it in frequency and gain.
+        grab_eq: struct { lane: usize, band: usize },
+        /// A press on a preset: applies it, or clears the EQ when already on.
+        set_eq_preset: struct { lane: usize, preset: pl.mixer.EqPreset },
         select_block: usize,
         toggle_block: usize,
         move_block: struct { from: usize, gap: usize },
@@ -179,10 +247,12 @@ pub const Drag = struct {
                 self.pressed = target;
                 break :blk .{ .seek_nav = index };
             },
-            .filter => |index| blk: {
+            .eq_node => |at| blk: {
                 self.pressed = target;
-                break :blk .{ .set_filter = index };
+                break :blk .{ .grab_eq = .{ .lane = at.lane, .band = at.band } };
             },
+            .eq_preset => |at| .{ .set_eq_preset = .{ .lane = at.lane, .preset = at.preset } },
+            .eq_plot => .none,
             .row, .lane => blk: {
                 self.pressed = target;
                 break :blk .none;
@@ -195,6 +265,8 @@ pub const Drag = struct {
         /// Movement since the previous call, in screen units.
         dx: f32,
         dy: f32,
+        /// Current pointer position, for surfaces that track it absolutely.
+        p: Point,
     };
 
     /// Horizontal movement of a lane or a slider, measured incrementally so the
@@ -202,20 +274,20 @@ pub const Drag = struct {
     pub fn pull(self: *Drag, p: Point) ?Pull {
         const pressed = self.pressed orelse return null;
         switch (pressed) {
-            .lane, .nav, .filter => {},
+            .lane, .nav, .eq_node => {},
             else => return null,
         }
         const dx = p.x - self.press_at.x;
         const dy = p.y - self.press_at.y;
         self.press_at = p;
-        return .{ .target = pressed, .dx = dx, .dy = dy };
+        return .{ .target = pressed, .dx = dx, .dy = dy, .p = p };
     }
 
     /// True when the frame has something new to draw.
     pub fn motion(self: *Drag, p: Point, threshold: f32, canvas: Rect, hit_map: *const HitMap) bool {
         const pressed = self.pressed orelse return false;
         switch (pressed) {
-            .lane, .nav, .filter => return false,
+            .lane, .nav, .eq_node, .eq_plot, .eq_preset => return false,
             else => {},
         }
         if (self.carrying == null) {
@@ -236,7 +308,7 @@ pub const Drag = struct {
         return switch (target) {
             .block => |from| .{ .move_block = .{ .from = from, .gap = to } },
             .row => |track| .{ .drop_track = .{ .gap = to, .track = track } },
-            .toggle, .notation, .lane, .nav, .filter, .transport, .master_lock, .pitch_lock, .lane_play => .none,
+            .toggle, .notation, .lane, .nav, .eq_node, .eq_plot, .eq_preset, .transport, .master_lock, .pitch_lock, .lane_play => .none,
         };
     }
 
@@ -263,6 +335,14 @@ pub const Drag = struct {
 
 fn moved(from: Point, to: Point, limit: f32) bool {
     return @abs(from.x - to.x) > limit or @abs(from.y - to.y) > limit;
+}
+
+fn horizontalFraction(rect: Rect, x: f32) f32 {
+    return std.math.clamp((x - rect.x) / rect.w, 0, 1);
+}
+
+fn verticalFraction(rect: Rect, y: f32) f32 {
+    return std.math.clamp((y - rect.y) / rect.h, 0, 1);
 }
 
 fn isNone(action: Drag.Action) bool {
@@ -482,4 +562,141 @@ test "a navigator press pulls without a gap" {
     const pull = drag.pull(.{ .x = 25, .y = 10 }).?;
     try std.testing.expectEqual(@as(f32, 15), pull.dx);
     try std.testing.expect(drag.gapIndex() == null);
+}
+
+const lane_wave: Rect = .{ .x = 40, .y = 100, .w = 400, .h = 80 };
+const lane_nav: Rect = .{ .x = 40, .y = 180, .w = 320, .h = 20 };
+const lane_plot: Rect = .{ .x = 440, .y = 100, .w = 120, .h = 80 };
+const lane_nodes: [3]Rect = .{
+    .{ .x = 445, .y = 130, .w = 10, .h = 10 },
+    .{ .x = 495, .y = 135, .w = 10, .h = 10 },
+    .{ .x = 545, .y = 120, .w = 10, .h = 10 },
+};
+const lane_presets: [3]Rect = .{
+    .{ .x = 400, .y = 100, .w = 40, .h = 20 },
+    .{ .x = 400, .y = 124, .w = 40, .h = 20 },
+    .{ .x = 400, .y = 148, .w = 40, .h = 20 },
+};
+
+fn drawLaneFrame(map: *HitMap, index: usize, wave: Rect) void {
+    map.append(wave, .{ .lane = index });
+    map.append(lane_nav, .{ .nav = index });
+    for (lane_nodes, 0..) |rect, band| map.append(rect, .{ .eq_node = .{ .lane = index, .band = band } });
+    for (lane_presets, 0..) |rect, choice| map.append(rect, .{ .eq_preset = .{ .lane = index, .preset = @enumFromInt(choice + 1) } });
+    map.append(lane_plot, .{ .eq_plot = index });
+}
+
+fn expectClose(expected: f32, actual: f32) !void {
+    try std.testing.expectApproxEqAbs(expected, actual, 0.0001);
+}
+
+test "lane geometry follows the current frame after a resize" {
+    var map = HitMap.init(std.testing.allocator);
+    defer map.deinit();
+
+    drawLaneFrame(&map, 0, lane_wave);
+    try expectClose(0.4, map.waveformDragBeats(0, -10, 16).?);
+
+    map.reset();
+    drawLaneFrame(&map, 0, .{ .x = 40, .y = 100, .w = 200, .h = 80 });
+    try expectClose(0.8, map.waveformDragBeats(0, -10, 16).?);
+}
+
+test "a surface that stops being drawn maps to nothing" {
+    var map = HitMap.init(std.testing.allocator);
+    defer map.deinit();
+
+    drawLaneFrame(&map, 0, lane_wave);
+    map.reset();
+    try std.testing.expect(map.waveformDragBeats(0, 10, 16) == null);
+    try std.testing.expect(map.navBeatAt(0, 100, 128) == null);
+    try std.testing.expect(map.eqPointAt(0, .{ .x = 500, .y = 140 }) == null);
+
+    map.append(.{ .x = 40, .y = 100, .w = 0, .h = 80 }, .{ .lane = 0 });
+    try std.testing.expect(map.waveformDragBeats(0, 10, 16) == null);
+}
+
+test "lane surfaces do not borrow another lane's geometry" {
+    var map = HitMap.init(std.testing.allocator);
+    defer map.deinit();
+
+    map.append(lane_wave, .{ .lane = 1 });
+    try std.testing.expect(map.waveformDragBeats(0, 10, 16) == null);
+    try std.testing.expect(map.waveformDragBeats(1, 10, 16) != null);
+    try std.testing.expect(map.navDragBeats(1, 10, 128) == null);
+    try std.testing.expect(map.eqPointAt(1, .{ .x = 500, .y = 140 }) == null);
+
+    map.append(lane_nav, .{ .nav = 1 });
+    map.append(lane_plot, .{ .eq_plot = 1 });
+    try std.testing.expect(map.navDragBeats(1, 10, 128) != null);
+    try std.testing.expect(map.eqPointAt(1, .{ .x = 500, .y = 140 }) != null);
+}
+
+test "a waveform drag moves the window against the pointer" {
+    var map = HitMap.init(std.testing.allocator);
+    defer map.deinit();
+    drawLaneFrame(&map, 0, lane_wave);
+
+    try expectClose(0.4, map.waveformDragBeats(0, -10, 16).?);
+    try expectClose(-0.4, map.waveformDragBeats(0, 10, 16).?);
+    try std.testing.expect(map.waveformDragBeats(0, 10, 0) == null);
+}
+
+test "a navigator drag scales by the whole track" {
+    var map = HitMap.init(std.testing.allocator);
+    defer map.deinit();
+    drawLaneFrame(&map, 0, lane_wave);
+
+    try expectClose(32, map.navDragBeats(0, 80, 128).?);
+    try std.testing.expect(map.navDragBeats(0, 80, 0) == null);
+}
+
+test "a navigator press clamps to the track bounds" {
+    var map = HitMap.init(std.testing.allocator);
+    defer map.deinit();
+    drawLaneFrame(&map, 0, lane_wave);
+
+    try expectClose(0, map.navBeatAt(0, 0, 128).?);
+    try expectClose(64, map.navBeatAt(0, 200, 128).?);
+    try expectClose(128, map.navBeatAt(0, 900, 128).?);
+}
+
+test "an EQ plot maps x to frequency and y to gain" {
+    var map = HitMap.init(std.testing.allocator);
+    defer map.deinit();
+    drawLaneFrame(&map, 0, lane_wave);
+
+    const low = map.eqPointAt(0, .{ .x = 440, .y = 100 }).?;
+    try expectClose(pl.mixer.eq_min_hz, low.freq_hz);
+    try expectClose(pl.mixer.eq_max_gain_db, low.gain_db);
+
+    const middle = map.eqPointAt(0, .{ .x = 500, .y = 140 }).?;
+    try expectClose(800, middle.freq_hz);
+    try expectClose(0, middle.gain_db);
+
+    const high = map.eqPointAt(0, .{ .x = 900, .y = 400 }).?;
+    try expectClose(pl.mixer.eq_max_hz, high.freq_hz);
+    try expectClose(-pl.mixer.eq_max_gain_db, high.gain_db);
+}
+
+test "a press on a ball targets that band" {
+    var map = HitMap.init(std.testing.allocator);
+    defer map.deinit();
+    drawLaneFrame(&map, 0, lane_wave);
+
+    switch (map.hit(.{ .x = 450, .y = 135 }).?) {
+        .eq_node => |at| {
+            try std.testing.expectEqual(@as(usize, 0), at.lane);
+            try std.testing.expectEqual(@as(usize, 0), at.band);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "an EQ node drag reports the current point" {
+    var drag = Drag{};
+    _ = drag.press(.{ .eq_node = .{ .lane = 0, .band = 1 } }, .{ .x = 495, .y = 135 }, false);
+    const pull = drag.pull(.{ .x = 505, .y = 125 }).?;
+    try expectClose(505, pull.p.x);
+    try expectClose(125, pull.p.y);
 }

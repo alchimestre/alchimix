@@ -2,39 +2,98 @@
 //!
 //! One SDL output stream plays a single mixed signal. Every lane is a decoder
 //! process piping `f32le` into a ring buffer, and this file does the summing and
-//! the filter. Lanes therefore share one clock: no player starts before another,
+//! the EQ. Lanes therefore share one clock: no player starts before another,
 //! and no change to one lane interrupts the rest.
 
 const std = @import("std");
 const device_mod = @import("device.zig");
 const Track = @import("../domain/track.zig").Track;
 
+/// Low shelf, bell, high shelf, in that order.
+pub const band_count = 3;
+pub const eq_max_gain_db: f32 = 12;
+pub const eq_min_hz: f32 = 40;
+pub const eq_max_hz: f32 = 16000;
+
+pub const EqPreset = enum(u2) { none, lpf, hpf, bpf };
+
+pub fn presetEq(preset: EqPreset) EqParams {
+    return switch (preset) {
+        .none => .{},
+        .lpf => .{
+            .gain_db = .{ 0, 0, -eq_max_gain_db },
+            .freq_hz = .{ 120, 1000, 2000 },
+        },
+        .hpf => .{
+            .gain_db = .{ -eq_max_gain_db, 0, 0 },
+            .freq_hz = .{ 200, 1000, 8000 },
+        },
+        .bpf => .{
+            .gain_db = .{ -eq_max_gain_db, eq_max_gain_db, -eq_max_gain_db },
+            .freq_hz = .{ 200, 1000, 3000 },
+        },
+    };
+}
+
+/// One band per entry: low shelf, bell, high shelf.
+pub const EqParams = struct {
+    gain_db: [band_count]f32 = .{ 0, 0, 0 },
+    freq_hz: [band_count]f32 = .{ 120, 1000, 8000 },
+    q: [band_count]f32 = .{ 0.707, 1.0, 0.707 },
+
+    /// All bands at unity: the mix can skip the biquads entirely.
+    pub fn isFlat(self: EqParams) bool {
+        for (self.gain_db) |gain| {
+            if (@abs(gain) >= 0.01) return false;
+        }
+        return true;
+    }
+};
+
 pub const Lane = struct {
+    /// Slot identity. A crate may hold the same track twice, so the track id
+    /// alone cannot name a lane.
+    uid: u64 = 0,
     track: Track,
     /// Where playback starts, in seconds into the track.
     start_s: f64,
     /// Master BPM divided by the track's BPM.
     tempo: f32,
-    /// Low pass position: 0 closed, 1 open.
-    filter: f32,
+    /// Three-band EQ, applied in place without restarting the decoder.
+    eq: EqParams = .{},
     /// Keep the pitch while the tempo changes; otherwise pitch follows speed.
     keylock: bool,
-    /// Silence before the audio, so the lane starts on a master bar.
-    delay_ms: u32 = 0,
+    /// Audio-clock time at which the lane may become audible, so it starts on
+    /// a master bar. Zero means as soon as the decoder is ready.
+    start_at_ns: i128 = 0,
+    /// Forces a decoder restart even when position and tempo look unchanged.
+    restart: bool = false,
 };
 
 const sample_rate = device_mod.sample_rate;
 const channels = device_mod.channels;
+/// Bins drawn across the EQ panel, log-spaced.
+pub const spectrum_bins = 32;
+/// Analysis window; filled over three pump ticks.
+const fft_size = 1024;
 /// Ten milliseconds per pump tick.
 const tick_frames = sample_rate / 100;
 const ring_frames = sample_rate * 2;
-const max_lanes = 8;
+pub const max_lanes = 8;
 /// Audio buffered before a lane starts playing, 100 ms.
 const prefill_frames = sample_rate / 10;
 
-/// Milliseconds of decoder buffering before a lane produces sound. The app
-/// leads its clock by this much so the playhead matches what is heard.
-pub const prefill_ms: u32 = prefill_frames * 1000 / sample_rate;
+/// What the audio side knows about a lane, for a transport that must not guess.
+pub const LaneState = union(enum) {
+    /// No decoder exists for this track: it never started.
+    missing,
+    /// The decoder is buffering or waiting for its start time.
+    pending,
+    /// Audio-clock time the lane first produced samples.
+    started: i128,
+    /// The decoder is gone and its buffer is drained.
+    ended,
+};
 
 const Biquad = struct {
     b0: f32 = 1,
@@ -45,17 +104,82 @@ const Biquad = struct {
     z1: f32 = 0,
     z2: f32 = 0,
 
-    fn setLowPass(self: *Biquad, cutoff_hz: f32) void {
-        const hz = std.math.clamp(cutoff_hz, 20, sample_rate * 0.45);
+    fn setBand(self: *Biquad, band: usize, params: EqParams) void {
+        const gain_db = std.math.clamp(params.gain_db[band], -24, 24);
+        const hz = std.math.clamp(params.freq_hz[band], 20, sample_rate * 0.45);
+        const q = std.math.clamp(params.q[band], 0.1, 10);
         const w0 = 2 * std.math.pi * hz / sample_rate;
         const cos = @cos(w0);
-        const alpha = @sin(w0) / (2 * 0.707);
-        const a0 = 1 + alpha;
-        self.b0 = ((1 - cos) / 2) / a0;
-        self.b1 = (1 - cos) / a0;
-        self.b2 = self.b0;
-        self.a1 = (-2 * cos) / a0;
-        self.a2 = (1 - alpha) / a0;
+        const sin = @sin(w0);
+        const a = std.math.pow(f32, 10, gain_db / 40);
+        switch (band) {
+            // Low shelf and high shelf use S = 1: the steepest slope that
+            // still meets the plateau without a resonant overshoot.
+            0 => {
+                const alpha = sin / 2 * @sqrt(@as(f32, 2));
+                const two_sqrt_a_alpha = 2 * @sqrt(a) * alpha;
+                const a_plus = a + 1;
+                const a_minus = a - 1;
+                self.setCoefficients(
+                    a * (a_plus - a_minus * cos + two_sqrt_a_alpha),
+                    2 * a * (a_minus - a_plus * cos),
+                    a * (a_plus - a_minus * cos - two_sqrt_a_alpha),
+                    a_plus + a_minus * cos + two_sqrt_a_alpha,
+                    -2 * (a_minus + a_plus * cos),
+                    a_plus + a_minus * cos - two_sqrt_a_alpha,
+                );
+            },
+            1 => {
+                const alpha = sin / (2 * q);
+                self.setCoefficients(
+                    1 + alpha * a,
+                    -2 * cos,
+                    1 - alpha * a,
+                    1 + alpha / a,
+                    -2 * cos,
+                    1 - alpha / a,
+                );
+            },
+            else => {
+                const alpha = sin / 2 * @sqrt(@as(f32, 2));
+                const two_sqrt_a_alpha = 2 * @sqrt(a) * alpha;
+                const a_plus = a + 1;
+                const a_minus = a - 1;
+                self.setCoefficients(
+                    a * (a_plus + a_minus * cos + two_sqrt_a_alpha),
+                    -2 * a * (a_minus + a_plus * cos),
+                    a * (a_plus + a_minus * cos - two_sqrt_a_alpha),
+                    a_plus - a_minus * cos + two_sqrt_a_alpha,
+                    2 * (a_minus - a_plus * cos),
+                    a_plus - a_minus * cos - two_sqrt_a_alpha,
+                );
+            },
+        }
+    }
+
+    fn setCoefficients(self: *Biquad, b0: f32, b1: f32, b2: f32, a0: f32, a1: f32, a2: f32) void {
+        self.b0 = b0 / a0;
+        self.b1 = b1 / a0;
+        self.b2 = b2 / a0;
+        self.a1 = a1 / a0;
+        self.a2 = a2 / a0;
+    }
+
+    /// Magnitude response at `hz`, in dB, for drawing the curve.
+    fn responseDb(self: *const Biquad, hz: f32) f32 {
+        const clamped = std.math.clamp(hz, 1, sample_rate * 0.49);
+        const w = 2 * std.math.pi * clamped / sample_rate;
+        const cos1 = @cos(w);
+        const sin1 = @sin(w);
+        const cos2 = @cos(2 * w);
+        const sin2 = @sin(2 * w);
+        const num_re = self.b0 + self.b1 * cos1 + self.b2 * cos2;
+        const num_im = -(self.b1 * sin1 + self.b2 * sin2);
+        const den_re = 1 + self.a1 * cos1 + self.a2 * cos2;
+        const den_im = -(self.a1 * sin1 + self.a2 * sin2);
+        const num = @sqrt(num_re * num_re + num_im * num_im);
+        const den = @sqrt(den_re * den_re + den_im * den_im);
+        return 20 * @log10(@max(num / den, 1e-6));
     }
 
     fn process(self: *Biquad, input: f32) f32 {
@@ -66,14 +190,106 @@ const Biquad = struct {
     }
 };
 
+/// Combined magnitude of the three bands at `hz`, in dB.
+pub fn responseDb(params: EqParams, hz: f32) f32 {
+    var total: f32 = 0;
+    for (0..band_count) |band| {
+        var bq: Biquad = .{};
+        bq.setBand(band, params);
+        total += bq.responseDb(hz);
+    }
+    return total;
+}
+
+fn processBands(bands: *[band_count]Biquad, sample: f32) f32 {
+    var out = sample;
+    for (bands) |*bq| out = bq.process(out);
+    return out;
+}
+
+const Complex = struct { re: f32, im: f32 };
+
+fn fft(buffer: []Complex) void {
+    const n = buffer.len;
+    var reversed: usize = 0;
+    for (1..n) |i| {
+        var bit = n >> 1;
+        while (reversed & bit != 0) : (bit >>= 1) reversed ^= bit;
+        reversed ^= bit;
+        if (i < reversed) std.mem.swap(Complex, &buffer[i], &buffer[reversed]);
+    }
+    var len: usize = 2;
+    while (len <= n) : (len <<= 1) {
+        const step = -2 * std.math.pi / @as(f32, @floatFromInt(len));
+        const root = Complex{ .re = @cos(step), .im = @sin(step) };
+        var start: usize = 0;
+        while (start < n) : (start += len) {
+            var w = Complex{ .re = 1, .im = 0 };
+            for (0..len / 2) |k| {
+                const u = buffer[start + k];
+                const v = buffer[start + k + len / 2];
+                const vr = v.re * w.re - v.im * w.im;
+                const vi = v.re * w.im + v.im * w.re;
+                buffer[start + k] = .{ .re = u.re + vr, .im = u.im + vi };
+                buffer[start + k + len / 2] = .{ .re = u.re - vr, .im = u.im - vi };
+                w = .{ .re = w.re * root.re - w.im * root.im, .im = w.re * root.im + w.im * root.re };
+            }
+        }
+    }
+}
+
+/// Lower edge of a drawn spectrum band, in Hz.
+pub fn spectrumFreq(band: usize) f32 {
+    return eq_min_hz * std.math.pow(f32, eq_max_hz / eq_min_hz, @as(f32, @floatFromInt(band)) / spectrum_bins);
+}
+
+fn pushSpectrum(slot: *Slot, sample: f32) void {
+    slot.fft_window[slot.fft_fill] = sample;
+    slot.fft_fill += 1;
+    if (slot.fft_fill < fft_size) return;
+    slot.fft_fill = 0;
+    computeSpectrum(slot);
+}
+
+fn computeSpectrum(slot: *Slot) void {
+    var buffer: [fft_size]Complex = undefined;
+    const last = @as(f32, @floatFromInt(fft_size - 1));
+    for (0..fft_size) |i| {
+        const phase = 2 * std.math.pi * @as(f32, @floatFromInt(i)) / last;
+        buffer[i] = .{ .re = slot.fft_window[i] * (0.5 - 0.5 * @cos(phase)), .im = 0 };
+    }
+    fft(&buffer);
+    const bin_hz = @as(f32, sample_rate) / fft_size;
+    for (0..spectrum_bins) |band| {
+        const low = spectrumFreq(band) / bin_hz;
+        const high = spectrumFreq(band + 1) / bin_hz;
+        var first: usize = @intFromFloat(low);
+        var end: usize = @intFromFloat(high);
+        first = @min(first, fft_size / 2 - 1);
+        end = @min(@max(end, first + 1), fft_size / 2);
+        var peak: f32 = 0;
+        for (first..end) |bin| {
+            const re = buffer[bin].re;
+            const im = buffer[bin].im;
+            peak = @max(peak, @sqrt(re * re + im * im));
+        }
+        const magnitude = peak / (@as(f32, fft_size) / 2);
+        const db = 20 * @log10(@max(magnitude, 1e-5));
+        const value = std.math.clamp((db + 80) / 80, 0, 1);
+        slot.spectrum[band] = @max(value, slot.spectrum[band] * 0.86);
+    }
+}
+
 const Slot = struct {
     active: bool = false,
+    uid: u64 = 0,
     track_id: u64 = 0,
     start_s: f64 = -1,
     tempo: f32 = 1,
     keylock: bool = true,
-    filter: f32 = 1,
-    applied_filter: f32 = -1,
+    eq: EqParams = .{},
+    /// Bands changed; recompute the shared coefficients before the next block.
+    eq_dirty: bool = false,
     child: ?std.process.Child = null,
     /// Decoder stdout, nonblocking, drained by the pump thread.
     file: ?std.Io.File = null,
@@ -83,11 +299,21 @@ const Slot = struct {
     tail: usize = 0,
     /// Channel of the next sample, so a split read keeps frame alignment.
     channel_cursor: usize = 0,
-    eq: [channels]Biquad = @splat(.{}),
+    biquads: [channels][band_count]Biquad = @splat(@splat(.{})),
+    fft_window: [fft_size]f32 = @splat(0),
+    fft_fill: usize = 0,
+    /// Smoothed 0..1 energy per log band, read by the EQ panel.
+    spectrum: [spectrum_bins]f32 = @splat(0),
     /// False until the decoder has buffered enough to start cleanly. A lane
     /// that starts mid-stream is offset from every other lane.
     ready: bool = false,
-    mute_until_ns: i128 = 0,
+    /// Audio-clock time this lane first produced samples.
+    started_ns: i128 = 0,
+    /// True once this lane produced its first sample; audio time zero is a
+    /// valid start, so this cannot be a sentinel.
+    started: bool = false,
+    /// Absolute audio-clock time the lane may become audible.
+    start_at_ns: i128 = 0,
 };
 
 pub const Mixer = struct {
@@ -98,6 +324,8 @@ pub const Mixer = struct {
     slots: [max_lanes]Slot = undefined,
     thread: ?std.Thread = null,
     running: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    /// Frames actually written to the device, the transport's clock.
+    clock_frames: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
     out: []f32 = &.{},
     /// A fresh start holds the mix until every lane in the batch has its
     /// prefill, so lanes cannot begin tens of milliseconds apart.
@@ -130,8 +358,8 @@ pub const Mixer = struct {
     }
 
     /// Replaces the set of playing lanes. Lanes already playing keep their
-    /// decoder unless their position or tempo changed; filter changes are
-    /// applied in place, so they never interrupt the audio.
+    /// decoder unless their position or tempo changed; EQ changes are applied
+    /// in place, so they never interrupt the audio.
     pub fn play(self: *Mixer, lanes: []const Lane) void {
         self.ensureThread();
         self.device.open() catch return;
@@ -146,7 +374,7 @@ pub const Mixer = struct {
         for (lanes) |lane| {
             var target: ?*Slot = null;
             for (&self.slots, 0..) |*slot, index| {
-                if (!used[index] and slot.active and slot.track_id == lane.track.id) {
+                if (!used[index] and slot.active and slot.uid == lane.uid) {
                     used[index] = true;
                     target = slot;
                     reused = true;
@@ -205,24 +433,42 @@ pub const Mixer = struct {
         for (finished[0..finished_count]) |slot| self.endRelease(slot);
     }
 
-    /// True when every audible lane has its prefill. The app holds its clock
-    /// until this is true, so the playhead starts with the sound.
-    pub fn ready(self: *Mixer) bool {
-        if (!self.mutex.tryLock()) return false;
+    /// Audio-clock time: how much audio has actually been handed to the
+    /// device. The transport derives its playhead from this, not from a wall
+    /// clock or a guessed decoder delay.
+    pub fn nowNs(self: *const Mixer) i128 {
+        const frames = self.clock_frames.load(.monotonic);
+        const ns = @as(u128, frames) * 1_000_000_000 / sample_rate;
+        return @intCast(ns);
+    }
+
+    /// Reports what a lane's decoder is doing. Lock-free callers get `pending`
+    /// rather than a wrong answer.
+    pub fn laneState(self: *Mixer, uid: u64) LaneState {
+        if (!self.mutex.tryLock()) return .pending;
         defer self.mutex.unlock(self.io);
 
         for (&self.slots) |*slot| {
-            if (!slot.active) continue;
-            if (slot.file != null and bufferedFrames(slot) < prefill_frames) return false;
+            if (!slot.active or slot.uid != uid) continue;
+            if (slot.file == null and slot.tail == slot.head) return .ended;
+            if (slot.started) return .{ .started = slot.started_ns };
+            return .pending;
         }
-        return true;
+        return .missing;
     }
 
-    pub fn active(self: *const Mixer) bool {
+    /// Copies the smoothed spectrum of one lane into `out`. Never blocks the
+    /// pump: a busy mix leaves the previous frame's bars on screen.
+    pub fn spectrum(self: *Mixer, uid: u64, out: []f32) void {
+        @memset(out, 0);
+        if (!self.mutex.tryLock()) return;
+        defer self.mutex.unlock(self.io);
         for (&self.slots) |*slot| {
-            if (slot.active) return true;
+            if (!slot.active or slot.uid != uid) continue;
+            const count = @min(out.len, spectrum_bins);
+            @memcpy(out[0..count], slot.spectrum[0..count]);
+            return;
         }
-        return false;
     }
 
     fn ensureThread(self: *Mixer) void {
@@ -234,25 +480,21 @@ pub const Mixer = struct {
     /// Returns true when the decoder was restarted, which needs the joint
     /// start gate: otherwise the restarted lanes begin at different times.
     fn apply(self: *Mixer, slot: *Slot, lane: Lane) bool {
-        const same_track = slot.active and slot.track_id == lane.track.id;
+        const same_track = slot.active and slot.uid == lane.uid;
         const same_start = @abs(slot.start_s - lane.start_s) < 0.001;
         const same_tempo = @abs(slot.tempo - lane.tempo) < 0.0005 and slot.keylock == lane.keylock;
 
         var restarted = false;
-        if (!same_track or !same_start or !same_tempo) {
+        if (lane.restart or !same_track or !same_start or !same_tempo) {
             self.beginRelease(slot);
             self.endRelease(slot);
             self.start(slot, lane);
             restarted = true;
         }
 
-        slot.filter = lane.filter;
-        if (lane.delay_ms > 0) {
-            slot.mute_until_ns = std.Io.Timestamp.now(self.io, .awake).nanoseconds +
-                @as(i128, lane.delay_ms) * std.time.ns_per_ms;
-        } else {
-            slot.mute_until_ns = 0;
-        }
+        slot.eq = lane.eq;
+        slot.eq_dirty = true;
+        slot.start_at_ns = lane.start_at_ns;
         return restarted;
     }
 
@@ -305,17 +547,24 @@ pub const Mixer = struct {
         }) catch return;
 
         slot.active = true;
+        slot.uid = lane.uid;
         slot.track_id = lane.track.id;
         slot.start_s = lane.start_s;
         slot.tempo = lane.tempo;
         slot.keylock = lane.keylock;
-        slot.filter = lane.filter;
-        slot.applied_filter = -1;
+        slot.eq = lane.eq;
+        slot.eq_dirty = true;
         slot.head = 0;
         slot.tail = 0;
         slot.channel_cursor = 0;
         slot.ready = false;
-        for (&slot.eq) |*eq| eq.* = .{};
+        slot.started = false;
+        slot.start_at_ns = lane.start_at_ns;
+        slot.fft_fill = 0;
+        @memset(&slot.spectrum, 0);
+        for (&slot.biquads) |*channel| {
+            for (channel) |*bq| bq.* = .{};
+        }
         slot.quit.store(false, .release);
         slot.child = child;
         const pipe = child.stdout orelse {
@@ -344,6 +593,9 @@ pub const Mixer = struct {
         slot.head = 0;
         slot.tail = 0;
         slot.channel_cursor = 0;
+        slot.started = false;
+        slot.fft_fill = 0;
+        @memset(&slot.spectrum, 0);
     }
 
     /// Moves what the decoder produced into the lane's ring, then stops at
@@ -413,7 +665,7 @@ pub const Mixer = struct {
         }
 
         for (&self.slots) |*slot| {
-            if (!slot.active or slot.mute_until_ns > now) continue;
+            if (!slot.active or slot.start_at_ns > now) continue;
 
             // Wait for a real buffer before the first sample: otherwise the
             // lane begins wherever the decoder happened to be by the time the
@@ -422,20 +674,32 @@ pub const Mixer = struct {
                 if (bufferedFrames(slot) < prefill_frames and slot.file != null) continue;
                 slot.ready = true;
             }
-            // Fully open means no filtering at all: a 20 kHz biquad still
-            // colours the top octave.
-            const bypass = slot.filter >= 0.999;
-            if (!bypass and slot.applied_filter != slot.filter) {
-                slot.applied_filter = slot.filter;
-                const cutoff = 200 * std.math.pow(f32, 100, std.math.clamp(slot.filter, 0, 1));
-                for (&slot.eq) |*eq| eq.setLowPass(cutoff);
+            if (slot.head == slot.tail) continue;
+            // First audible frame: this is the time the transport must use,
+            // whatever the decoder's own latency was.
+            if (!slot.started) {
+                slot.started = true;
+                slot.started_ns = now;
+            }
+            // All bands at unity is a true bypass: three biquads still colour
+            // the signal and cost cycles.
+            const flat = slot.eq.isFlat();
+            if (!flat and slot.eq_dirty) {
+                slot.eq_dirty = false;
+                for (&slot.biquads) |*channel| {
+                    for (channel, 0..) |*bq, band| bq.setBand(band, slot.eq);
+                }
             }
             var frame: usize = 0;
             while (frame < frames and slot.tail != slot.head) : (frame += 1) {
+                var mono: f32 = 0;
                 for (0..channels) |channel| {
-                    const sample = slot.ring[slot.tail * channels + channel];
-                    self.out[frame * channels + channel] += if (bypass) sample else slot.eq[channel].process(sample);
+                    const dry = slot.ring[slot.tail * channels + channel];
+                    const sample = if (flat) dry else processBands(&slot.biquads[channel], dry);
+                    self.out[frame * channels + channel] += sample;
+                    mono += sample;
                 }
+                pushSpectrum(slot, mono / channels);
                 slot.tail = (slot.tail + 1) % ring_frames;
             }
         }
@@ -515,17 +779,114 @@ pub const Mixer = struct {
             if (frames > tick_frames) frames = tick_frames;
             if (frames == 0) frames = 64;
 
-            const now = std.Io.Timestamp.now(self.io, .awake).nanoseconds;
-            if (self.mutex.tryLock()) {
-                for (&self.slots) |*slot| {
-                    if (!slot.active) continue;
-                    self.drain(slot);
-                }
-                self.mixFrames(frames, now);
-                self.mutex.unlock(self.io);
+            const now = self.nowNs();
+            if (!self.mutex.tryLock()) continue;
+
+            for (&self.slots) |*slot| {
+                if (!slot.active) continue;
+                self.drain(slot);
             }
+            self.mixFrames(frames, now);
+            self.mutex.unlock(self.io);
 
             self.device.write(self.out[0 .. frames * channels]);
+            _ = self.clock_frames.fetchAdd(frames, .monotonic);
         }
     }
 };
+
+const testing = std.testing;
+
+fn bandChain(params: EqParams) [band_count]Biquad {
+    var bands: [band_count]Biquad = @splat(.{});
+    for (&bands, 0..) |*bq, band| bq.setBand(band, params);
+    return bands;
+}
+
+/// Steady-state gain of a chain at `hz`, in dB, measured on a sine.
+fn sineGainDb(bands: []Biquad, hz: f32) f32 {
+    const amplitude: f32 = 0.25;
+    const settle = 8_000;
+    const total = 24_000;
+    const step = 2 * std.math.pi * hz / sample_rate;
+    var phase: f32 = 0;
+    var peak: f32 = 0;
+    for (0..total) |i| {
+        const input = amplitude * @sin(phase);
+        phase += step;
+        if (phase > 2 * std.math.pi) phase -= 2 * std.math.pi;
+        var out = input;
+        for (bands) |*bq| out = bq.process(out);
+        if (i >= settle) peak = @max(peak, @abs(out));
+    }
+    return 20 * @log10(peak / amplitude);
+}
+
+test "a low shelf lifts the bass and leaves the treble alone" {
+    var params: EqParams = .{};
+    params.gain_db = .{ 12, 0, 0 };
+    var bands = bandChain(params);
+    try testing.expect(sineGainDb(&bands, 50) > 10);
+    try testing.expect(@abs(sineGainDb(&bands, 8000)) < 1.5);
+}
+
+test "a bell touches its centre only" {
+    var params: EqParams = .{};
+    params.gain_db = .{ 0, 12, 0 };
+    var bands = bandChain(params);
+    try testing.expectApproxEqAbs(@as(f32, 12), sineGainDb(&bands, 1000), 0.5);
+    try testing.expect(@abs(sineGainDb(&bands, 100)) < 1);
+    try testing.expect(@abs(sineGainDb(&bands, 16000)) < 1);
+}
+
+test "a high shelf cuts the top without touching the bass" {
+    var params: EqParams = .{};
+    params.gain_db = .{ 0, 0, -12 };
+    var bands = bandChain(params);
+    try testing.expect(sineGainDb(&bands, 16000) < -8);
+    try testing.expect(@abs(sineGainDb(&bands, 200)) < 1);
+}
+
+test "all bands at unity are flat" {
+    const flat: EqParams = .{};
+    try testing.expect(flat.isFlat());
+    var params: EqParams = .{};
+    params.gain_db = .{ 0, 0.5, 0 };
+    try testing.expect(!params.isFlat());
+}
+
+test "responseDb agrees with the rendered shelf" {
+    var params: EqParams = .{};
+    params.gain_db = .{ 12, 0, 0 };
+    try testing.expectApproxEqAbs(@as(f32, 11.54), responseDb(params, 50), 0.1);
+}
+
+test "presets shape the expected side of the spectrum" {
+    const lpf = presetEq(.lpf);
+    try testing.expect(responseDb(lpf, 4000) < -6);
+    try testing.expect(@abs(responseDb(lpf, 100)) < 1);
+
+    const hpf = presetEq(.hpf);
+    try testing.expect(responseDb(hpf, 100) < -6);
+    try testing.expect(@abs(responseDb(hpf, 8000)) < 1);
+
+    const bpf = presetEq(.bpf);
+    try testing.expect(responseDb(bpf, 1000) > 6);
+    try testing.expect(responseDb(bpf, 100) < -6);
+}
+
+test "the spectrum peaks in the band that contains the tone" {
+    var slot: Slot = .{};
+    const tone_hz: f32 = 1000;
+    for (0..fft_size) |i| {
+        slot.fft_window[i] = 0.5 * @sin(2 * std.math.pi * tone_hz * @as(f32, @floatFromInt(i)) / sample_rate);
+    }
+    computeSpectrum(&slot);
+
+    var best: usize = 0;
+    for (slot.spectrum, 0..) |value, band| {
+        if (value > slot.spectrum[best]) best = band;
+    }
+    try testing.expect(spectrumFreq(best) <= tone_hz);
+    try testing.expect(tone_hz < spectrumFreq(best + 1));
+}

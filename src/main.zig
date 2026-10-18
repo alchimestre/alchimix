@@ -29,7 +29,7 @@ fn openCanvas(init: std.process.Init) !void {
     const library = try openLibrary(init, &collection, &demo);
     defer library.deinit();
 
-    var app = App.init(init.gpa, library, init.io);
+    var app = try App.init(init.gpa, library, init.io);
     defer app.deinit();
 
     try app.refresh();
@@ -101,11 +101,17 @@ fn renderMix(init: std.process.Init, args: *std.process.Args.Iterator) !void {
     while (args.next()) |spec| {
         if (count >= lanes.len) break;
 
-        // `file`, or `file@start_seconds@tempo`.
+        // `file`, or `file@start_seconds@tempo`, optionally followed by
+        // `@low,mid,high` gains in dB.
         var parts = std.mem.splitScalar(u8, spec, '@');
         const path = parts.next() orelse continue;
         const start = if (parts.next()) |text| std.fmt.parseFloat(f64, text) catch 0 else 0;
         const tempo = if (parts.next()) |text| std.fmt.parseFloat(f32, text) catch 1 else 1;
+        var eq: pl.mixer.EqParams = .{};
+        if (parts.next()) |text| {
+            var gains = std.mem.splitScalar(u8, text, ',');
+            for (&eq.gain_db) |*gain| gain.* = if (gains.next()) |value| std.fmt.parseFloat(f32, value) catch 0 else 0;
+        }
 
         var track = pl.track.Track.init(count + 1, "", "");
         track.file_path = path;
@@ -113,7 +119,7 @@ fn renderMix(init: std.process.Init, args: *std.process.Args.Iterator) !void {
             .track = track,
             .start_s = start,
             .tempo = tempo,
-            .filter = 1,
+            .eq = eq,
             .keylock = true,
         };
         count += 1;
