@@ -18,10 +18,11 @@ const Candidate = pl.suggest.Candidate;
 const Lane = struct {
     track_id: u64 = 0,
     analysis: ?pl.analysis.Analysis = null,
-    /// Beat at the left edge of this lane's window.
-    start_beat: f32 = 0,
+    /// Beat under the playhead: what playback starts on and what the window
+    /// is centred around.
+    beat: f32 = 0,
     /// Unrounded drag position, so sub-beat movements are not lost to snapping.
-    start_raw: f32 = 0,
+    beat_raw: f32 = 0,
     /// Band filter, 0 closed to 1 open.
     filter: f32 = 1,
     /// Height of the filter strip, in physical pixels.
@@ -75,6 +76,8 @@ pub const App = struct {
     master_bpm: f32 = 128,
     master_text: std.ArrayList(u8) = .empty,
     master_locked: bool = true,
+    /// Keep the pitch while the tempo changes.
+    pitch_lock: bool = true,
     /// Where the last press landed, for controls that act on absolute position.
     last_point: hit.Point = .{},
 
@@ -352,7 +355,7 @@ pub const App = struct {
         var entry = dvui.textEntry(@src(), .{
             .text = .{ .array_list = .{ .backing = &self.bpm_text, .allocator = self.allocator } },
         }, .{
-            .min_size_content = .{ .w = 52, .h = 26 },
+            .min_size_content = .{ .w = 46, .h = 26 },
             .padding = .{ .x = 6, .y = 2 },
             .margin = .{ .x = 2, .y = 2 },
             .corners = square,
@@ -554,13 +557,19 @@ pub const App = struct {
                 const lane = &self.grid.items[index];
                 const total: f32 = @floatFromInt(totalBeats(lane));
                 const fraction = std.math.clamp((self.last_point.x - lane.nav_x) / @max(1, lane.nav_w), 0, 1);
-                lane.start_raw = fraction * total;
+                lane.beat_raw = fraction * total;
                 snapLane(lane);
                 dvui.refresh(null, @src(), null);
             },
             .toggle_master_lock => {
                 self.master_locked = !self.master_locked;
                 if (!self.master_locked) self.master_bpm = self.masterBpm();
+                if (self.grid_playing) self.stopTransport();
+                dvui.refresh(null, @src(), null);
+            },
+            .toggle_pitch => {
+                self.pitch_lock = !self.pitch_lock;
+                if (self.grid_playing) self.stopTransport();
                 dvui.refresh(null, @src(), null);
             },
             .toggle_wave_mode => {
@@ -623,12 +632,12 @@ pub const App = struct {
             if (lane.analysis == null or index >= self.crate.len()) continue;
             const track = self.crate.at(index).?.*;
             const bpm: f32 = if (track.bpm > 0) @floatCast(track.bpm) else 128;
-            const beat = lane.start_beat + beats_visible / 2;
             lanes[count] = .{
                 .track = track,
-                .start_s = beat * 60 / bpm,
+                .start_s = lane.beat * 60 / bpm,
                 .tempo = master / bpm,
                 .filter = lane.filter,
+                .keylock = self.pitch_lock,
             };
             count += 1;
         }
@@ -649,9 +658,15 @@ pub const App = struct {
         return @as(f32, @floatCast(elapsed_ns / 1_000_000_000 * bpm / 60));
     }
 
-    /// Beat at the left edge of a lane's window.
+    /// Beat under the playhead, including whatever the transport has played.
+    fn laneBeat(self: *const App, lane: *const Lane) f32 {
+        return lane.beat + self.elapsedBeats();
+    }
+
+    /// Beat at the left edge of a lane's window. Negative at the start of a
+    /// track, before the first bar.
     fn laneStart(self: *const App, lane: *const Lane) f32 {
-        return lane.start_beat + self.elapsedBeats();
+        return self.laneBeat(lane) - beats_visible / 2;
     }
 
     /// Fold elapsed time into every lane, so a manual move starts from now.
@@ -659,17 +674,16 @@ pub const App = struct {
         if (!self.grid_playing) return;
         const elapsed = self.elapsedBeats();
         for (self.grid.items) |*lane| {
-            lane.start_raw += elapsed;
-            lane.start_beat = @round(lane.start_raw);
+            lane.beat_raw += elapsed;
+            lane.beat = @round(lane.beat_raw);
         }
         self.grid_started_at = std.Io.Timestamp.now(self.io, .awake).nanoseconds;
     }
 
     fn snapLane(lane: *Lane) void {
-        const total = totalBeats(lane);
-        const last: f32 = @max(0, @as(f32, @floatFromInt(total)) - beats_visible);
-        lane.start_raw = std.math.clamp(lane.start_raw, 0, last);
-        lane.start_beat = @round(lane.start_raw);
+        const total: f32 = @floatFromInt(totalBeats(lane));
+        lane.beat_raw = std.math.clamp(lane.beat_raw, 0, total);
+        lane.beat = @round(lane.beat_raw);
     }
 
     /// Picks a block for the previewer; three lanes is the cap.
@@ -758,13 +772,10 @@ pub const App = struct {
 
     /// Master tempo at the right corner, with a lock that ties it to the seed.
     fn frameMaster(self: *App) void {
-        var spacer = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal });
-        spacer.deinit();
-
         labelStyled(@src(), "master", .{
             .color_text = .{ .color = Palette.muted },
             .font = metaFont(),
-            .margin = .{ .x = 12, .y = 6 },
+            .margin = .{ .x = 8, .y = 6 },
         });
 
         if (self.master_locked) {
@@ -783,7 +794,7 @@ pub const App = struct {
             .backing = &self.master_text,
             .allocator = self.allocator,
         } } }, .{
-            .min_size_content = .{ .w = 52, .h = 26 },
+            .min_size_content = .{ .w = 46, .h = 26 },
             .padding = .{ .x = 6, .y = 2 },
             .margin = .{ .x = 2, .y = 2 },
             .background = true,
@@ -799,12 +810,14 @@ pub const App = struct {
             const parsed = std.fmt.parseFloat(f32, self.master_text.items) catch null;
             if (parsed) |value| self.master_bpm = std.math.clamp(value, 40, 220);
             self.master_locked = false;
+            // The running snippet was tuned to the old tempo.
+            if (self.grid_playing) self.stopTransport();
         }
 
         {
             var chip = dvui.box(@src(), .{ .dir = .horizontal }, .{
-                .margin = .{ .x = 6, .y = 4 },
-                .padding = .{ .x = 8, .y = 2 },
+                .margin = .{ .x = 3, .y = 4 },
+                .padding = .{ .x = 5, .y = 2 },
                 .background = true,
                 .color_fill = .{ .color = Palette.field },
                 .id_extra = 72,
@@ -816,6 +829,23 @@ pub const App = struct {
                 .id_extra = 73,
             });
             self.hit_map.append(rectFrom(chip.data().rectScaleFromParent().r), .master_lock);
+        }
+
+        {
+            var chip = dvui.box(@src(), .{ .dir = .horizontal }, .{
+                .margin = .{ .x = 4, .y = 4 },
+                .padding = .{ .x = 8, .y = 2 },
+                .background = true,
+                .color_fill = .{ .color = Palette.field },
+                .id_extra = 74,
+            });
+            defer chip.deinit();
+            labelStyled(@src(), if (self.pitch_lock) "pitch" else "vinyl", .{
+                .color_text = .{ .color = if (self.pitch_lock) Palette.green else Palette.secondary },
+                .font = metaFont(),
+                .id_extra = 75,
+            });
+            self.hit_map.append(rectFrom(chip.data().rectScaleFromParent().r), .pitch_lock);
         }
     }
 
@@ -875,7 +905,7 @@ pub const App = struct {
                 if (self.grid_playing) self.stopTransport() else self.foldElapsed();
                 const lane = &self.grid.items[slot];
                 // Grab the wave: dragging right shows earlier audio.
-                lane.start_raw -= pull.dx * beats_visible / @max(1, lane.wave_w);
+                lane.beat_raw -= pull.dx * beats_visible / @max(1, lane.wave_w);
                 snapLane(lane);
                 dvui.refresh(null, @src(), null);
             },
@@ -884,7 +914,7 @@ pub const App = struct {
                 if (self.grid_playing) self.stopTransport() else self.foldElapsed();
                 const lane = &self.grid.items[slot];
                 const total: f32 = @floatFromInt(totalBeats(lane));
-                lane.start_raw += pull.dx / @max(1, lane.nav_w) * total;
+                lane.beat_raw += pull.dx / @max(1, lane.nav_w) * total;
                 snapLane(lane);
                 dvui.refresh(null, @src(), null);
             },
@@ -989,8 +1019,12 @@ pub const App = struct {
 
             const total = totalBeats(lane);
             const visible: f32 = @min(beats_visible, @as(f32, @floatFromInt(total)));
-            const start = if (total > 0) self.laneStart(lane) / @as(f32, @floatFromInt(total)) else 0;
-            const span = if (total > 0) visible / @as(f32, @floatFromInt(total)) else 1;
+            const window_start = @max(0, self.laneStart(lane));
+            const start = if (total > 0) window_start / @as(f32, @floatFromInt(total)) else 0;
+            const span = if (total > 0)
+                @min(visible, @max(1, @as(f32, @floatFromInt(total)) - window_start)) / @as(f32, @floatFromInt(total))
+            else
+                1;
 
             fillRect(self.allocator, bar_rect.x, bar_rect.y, bar_rect.w, bar_rect.h, Palette.field);
             if (lane.analysis) |*analysis| {
@@ -1630,17 +1664,17 @@ fn frameFooter(app: *App) void {
     spacer2.deinit();
 
     const entries = [_]struct { severity: f32, text: []const u8 }{
-        .{ .severity = 0, .text = "holds" },
-        .{ .severity = 0.3, .text = "1 step" },
-        .{ .severity = 0.6, .text = "2 steps" },
-        .{ .severity = 0.85, .text = "5 steps" },
-        .{ .severity = 1, .text = "clash" },
+        .{ .severity = 0, .text = "=" },
+        .{ .severity = 0.3, .text = "+1" },
+        .{ .severity = 0.6, .text = "+2" },
+        .{ .severity = 0.85, .text = "+5" },
+        .{ .severity = 1, .text = "x" },
     };
 
     for (entries, 0..) |entry, index| {
         var swatch = dvui.box(@src(), .{ .dir = .horizontal }, .{
             .min_size_content = .{ .w = 10, .h = 10 },
-            .margin = .{ .x = 12, .y = 8 },
+            .margin = .{ .x = 8, .y = 8 },
             .background = true,
             .color_fill = .{ .color = rampColor(entry.severity) },
             .id_extra = index,

@@ -12,6 +12,8 @@ pub const Lane = struct {
     tempo: f32,
     /// Low pass position: 0 closed, 1 open.
     filter: f32,
+    /// Keep the pitch while the tempo changes; otherwise pitch follows speed.
+    keylock: bool,
 };
 
 pub const snippet_s: u32 = 15;
@@ -55,10 +57,15 @@ pub const Mixer = struct {
         defer self.allocator.free(start);
         const length = std.fmt.allocPrint(self.allocator, "{d}", .{snippet_s}) catch return;
         defer self.allocator.free(length);
-        const chain = std.fmt.allocPrint(self.allocator, "atempo={d:.3},lowpass=f={d:.0}", .{
-            std.math.clamp(lane.tempo, 0.5, 2.0),
-            lowPassHz(lane.filter),
-        }) catch return;
+        const ratio = std.math.clamp(lane.tempo, 0.5, 2.0);
+        const chain = if (lane.keylock)
+            std.fmt.allocPrint(self.allocator, "atempo={d:.3},lowpass=f={d:.0}", .{
+                ratio, lowPassHz(lane.filter),
+            }) catch return
+        else
+            std.fmt.allocPrint(self.allocator, "asetrate={d:.0},aresample=48000,lowpass=f={d:.0}", .{
+                44100 * ratio, lowPassHz(lane.filter),
+            }) catch return;
         defer self.allocator.free(chain);
 
         const child = std.process.spawn(self.io, .{
