@@ -190,7 +190,7 @@ pub const App = struct {
             .search, .browse => {
                 const rows = self.found[0..@min(self.found.len, visible_rows)];
                 for (rows, 0..) |track, row_index| {
-                    _ = pickRow(self, row_index, track, null);
+                    pickRow(self, row_index, track, null);
                 }
             },
             .suggest => {
@@ -200,7 +200,7 @@ pub const App = struct {
                 var slot: usize = 0;
                 for (rows) |candidate| {
                     if (!passesFilter(self, candidate.transition)) continue;
-                    _ = pickRow(self, slot, candidate.track, candidate.transition);
+                    pickRow(self, slot, candidate.track, candidate.transition);
                     slot += 1;
                 }
             },
@@ -521,7 +521,7 @@ fn cardColor(app: *const App, index: usize, is_seed: bool) dvui.Color {
 
 /// Pressing a row starts a drag carrying that track; the click itself adds
 /// nothing, the drop does.
-fn pickRow(app: *App, row_index: usize, track: Track, step: ?Transition) bool {
+fn pickRow(app: *App, row_index: usize, track: Track, step: ?Transition) void {
     var meta_buffer: [32]u8 = undefined;
     const meta = trackMeta(track, &meta_buffer);
 
@@ -539,7 +539,6 @@ fn pickRow(app: *App, row_index: usize, track: Track, step: ?Transition) bool {
 
     const title_color = if (step) |known| stepColor(known) else Palette.ink;
 
-    var seeked = false;
     {
         var row = dvui.box(@src(), .{ .dir = .horizontal }, .{
             .expand = .horizontal,
@@ -587,9 +586,7 @@ fn pickRow(app: *App, row_index: usize, track: Track, step: ?Transition) bool {
         .shiftedLeft(88 * app.scale_hint);
     app.hit_map.append(row_rect, .{ .row = track });
 
-    if (progressBar(app, track, row_index * 16 + 9, 3)) seeked = true;
-
-    return seeked;
+    progressBar(app, track, row_index * 16 + 9, 3);
 }
 
 const Block = struct { action: BlockAction, rect: hit.Rect };
@@ -653,7 +650,7 @@ fn drawBlock(app: *App, index: usize, track: Track) Block {
         .id_extra = index * 16 + 3,
     });
 
-    _ = progressBar(app, track, index * 16 + 9, 4);
+    progressBar(app, track, index * 16 + 9, 4);
 
     return .{ .action = if (removed) .remove else .none, .rect = rect };
 }
@@ -719,9 +716,8 @@ fn fillRect(allocator: std.mem.Allocator, x: f32, y: f32, w: f32, h: f32, color:
     dvui.Path.fillConvex(builder.build(), .{ .color = .{ .color = color } });
 }
 
-/// The bar under a row or block: how far the snippet has run, and a click to
-/// jump. Returns true when the click was a seek.
-fn progressBar(app: *App, track: Track, id_extra: usize, height: f32) bool {
+/// The bar under a row or block: how far the snippet has run.
+fn progressBar(app: *App, track: Track, id_extra: usize, height: f32) void {
     var bar = dvui.box(@src(), .{ .dir = .horizontal }, .{
         .expand = .horizontal,
         .min_size_content = .{ .h = height },
@@ -733,25 +729,12 @@ fn progressBar(app: *App, track: Track, id_extra: usize, height: f32) bool {
     });
     defer bar.deinit();
 
-    var seeked = false;
-    const widget = bar.data();
-    const rect = widget.contentRectScale().r;
-
-    for (dvui.events()) |*event| {
-        if (event.evt != .mouse) continue;
-        const mouse = event.evt.mouse;
-        if (mouse.action != .press) continue;
-        if (!mouse.button.pointer()) continue;
-        if (!inside(rect, mouse.p)) continue;
-        app.player.seek(track, (mouse.p.x - rect.x) / rect.w);
-        seeked = true;
-    }
+    const rect = bar.data().contentRectScale().r;
 
     const progress = app.player.progress(track.id);
     if (progress > 0) {
         fillRect(app.allocator, rect.x, rect.y, rect.w * progress, rect.h, Palette.purple);
     }
-    return seeked;
 }
 
 /// Play and pause are drawn rather than typed: no font in reach has a pause
@@ -815,11 +798,6 @@ fn rectFrom(rect: dvui.Rect.Physical) hit.Rect {
 
 fn pointFrom(point: dvui.Point.Physical) hit.Point {
     return .{ .x = point.x, .y = point.y };
-}
-
-fn inside(rect: dvui.Rect.Physical, point: dvui.Point.Physical) bool {
-    return point.x >= rect.x and point.x <= rect.x + rect.w and
-        point.y >= rect.y and point.y <= rect.y + rect.h;
 }
 
 /// Along the bottom: the direction filters on the left, the tempo window and
