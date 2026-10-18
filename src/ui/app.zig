@@ -385,7 +385,7 @@ pub const App = struct {
         }
 
         // Scroll room past the last block: dropping at the end should not need
-        // the pointer on the very last card.
+        // the pointer on the very last block.
         var tail = dvui.box(@src(), .{ .dir = .vertical }, .{
             .expand = .horizontal,
             .min_size_content = .{ .h = 420 },
@@ -474,7 +474,7 @@ pub const App = struct {
         }
     }
 
-    /// The dragged card, translucent under the pointer, so the thing in hand is
+    /// The dragged block, translucent under the pointer, so the thing in hand is
     /// visible rather than only implied by the drop line.
     fn drawGhost(self: *App) void {
         const track = self.drag.carriedTrack() orelse
@@ -494,10 +494,10 @@ pub const App = struct {
         const y = self.pointer.y - height / 2;
 
         fillRect(self.allocator, x - 2, y - 2, width + 4, height + 4, fade(Palette.purple, alpha));
-        fillRect(self.allocator, x, y, width, height, fade(Palette.card, alpha));
+        fillRect(self.allocator, x, y, width, height, fade(Palette.block, alpha));
 
         const is_seed = if (self.drag.carriedBlock()) |index| self.crate.seed == index else false;
-        var card = dvui.box(@src(), .{ .dir = .vertical }, .{
+        var block = dvui.box(@src(), .{ .dir = .vertical }, .{
             .rect = .{
                 .x = x / scale + 14,
                 .y = y / scale + 10,
@@ -507,7 +507,7 @@ pub const App = struct {
             .background = false,
             .id_extra = 4000,
         });
-        defer card.deinit();
+        defer block.deinit();
 
         var title_buffer: [34]u8 = undefined;
         labelStyled(@src(), clippedTitle(track.title, &title_buffer), .{
@@ -544,11 +544,11 @@ pub const App = struct {
 
 const BlockAction = enum { none, remove };
 
-fn cardColor(app: *const App, index: usize, is_seed: bool) dvui.Color {
+fn blockColor(app: *const App, index: usize, is_seed: bool) dvui.Color {
     if (app.drag.carriedBlock()) |carried| {
         if (carried == index) return Palette.field;
     }
-    return if (is_seed) Palette.selection else Palette.card;
+    return if (is_seed) Palette.selection else Palette.block;
 }
 
 /// Pressing a row starts a drag carrying that track; the click itself adds
@@ -626,19 +626,19 @@ const Block = struct { action: BlockAction, rect: hit.Rect };
 fn drawBlock(app: *App, index: usize, track: Track) Block {
     const is_seed = app.crate.seed == index;
 
-    var card = dvui.box(@src(), .{ .dir = .vertical }, .{
+    var block = dvui.box(@src(), .{ .dir = .vertical }, .{
         .min_size_content = .{ .w = 380, .h = 112 },
         .padding = .{ .x = 14, .y = 10 },
         .margin = .{ .x = 6, .y = 6 },
         .background = true,
-        .color_fill = .{ .color = cardColor(app, index, is_seed) },
+        .color_fill = .{ .color = blockColor(app, index, is_seed) },
         .color_fill_hover = .{ .color = if (is_seed) Palette.selection else Palette.hover },
         .corners = square,
         .id_extra = index * 16,
     });
-    defer card.deinit();
+    defer block.deinit();
 
-    const rect = rectFrom(card.data().rectScaleFromParent().r);
+    const rect = rectFrom(block.data().rectScaleFromParent().r);
     app.hit_map.append(rect.clipped(app.canvas), .{ .block = index });
 
     var removed = false;
@@ -856,7 +856,7 @@ fn drawPauseBars(allocator: std.mem.Allocator, cx: f32, cy: f32, size: f32) void
     fillRect(allocator, cx + gap, cy - size, width, size * 2, Palette.ink);
 }
 
-/// Same colour at a given opacity, for the card being carried.
+/// Same colour at a given opacity, for the block being carried.
 fn fade(color: dvui.Color, alpha: u8) dvui.Color {
     var dimmed = color;
     dimmed.a = alpha;
@@ -1080,7 +1080,7 @@ const Palette = struct {
     /// as a box stretching to the edge.
     const background = dvui.Color{ .r = 0x1e, .g = 0x1f, .b = 0x27, .a = 0xff };
     const panel = dvui.Color{ .r = 0x1e, .g = 0x1f, .b = 0x27, .a = 0xff };
-    const card = dvui.Color{ .r = 0x34, .g = 0x37, .b = 0x46, .a = 0xff };
+    const block = dvui.Color{ .r = 0x34, .g = 0x37, .b = 0x46, .a = 0xff };
     const selection = dvui.Color{ .r = 0x44, .g = 0x47, .b = 0x5a, .a = 0xff };
     const hover = dvui.Color{ .r = 0x3a, .g = 0x3d, .b = 0x4d, .a = 0xff };
     const field = dvui.Color{ .r = 0x21, .g = 0x22, .b = 0x2c, .a = 0xff };
