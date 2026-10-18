@@ -67,8 +67,8 @@ pub const Target = union(enum) {
     block: usize,
     /// The waveform of a preview lane: dragging moves its start beat.
     lane: usize,
-    /// The filter slider of a preview lane.
-    slider: usize,
+    /// The whole-track navigator under a preview lane.
+    nav: usize,
 };
 
 /// Screen rectangles for one frame, with what each one means.
@@ -153,7 +153,7 @@ pub const Drag = struct {
                 self.pressed = target;
                 break :blk .{ .select_block = index };
             },
-            .row, .lane, .slider => blk: {
+            .row, .lane, .nav => blk: {
                 self.pressed = target;
                 break :blk .none;
             },
@@ -171,7 +171,7 @@ pub const Drag = struct {
     pub fn pull(self: *Drag, p: Point) ?Pull {
         const pressed = self.pressed orelse return null;
         switch (pressed) {
-            .lane, .slider => {},
+            .lane, .nav => {},
             else => return null,
         }
         const dx = p.x - self.press_at.x;
@@ -183,7 +183,7 @@ pub const Drag = struct {
     pub fn motion(self: *Drag, p: Point, threshold: f32, canvas: Rect, hit_map: *const HitMap) bool {
         const pressed = self.pressed orelse return false;
         switch (pressed) {
-            .lane, .slider => return false,
+            .lane, .nav => return false,
             else => {},
         }
         if (self.carrying == null) {
@@ -204,7 +204,7 @@ pub const Drag = struct {
         return switch (target) {
             .block => |from| .{ .move_block = .{ .from = from, .gap = to } },
             .row => |track| .{ .drop_track = .{ .gap = to, .track = track } },
-            .toggle, .notation, .lane, .slider => .none,
+            .toggle, .notation, .lane, .nav => .none,
         };
     }
 
@@ -440,13 +440,13 @@ test "a lane press pulls horizontal movement and carries nothing" {
     try std.testing.expect(isNone(drag.release()));
 }
 
-test "a slider press pulls without a gap" {
+test "a navigator press pulls without a gap" {
     var map = HitMap.init(std.testing.allocator);
     defer map.deinit();
-    map.append(.{ .x = 0, .y = 0, .w = 400, .h = 20 }, .{ .slider = 0 });
+    map.append(.{ .x = 0, .y = 0, .w = 400, .h = 20 }, .{ .nav = 0 });
 
     var drag = Drag{};
-    _ = drag.press(.{ .slider = 0 }, .{ .x = 10, .y = 10 }, false);
+    _ = drag.press(.{ .nav = 0 }, .{ .x = 10, .y = 10 }, false);
     const pull = drag.pull(.{ .x = 25, .y = 10 }).?;
     try std.testing.expectEqual(@as(f32, 15), pull.dx);
     try std.testing.expect(drag.gapIndex() == null);

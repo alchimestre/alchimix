@@ -22,8 +22,10 @@ const Lane = struct {
     analysis: ?pl.analysis.Analysis = null,
     /// Beat at the left edge of the waveform.
     start_beat: f32 = 0,
-    /// Low pass: 0 closed, 1 open.
-    filter: f32 = 1,
+    /// Unrounded drag position, so sub-beat movements are not lost to snapping.
+    start_raw: f32 = 0,
+    /// Full width of the whole-track navigator, in physical pixels.
+    nav_w: f32 = 1,
     /// Set when the source has no analysis for this track.
     missing: bool = false,
     /// Width of the waveform, in physical pixels, for drag arithmetic.
@@ -70,6 +72,9 @@ pub const App = struct {
     /// Heights of the fixed strips, so the body cannot push the footer away.
     toolbar_h: f32 = 0,
     footer_h: f32 = 0,
+    /// Widths of the side panels, so the canvas leaves them room.
+    viewport_w: f32 = 0,
+    picker_w: f32 = 0,
     /// Visible area of the suggestion list, so a row scrolled out of sight
     /// keeps its presses inside it.
     list: hit.Rect = .{},
@@ -86,6 +91,7 @@ pub const App = struct {
     const visible_rows = 60;
     /// Beats shown across a preview lane.
     const beats_visible: f32 = 16;
+    const lane_panel_width: f32 = 380;
 
     pub fn init(allocator: std.mem.Allocator, library: pl.library.Library, io: std.Io) App {
         return .{
@@ -136,6 +142,7 @@ pub const App = struct {
 
         const root_scale = root.data().contentRectScale();
         self.viewport_h = root_scale.r.h / root_scale.s;
+        self.viewport_w = root_scale.r.w / root_scale.s;
         self.scale_hint = root_scale.s;
 
         self.player.poll();
@@ -205,6 +212,7 @@ pub const App = struct {
             .padding = .{ .x = 0, .y = 0 },
         });
         defer panel.deinit();
+        self.picker_w = panel.data().borderRectScale().r.w / panel.data().borderRectScale().s;
 
         self.frameSearch();
         self.framePickerHeading();
@@ -395,6 +403,12 @@ pub const App = struct {
             .background = true,
             .color_fill = .{ .color = Palette.background },
             .min_size_content = .{ .h = 0 },
+            // The canvas is created before the preview panel, so without a cap
+            // it eats the width the panel needs and pushes it off the window.
+            .max_size_content = .{
+                .w = @max(200, self.viewport_w - self.picker_w - lane_panel_width),
+                .h = 100000,
+            },
         });
         defer canvas.deinit();
         self.canvas = rectFrom(canvas.data().borderRectScale().r);
@@ -549,7 +563,7 @@ pub const App = struct {
                 if (old.index != index) continue;
                 lane.analysis = old.analysis;
                 lane.start_beat = old.start_beat;
-                lane.filter = old.filter;
+                lane.start_raw = old.start_raw;
                 lane.missing = old.missing;
                 break;
             }
@@ -589,14 +603,17 @@ pub const App = struct {
             .lane => |slot| {
                 if (slot >= self.lane_count) return;
                 const lane = &self.lanes[slot];
-                const width = @max(1, lane.wave_w);
-                lane.start_beat = @max(0, lane.start_beat + pull.dx * beats_visible / width);
+                // Grab the wave: dragging right shows earlier audio.
+                lane.start_raw -= pull.dx * beats_visible / @max(1, lane.wave_w);
+                snapLane(lane);
                 dvui.refresh(null, @src(), null);
             },
-            .slider => |slot| {
+            .nav => |slot| {
                 if (slot >= self.lane_count) return;
                 const lane = &self.lanes[slot];
-                lane.filter = std.math.clamp(lane.filter + pull.dx / @max(1, lane.wave_w), 0, 1);
+                const total: f32 = @floatFromInt(totalBeats(lane));
+                lane.start_raw += pull.dx / @max(1, lane.nav_w) * total;
+                snapLane(lane);
                 dvui.refresh(null, @src(), null);
             },
             else => {},
@@ -607,9 +624,9 @@ pub const App = struct {
     fn frameLanes(self: *App) void {
         var panel = dvui.box(@src(), .{ .dir = .vertical }, .{
             .expand = .vertical,
-            .min_size_content = .{ .w = 420 },
-            .max_size_content = .{ .w = 420, .h = 100000 },
-            .padding = .{ .x = 16, .y = 16 },
+            .min_size_content = .{ .w = lane_panel_width },
+            .max_size_content = .{ .w = lane_panel_width, .h = 100000 },
+            .padding = .{ .x = 0, .y = 16 },
             .background = true,
             .color_fill = .{ .color = Palette.panel },
         });
@@ -618,7 +635,7 @@ pub const App = struct {
         labelStyled(@src(), "preview", .{
             .color_text = .{ .color = Palette.muted },
             .font = metaFont(),
-            .margin = .{ .x = 4, .y = 4 },
+            .margin = .{ .x = 16, .y = 4 },
         });
 
         for (self.lanes[0..self.lane_count], 0..) |*lane, slot| {
@@ -629,40 +646,21 @@ pub const App = struct {
     fn drawLane(self: *App, lane: *Lane, slot: usize) void {
         var lane_box = dvui.box(@src(), .{ .dir = .vertical }, .{
             .expand = .horizontal,
-            .min_size_content = .{ .w = 356, .h = 140 },
+            .min_size_content = .{ .w = 0, .h = 100 },
+            .max_size_content = .{ .w = lane_panel_width - 16, .h = 100000 },
             .padding = .{ .x = 12, .y = 10 },
-            .margin = .{ .y = 6 },
+            .margin = .{ .x = 8, .y = 6 },
             .background = true,
             .color_fill = .{ .color = Palette.block },
             .id_extra = 5000 + slot,
         });
         defer lane_box.deinit();
 
-        var title_buffer: [34]u8 = undefined;
-        labelStyled(@src(), clippedTitle(lane.track.title, &title_buffer), .{
-            .expand = .horizontal,
-            .color_text = .{ .color = Palette.ink },
-            .font = headingFont(),
-            .id_extra = 5100 + slot,
-        });
-
-        var meta_buffer: [48]u8 = undefined;
-        const meta = std.fmt.bufPrint(&meta_buffer, "{s} · {d:.1} bpm", .{
-            lane.track.artist,
-            lane.track.bpm,
-        }) catch "";
-        labelStyled(@src(), meta, .{
-            .expand = .horizontal,
-            .color_text = .{ .color = Palette.secondary },
-            .font = metaFont(),
-            .id_extra = 5200 + slot,
-        });
-
         {
             var wave = dvui.box(@src(), .{ .dir = .horizontal }, .{
                 .expand = .horizontal,
-                .min_size_content = .{ .w = 330, .h = 64 },
-                .margin = .{ .y = 8 },
+                .min_size_content = .{ .w = 0, .h = 64 },
+                .margin = .{ .y = 4 },
                 .id_extra = 5300 + slot,
             });
             defer wave.deinit();
@@ -685,17 +683,36 @@ pub const App = struct {
         {
             var bar = dvui.box(@src(), .{ .dir = .horizontal }, .{
                 .expand = .horizontal,
-                .min_size_content = .{ .w = 330, .h = 18 },
+                .min_size_content = .{ .w = 0, .h = 16 },
                 .id_extra = 5500 + slot,
             });
             defer bar.deinit();
             const bar_rect = rectFrom(bar.data().contentRectScale().r);
-            const track_y = bar_rect.y + 6;
-            fillRect(self.allocator, bar_rect.x, track_y, bar_rect.w, 6, Palette.hover);
-            fillRect(self.allocator, bar_rect.x, track_y, bar_rect.w * lane.filter, 6, Palette.green);
-            fillRect(self.allocator, bar_rect.x + bar_rect.w * lane.filter - 3, bar_rect.y + 2, 6, 14, Palette.ink);
-            self.hit_map.append(bar_rect, .{ .slider = slot });
+            lane.nav_w = bar_rect.w;
+
+            const total = totalBeats(lane);
+            const visible: f32 = @min(beats_visible, @as(f32, @floatFromInt(total)));
+            const start = if (total > 0) lane.start_beat / @as(f32, @floatFromInt(total)) else 0;
+            const span = if (total > 0) visible / @as(f32, @floatFromInt(total)) else 1;
+
+            const track_y = bar_rect.y + 4;
+            fillRect(self.allocator, bar_rect.x, track_y, bar_rect.w, 8, fade(Palette.muted, 55));
+            fillRect(self.allocator, bar_rect.x + bar_rect.w * start, track_y, @max(24, bar_rect.w * span), 8, Palette.green);
+            self.hit_map.append(bar_rect, .{ .nav = slot });
         }
+    }
+
+    /// Beat count of the lane's track, from its grid.
+    fn totalBeats(lane: *const Lane) usize {
+        const analysis = lane.analysis orelse return 0;
+        return analysis.beats.len;
+    }
+
+    fn snapLane(lane: *Lane) void {
+        const total = totalBeats(lane);
+        const last: f32 = @max(0, @as(f32, @floatFromInt(total)) - beats_visible);
+        lane.start_raw = std.math.clamp(lane.start_raw, 0, last);
+        lane.start_beat = @round(lane.start_raw);
     }
 
     /// Waveform and beat lines, drawn straight into the lane's rectangle.
