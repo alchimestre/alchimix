@@ -21,8 +21,6 @@ const Lane = struct {
     /// Beat under the playhead: what playback starts on and what the window
     /// is centred around.
     beat: f32 = 0,
-    /// Stable mixer slot, so reordering blocks does not touch the audio.
-    slot: usize = 0,
     /// This lane's own process is running.
     playing: bool = false,
     /// Master beat when this lane started.
@@ -85,8 +83,6 @@ pub const App = struct {
     clock_running: bool = false,
     clock_started_ns: i128 = 0,
     clock_beat: f32 = 0,
-    /// Next mixer slot to hand out.
-    next_slot: usize = 0,
     /// Lane held down with the pointer: jog pause, resume on release.
     jog_lane: ?usize = null,
     /// Master tempo: follows the seed while locked, manual otherwise.
@@ -194,7 +190,6 @@ pub const App = struct {
         for (self.grid.items, 0..) |*lane, index| {
             if (lane.playing and self.nowNs() >= lane.end_ns) self.stopLane(index);
         }
-        self.mixer.reap(self.nowNs());
 
         // The pointer pass reads the map the previous frame drew, then the map
         // is rebuilt from this frame's layout.
@@ -765,6 +760,19 @@ pub const App = struct {
         self.startLaneJoin(index, false);
     }
 
+    /// Rebuilds the single mixed stream from every lane that is playing.
+    fn rebuildMix(self: *App) void {
+        var specs: [64]pl.mixer.Lane = undefined;
+        var count: usize = 0;
+        for (self.grid.items, 0..) |*lane, index| {
+            if (!lane.playing or lane.analysis == null) continue;
+            if (count >= specs.len) break;
+            specs[count] = self.laneSpec(index, 0);
+            count += 1;
+        }
+        self.mixer.play(specs[0..count]);
+    }
+
     fn startLaneJoin(self: *App, index: usize, immediate: bool) void {
         if (index >= self.grid.items.len or index >= self.crate.len()) return;
         const lane = &self.grid.items[index];
@@ -784,29 +792,32 @@ pub const App = struct {
         lane.end_ns = self.nowNs() + @as(i128, @intFromFloat((wait + @max(0, remaining)) * 60 / self.masterBpm() * 1_000_000_000));
         lane.playing = true;
         const delay_ms: u32 = @intFromFloat(wait * 60 / self.masterBpm() * 1000);
-        self.mixer.play(lane.slot, self.laneSpec(index, delay_ms));
+        if (delay_ms > 0) {
+            self.mixer.play(&.{self.laneSpec(index, delay_ms)});
+        } else {
+            self.rebuildMix();
+        }
     }
 
     fn stopLane(self: *App, index: usize) void {
         if (index >= self.grid.items.len) return;
         const lane = &self.grid.items[index];
-        self.mixer.stop(lane.slot);
         self.foldLane(lane);
         snapBar(lane);
         lane.playing = false;
+        self.rebuildMix();
         if (!self.anyPlaying()) self.stopClock();
     }
 
     fn stopAllLanes(self: *App) void {
         for (self.grid.items) |*lane| {
             if (lane.playing) {
-                self.mixer.stop(lane.slot);
                 self.foldLane(lane);
                 snapBar(lane);
                 lane.playing = false;
             }
         }
-        self.mixer.stopAll();
+        self.mixer.stop();
         self.stopClock();
     }
 
@@ -824,7 +835,7 @@ pub const App = struct {
         if (!lane.playing) return;
         // Resume from where the audio has reached, not from the last start.
         self.foldLane(lane);
-        self.mixer.stop(lane.slot);
+        lane.playing = false;
         self.startLane(index);
     }
 
@@ -832,7 +843,6 @@ pub const App = struct {
     fn seekLane(self: *App, index: usize, beat: f32) void {
         if (index >= self.grid.items.len) return;
         const was_playing = self.grid.items[index].playing;
-        self.mixer.stop(self.grid.items[index].slot);
         self.foldLane(&self.grid.items[index]);
         self.grid.items[index].playing = false;
         self.grid.items[index].beat_raw = beat;
@@ -849,9 +859,9 @@ pub const App = struct {
     /// Holding a playing lane pauses it; releasing resumes from the same beat.
     fn jogPause(self: *App, index: usize) void {
         const lane = &self.grid.items[index];
-        self.mixer.stop(lane.slot);
         self.foldLane(lane);
         lane.playing = false;
+        self.rebuildMix();
         if (!self.anyPlaying()) self.stopClock();
         self.jog_lane = index;
     }
@@ -872,26 +882,17 @@ pub const App = struct {
     /// Retunes every running lane in place, crossfaded, so the tempo changes
     /// without a pause.
     fn retunePlaying(self: *App) void {
-        for (self.grid.items, 0..) |*lane, index| {
-            if (!lane.playing) continue;
-            self.mixer.swap(lane.slot, self.laneSpec(index, 0));
-        }
+        self.rebuildMix();
     }
 
     fn restartDirty(self: *App) void {
-        for (self.grid.items, 0..) |*lane, index| {
+        for (self.grid.items) |*lane| {
             if (!lane.filter_dirty) continue;
             lane.filter_dirty = false;
             if (!lane.playing) continue;
-            // Swap the audio only: the playhead keeps running.
-            self.mixer.swap(lane.slot, self.laneSpec(index, 0));
+            // Rebuild the mix: the playhead keeps running.
+            self.rebuildMix();
         }
-    }
-
-    fn takeSlot(self: *App) usize {
-        const slot = self.next_slot % pl.mixer.max_lanes;
-        self.next_slot += 1;
-        return slot;
     }
 
     /// Loads a grid lane for every block. Lanes survive edits: a lane matched
@@ -928,7 +929,6 @@ pub const App = struct {
             }
 
             if (!reused) {
-                lane.slot = self.takeSlot();
                 lane.analysis = self.library.analysis(self.allocator, track.id) catch null;
                 lane.missing = lane.analysis == null;
             }
@@ -936,14 +936,16 @@ pub const App = struct {
             next.append(self.allocator, lane) catch {};
         }
 
+        var stopped = false;
         for (self.grid.items, 0..) |*old, old_index| {
             if (consumed[old_index]) continue;
-            if (old.playing) self.mixer.stop(old.slot);
+            if (old.playing) stopped = true;
             if (old.analysis) |*a| a.deinit(self.allocator);
         }
 
         self.grid.deinit(self.allocator);
         self.grid = next;
+        if (stopped) self.rebuildMix();
     }
 
     /// Picks a block for the previewer; three lanes is the cap.

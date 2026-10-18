@@ -1,6 +1,9 @@
-//! Plays grid lanes: one ffplay per lane, so any subset can run together.
-//! Each process starts on its lane's playhead beat, at the master tempo, through
-//! that lane's low pass, and runs to the end of the track.
+//! Plays the grid as one mixed stream.
+//!
+//! A single ffmpeg decodes every lane, applies its tempo, filter and start
+//! offset in one filter graph, and mixes them sample-aligned; ffplay only plays
+//! the resulting PCM. One process pair means there is no inter-lane skew from
+//! separate players starting at different times.
 
 const std = @import("std");
 const Track = @import("../domain/track.zig").Track;
@@ -19,120 +22,132 @@ pub const Lane = struct {
     delay_ms: u32 = 0,
 };
 
-pub const max_lanes = 64;
-
 pub const Mixer = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
-    children: [max_lanes]?std.process.Child = @splat(null),
-    /// Replaced by a swap and kept alive briefly, so a filter change does not
-    /// leave a silence between the two processes.
-    pending: [max_lanes]?std.process.Child = @splat(null),
-    pending_at: [max_lanes]i128 = @splat(0),
+    decoder: ?std.process.Child = null,
+    player: ?std.process.Child = null,
 
     pub fn init(allocator: std.mem.Allocator, io: std.Io) Mixer {
         return .{ .allocator = allocator, .io = io };
     }
 
     pub fn deinit(self: *Mixer) void {
-        self.stopAll();
+        self.stop();
         self.* = undefined;
     }
 
-    pub fn play(self: *Mixer, slot: usize, lane: Lane) void {
-        self.stop(slot);
-        const index = slot;
-        if (index >= max_lanes) return;
-        self.children[index] = self.spawn(lane);
-    }
+    pub fn play(self: *Mixer, lanes: []const Lane) void {
+        self.stop();
+        if (lanes.len == 0) return;
 
-    /// Starts a new process for the same lane and lets the old one finish a
-    /// beat later, so the playhead never stops.
-    pub fn swap(self: *Mixer, slot: usize, lane: Lane) void {
-        if (slot >= max_lanes) return;
-        self.reap(std.Io.Timestamp.now(self.io, .awake).nanoseconds);
-        if (self.pending[slot]) |*old| {
-            if (old.id) |pid| std.posix.kill(pid, std.posix.SIG.KILL) catch {};
-            _ = old.wait(self.io) catch {};
-            self.pending[slot] = null;
+        var owned: std.ArrayListUnmanaged([]const u8) = .empty;
+        defer {
+            for (owned.items) |text| self.allocator.free(text);
+            owned.deinit(self.allocator);
         }
-        self.pending[slot] = self.children[slot];
-        self.pending_at[slot] = std.Io.Timestamp.now(self.io, .awake).nanoseconds;
-        self.children[slot] = self.spawn(lane);
-    }
 
-    /// Kills the previous process once the new one has taken over.
-    pub fn reap(self: *Mixer, now: i128) void {
-        for (0..max_lanes) |index| {
-            if (self.pending[index]) |*old| {
-                if (now - self.pending_at[index] < 150_000_000) continue;
-                if (old.id) |pid| std.posix.kill(pid, std.posix.SIG.KILL) catch {};
-                _ = old.wait(self.io) catch {};
-                self.pending[index] = null;
-            }
+        var decoder_argv: std.ArrayListUnmanaged([]const u8) = .empty;
+        defer decoder_argv.deinit(self.allocator);
+
+        decoder_argv.appendSlice(self.allocator, &.{ "ffmpeg", "-hide_banner", "-loglevel", "error" }) catch return;
+
+        for (lanes) |lane| {
+            const start = std.fmt.allocPrint(self.allocator, "{d:.3}", .{lane.start_s}) catch return;
+            owned.append(self.allocator, start) catch return;
+            decoder_argv.appendSlice(self.allocator, &.{ "-ss", start, "-i", lane.track.file_path }) catch return;
         }
-    }
 
-    pub fn stop(self: *Mixer, slot: usize) void {
-        if (slot >= max_lanes) return;
-        if (self.children[slot]) |*child| {
-            if (child.id) |pid| std.posix.kill(pid, std.posix.SIG.KILL) catch {};
-            _ = child.wait(self.io) catch {};
-            self.children[slot] = null;
-        }
-    }
+        const graph = self.buildGraph(lanes, &owned) catch return;
+        decoder_argv.appendSlice(self.allocator, &.{
+            "-filter_complex", graph, "-map", "[mix]",
+            "-f",              "s16le", "-ac", "2",
+            "-ar",             "48000", "-",
+        }) catch return;
 
-    pub fn stopAll(self: *Mixer) void {
-        for (0..max_lanes) |index| {
-            self.stop(index);
-            if (self.pending[index]) |*old| {
-                if (old.id) |pid| std.posix.kill(pid, std.posix.SIG.KILL) catch {};
-                _ = old.wait(self.io) catch {};
-                self.pending[index] = null;
-            }
-        }
-    }
+        const player_argv = [_][]const u8{
+            "ffplay",  "-hide_banner", "-loglevel", "error", "-nodisp",
+            "-autoexit", "-f",         "s16le",    "-ar",   "48000",
+            "-ch_layout", "stereo",    "-",
+        };
 
-    pub fn running(self: *const Mixer, slot: usize) bool {
-        if (slot >= max_lanes) return false;
-        return self.children[slot] != null;
-    }
+        var fds: [2]std.posix.fd_t = undefined;
+        if (std.c.pipe(&fds) != 0) return;
+        const write_end = std.Io.File{ .handle = fds[1], .flags = .{ .nonblocking = false } };
+        const read_end = std.Io.File{ .handle = fds[0], .flags = .{ .nonblocking = false } };
 
-    fn spawn(self: *Mixer, lane: Lane) ?std.process.Child {
-        if (lane.track.file_path.len == 0) return null;
-
-        const start = std.fmt.allocPrint(self.allocator, "{d:.3}", .{lane.start_s}) catch return null;
-        defer self.allocator.free(start);
-
-        const ratio = std.math.clamp(lane.tempo, 0.5, 2.0);
-        const delay = if (lane.delay_ms > 0)
-            std.fmt.allocPrint(self.allocator, "adelay={d}:all=1,", .{lane.delay_ms}) catch return null
-        else
-            "";
-        defer if (lane.delay_ms > 0) self.allocator.free(delay);
-
-        const chain = if (lane.keylock)
-            std.fmt.allocPrint(self.allocator, "{s}atempo={d:.3},lowpass=f={d:.0}", .{
-                delay, ratio, lowPassHz(lane.filter),
-            }) catch return null
-        else
-            std.fmt.allocPrint(self.allocator, "{s}asetrate={d:.0},aresample=48000,lowpass=f={d:.0}", .{
-                delay, 44100 * ratio, lowPassHz(lane.filter),
-            }) catch return null;
-        defer self.allocator.free(chain);
-
-        return std.process.spawn(self.io, .{
-            .argv = &.{
-                "ffplay", "-nodisp", "-autoexit", "-loglevel", "error",
-                "-ss",    start,  "-af",      chain,
-                lane.track.file_path,
-            },
+        self.decoder = std.process.spawn(self.io, .{
+            .argv = decoder_argv.items,
             .stdin = .ignore,
+            .stdout = .{ .file = write_end },
+            .stderr = .ignore,
+        }) catch {
+            _ = std.c.close(fds[0]);
+            _ = std.c.close(fds[1]);
+            return;
+        };
+        _ = std.c.close(fds[1]);
+
+        self.player = std.process.spawn(self.io, .{
+            .argv = &player_argv,
+            .stdin = .{ .file = read_end },
             .stdout = .ignore,
             .stderr = .ignore,
         }) catch null;
+        _ = std.c.close(fds[0]);
+    }
+
+    pub fn stop(self: *Mixer) void {
+        for ([_]*?std.process.Child{ &self.decoder, &self.player }) |slot| {
+            if (slot.*) |*child| {
+                // kill reaps the process and clears its id.
+                child.kill(self.io);
+                slot.* = null;
+            }
+        }
+    }
+
+    pub fn active(self: *const Mixer) bool {
+        return self.decoder != null or self.player != null;
+    }
+
+    /// Builds the filter graph: per lane tempo, filter and bar delay, mixed.
+    fn buildGraph(self: *Mixer, lanes: []const Lane, owned: *std.ArrayListUnmanaged([]const u8)) ![]const u8 {
+        var buffer: [16 * 1024]u8 = undefined;
+        var writer: std.Io.Writer = .fixed(&buffer);
+
+        for (lanes, 0..) |lane, index| {
+            const ratio = std.math.clamp(lane.tempo, 0.5, 2.0);
+            try writer.print("[{d}:a]", .{index});
+            if (lane.delay_ms > 0) try writer.print("adelay={d}:all=1,", .{lane.delay_ms});
+            if (lane.keylock) {
+                try writer.print("atempo={d:.3},", .{ratio});
+            } else {
+                try writer.print("asetrate={d:.0},aresample=48000,", .{44100 * ratio});
+            }
+            try writer.print("lowpass=f={d:.0}[l{d}];", .{ lowPassHz(lane.filter), index });
+        }
+        for (lanes, 0..) |_, index| try writer.print("[l{d}]", .{index});
+        try writer.print("amix=inputs={d}:duration=longest:dropout_transition=0,alimiter=limit=0.95", .{lanes.len});
+        try writer.writeAll("[mix]");
+
+        const graph = try self.allocator.dupe(u8, writer.buffered());
+        try owned.append(self.allocator, graph);
+        return graph;
     }
 };
+
+fn writeQuoted(writer: anytype, text: []const u8) !void {
+    try writer.writeByte('\'');
+    for (text) |byte| {
+        if (byte == '\'') {
+            try writer.writeAll("'\\''");
+        } else {
+            try writer.writeByte(byte);
+        }
+    }
+    try writer.writeByte('\'');
+}
 
 /// 200 Hz closed to 20 kHz open, evenly across the dial in octaves.
 fn lowPassHz(filter: f32) f32 {
