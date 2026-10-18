@@ -78,24 +78,6 @@ pub const Player = struct {
         self.start(track, middleStart(track), snippet_seconds);
     }
 
-    /// Jump to a fraction of the snippet and play what is left of it. On a
-    /// stopped or paused track this starts playback at that point.
-    pub fn seek(self: *Player, track: Track, fraction: f32) void {
-        const clamped = std.math.clamp(fraction, 0, 1);
-
-        const base = if (self.holds(track.id)) self.snippet_start_s else middleStart(track);
-        const window_s: f32 = if (self.holds(track.id) and self.window_ms > 0)
-            @as(f32, @floatFromInt(self.window_ms)) / 1000.0
-        else
-            @as(f32, @floatFromInt(snippet_seconds));
-
-        const offset = base + @as(u32, @intFromFloat(window_s * clamped));
-        const left_s = @max(1, @as(u32, @intFromFloat(window_s * (1 - clamped))));
-
-        self.stop();
-        self.start(track, offset, left_s);
-    }
-
     /// Clears the preview once the snippet is over.
     pub fn poll(self: *Player) void {
         if (self.child == null or self.paused) return;
