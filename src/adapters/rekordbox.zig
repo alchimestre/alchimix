@@ -8,6 +8,7 @@ const std = @import("std");
 const track = @import("../domain/track.zig");
 const camelot = @import("../domain/camelot.zig");
 const library = @import("../ports/library.zig");
+const analysis = @import("../domain/analysis.zig");
 
 const c = @import("c");
 
@@ -30,6 +31,7 @@ pub const Options = struct {
 const select_sql =
     \\select c.ID, c.Title, coalesce(a.Name, ''), c.BPM, k.ScaleName, c.Length,
     \\       coalesce(c.FolderPath, ''),
+    \\       coalesce(c.AnalysisDataPath, ''),
     \\       coalesce(g.Name, ''),
     \\       coalesce((select group_concat(t.Name, ' ')
     \\                 from djmdSongMyTag s join djmdMyTag t on t.ID = s.MyTagID
@@ -47,6 +49,7 @@ pub const Source = struct {
     backing: std.mem.Allocator,
     db: *c.sqlite3,
     path: []const u8,
+    io: std.Io,
     items: std.ArrayListUnmanaged(Track) = .empty,
     hits: std.ArrayListUnmanaged(Track) = .empty,
 
@@ -79,6 +82,7 @@ pub const Source = struct {
             .backing = allocator,
             .db = handle,
             .path = path,
+            .io = options.io,
         };
         errdefer self.arena.deinit();
         try self.reload();
@@ -114,8 +118,9 @@ pub const Source = struct {
             if (scale.len > 0) t.key = camelot.parse(scale) catch null;
             t.length_s = @intCast(@max(0, c.sqlite3_column_int64(s, 5)));
             t.file_path = try a.dupe(u8, column(s, 6));
-            t.genre = try a.dupe(u8, column(s, 7));
-            t.tags = try a.dupe(u8, column(s, 8));
+            t.analysis_path = try a.dupe(u8, column(s, 7));
+            t.genre = try a.dupe(u8, column(s, 8));
+            t.tags = try a.dupe(u8, column(s, 9));
             t.deriveBpm();
             try self.items.append(a, t);
         }
@@ -127,6 +132,28 @@ pub const Source = struct {
 
     fn allFn(ctx: *anyopaque) anyerror![]const Track {
         return ctxOf(ctx).items.items;
+    }
+
+    fn analysisFn(ctx: *anyopaque, allocator: std.mem.Allocator, track_id: u64) anyerror!analysis.Analysis {
+        const self = ctxOf(ctx);
+        for (self.items.items) |t| {
+            if (t.id != track_id) continue;
+            if (t.analysis_path.len == 0) return error.NoAnalysis;
+
+            const root = std.fs.path.dirname(self.path) orelse return error.NoAnalysis;
+            const dat_path = try std.fmt.allocPrint(allocator, "{s}{s}", .{ root, t.analysis_path });
+            defer allocator.free(dat_path);
+            const ext_path = try std.mem.replaceOwned(u8, allocator, dat_path, ".DAT", ".EXT");
+            defer allocator.free(ext_path);
+
+            const dat = try std.Io.Dir.cwd().readFileAlloc(self.io, dat_path, allocator, .limited(4 << 20));
+            defer allocator.free(dat);
+            const ext = try std.Io.Dir.cwd().readFileAlloc(self.io, ext_path, allocator, .limited(16 << 20));
+            defer allocator.free(ext);
+
+            return analysis.parse(allocator, dat, ext);
+        }
+        return error.NoAnalysis;
     }
 
     fn searchFn(ctx: *anyopaque, needle: []const u8) anyerror![]const Track {
@@ -153,6 +180,7 @@ pub const Source = struct {
     const vtable = library.Library.VTable{
         .all = allFn,
         .search = searchFn,
+        .analysis = analysisFn,
         .name = nameFn,
         .deinit = deinitFn,
     };

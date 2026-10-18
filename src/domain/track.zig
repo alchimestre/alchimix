@@ -19,6 +19,9 @@ pub const Track = struct {
     genre: []const u8 = "",
     /// My Tags, space separated, as rekordbox joins them.
     tags: []const u8 = "",
+    /// Where the source keeps this track's analysed grid, relative to its own
+    /// root. Empty when the track was never analysed.
+    analysis_path: []const u8 = "",
 
     pub fn init(id: u64, title: []const u8, artist: []const u8) Track {
         return .{ .id = id, .title = title, .artist = artist };

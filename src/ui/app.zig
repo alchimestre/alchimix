@@ -15,8 +15,24 @@ const Track = pl.track.Track;
 const Transition = pl.crate.Transition;
 const Candidate = pl.suggest.Candidate;
 
+const Lane = struct {
+    /// Crate index the lane stands for.
+    index: usize = 0,
+    track: Track = undefined,
+    analysis: ?pl.analysis.Analysis = null,
+    /// Beat at the left edge of the waveform.
+    start_beat: f32 = 0,
+    /// Low pass: 0 closed, 1 open.
+    filter: f32 = 1,
+    /// Set when the source has no analysis for this track.
+    missing: bool = false,
+    /// Width of the waveform, in physical pixels, for drag arithmetic.
+    wave_w: f32 = 1,
+};
+
 pub const App = struct {
     allocator: std.mem.Allocator,
+    io: std.Io,
     library: pl.library.Library,
     player: pl.player.Player,
     crate: pl.crate.Crate,
@@ -36,6 +52,9 @@ pub const App = struct {
     in_range: usize = 0,
     /// Blocks picked for the previewer, by crate index. Empty means none.
     selected: std.ArrayListUnmanaged(usize) = .empty,
+    /// One lane per selected block, in selection order.
+    lanes: [3]Lane = @splat(.{}),
+    lane_count: usize = 0,
 
     /// Tempo window for suggestions, as a percentage of the seed's BPM.
     bpm_pct: f32 = 5,
@@ -65,10 +84,13 @@ pub const App = struct {
 
     /// Every visible row is a real widget, so the list is capped.
     const visible_rows = 60;
+    /// Beats shown across a preview lane.
+    const beats_visible: f32 = 16;
 
     pub fn init(allocator: std.mem.Allocator, library: pl.library.Library, io: std.Io) App {
         return .{
             .allocator = allocator,
+            .io = io,
             .library = library,
             .player = pl.player.Player.init(io, allocator),
             .crate = pl.crate.Crate.init(allocator),
@@ -77,6 +99,9 @@ pub const App = struct {
     }
 
     pub fn deinit(self: *App) void {
+        for (self.lanes[0..self.lane_count]) |*lane| {
+            if (lane.analysis) |*a| a.deinit(self.allocator);
+        }
         self.selected.deinit(self.allocator);
         self.hit_map.deinit();
         self.player.deinit();
@@ -167,6 +192,7 @@ pub const App = struct {
 
         self.framePicker();
         self.frameCanvas();
+        if (self.lane_count > 0) self.frameLanes();
     }
 
     fn framePicker(self: *App) void {
@@ -417,6 +443,7 @@ pub const App = struct {
                 if (self.crate.at(index)) |track| self.player.stopPreview(track.id);
                 self.crate.remove(index) catch {};
                 self.selected.clearRetainingCapacity();
+                self.syncLanes();
                 self.refresh() catch {};
                 dvui.refresh(null, @src(), null);
             },
@@ -442,6 +469,7 @@ pub const App = struct {
                     if (self.drag.motion(p, 6 * self.scale_hint, self.canvas, &self.hit_map)) {
                         dvui.refresh(null, @src(), null);
                     }
+                    if (self.drag.pull(p)) |pull| self.applyPull(pull);
                 },
                 .release => {
                     if (!mouse.button.pointer()) continue;
@@ -474,11 +502,13 @@ pub const App = struct {
             .select_block => |index| self.pending_select = index,
             .toggle_block => |index| {
                 self.toggleSelected(index);
+                self.syncLanes();
                 dvui.refresh(null, @src(), null);
             },
             .drop_track => |drop| {
                 _ = self.crate.insertAt(drop.gap, drop.track) catch {};
                 self.selected.clearRetainingCapacity();
+                self.syncLanes();
                 self.refresh() catch {};
                 dvui.refresh(null, @src(), null);
             },
@@ -486,6 +516,7 @@ pub const App = struct {
                 if (self.crate.at(move.from)) |track| self.player.stopPreview(track.id);
                 self.crate.moveTo(move.from, move.gap) catch {};
                 self.selected.clearRetainingCapacity();
+                self.syncLanes();
                 self.refresh() catch {};
                 dvui.refresh(null, @src(), null);
             },
@@ -504,11 +535,191 @@ pub const App = struct {
         self.selected.append(self.allocator, index) catch {};
     }
 
+    /// Rebuilds the lanes after a selection or crate change, keeping the
+    /// loaded analyses of blocks that stayed.
+    fn syncLanes(self: *App) void {
+        var next: [3]Lane = @splat(.{});
+        var count: usize = 0;
+
+        for (self.selected.items) |index| {
+            if (index >= self.crate.len()) continue;
+            var lane = Lane{ .index = index, .track = self.crate.at(index).?.* };
+
+            for (self.lanes[0..self.lane_count]) |old| {
+                if (old.index != index) continue;
+                lane.analysis = old.analysis;
+                lane.start_beat = old.start_beat;
+                lane.filter = old.filter;
+                lane.missing = old.missing;
+                break;
+            }
+
+            if (lane.analysis == null and !lane.missing) {
+                lane.analysis = self.library.analysis(self.allocator, lane.track.id) catch null;
+                lane.missing = lane.analysis == null;
+            }
+
+            next[count] = lane;
+            count += 1;
+        }
+
+        for (self.lanes[0..self.lane_count]) |*old| {
+            if (old.analysis) |*a| {
+                var kept = false;
+                for (next[0..count]) |lane| {
+                    if (lane.index == old.index) kept = true;
+                }
+                if (!kept) a.deinit(self.allocator);
+            }
+        }
+
+        self.lanes = next;
+        self.lane_count = count;
+    }
+
     fn isSelected(self: *const App, index: usize) bool {
         for (self.selected.items) |value| {
             if (value == index) return true;
         }
         return false;
+    }
+
+    fn applyPull(self: *App, pull: hit.Drag.Pull) void {
+        switch (pull.target) {
+            .lane => |slot| {
+                if (slot >= self.lane_count) return;
+                const lane = &self.lanes[slot];
+                const width = @max(1, lane.wave_w);
+                lane.start_beat = @max(0, lane.start_beat + pull.dx * beats_visible / width);
+                dvui.refresh(null, @src(), null);
+            },
+            .slider => |slot| {
+                if (slot >= self.lane_count) return;
+                const lane = &self.lanes[slot];
+                lane.filter = std.math.clamp(lane.filter + pull.dx / @max(1, lane.wave_w), 0, 1);
+                dvui.refresh(null, @src(), null);
+            },
+            else => {},
+        }
+    }
+
+    /// The previewer: one lane per selected block.
+    fn frameLanes(self: *App) void {
+        var panel = dvui.box(@src(), .{ .dir = .vertical }, .{
+            .expand = .vertical,
+            .min_size_content = .{ .w = 420 },
+            .max_size_content = .{ .w = 420, .h = 100000 },
+            .padding = .{ .x = 16, .y = 16 },
+            .background = true,
+            .color_fill = .{ .color = Palette.panel },
+        });
+        defer panel.deinit();
+
+        labelStyled(@src(), "preview", .{
+            .color_text = .{ .color = Palette.muted },
+            .font = metaFont(),
+            .margin = .{ .x = 4, .y = 4 },
+        });
+
+        for (self.lanes[0..self.lane_count], 0..) |*lane, slot| {
+            self.drawLane(lane, slot);
+        }
+    }
+
+    fn drawLane(self: *App, lane: *Lane, slot: usize) void {
+        var lane_box = dvui.box(@src(), .{ .dir = .vertical }, .{
+            .expand = .horizontal,
+            .min_size_content = .{ .w = 380, .h = 140 },
+            .padding = .{ .x = 12, .y = 10 },
+            .margin = .{ .y = 6 },
+            .background = true,
+            .color_fill = .{ .color = Palette.block },
+            .id_extra = 5000 + slot,
+        });
+        defer lane_box.deinit();
+
+        var title_buffer: [34]u8 = undefined;
+        labelStyled(@src(), clippedTitle(lane.track.title, &title_buffer), .{
+            .expand = .horizontal,
+            .color_text = .{ .color = Palette.ink },
+            .font = headingFont(),
+            .id_extra = 5100 + slot,
+        });
+
+        var meta_buffer: [48]u8 = undefined;
+        const meta = std.fmt.bufPrint(&meta_buffer, "{s} · {d:.1} bpm", .{
+            lane.track.artist,
+            lane.track.bpm,
+        }) catch "";
+        labelStyled(@src(), meta, .{
+            .expand = .horizontal,
+            .color_text = .{ .color = Palette.secondary },
+            .font = metaFont(),
+            .id_extra = 5200 + slot,
+        });
+
+        var wave = dvui.box(@src(), .{ .dir = .horizontal }, .{
+            .expand = .horizontal,
+            .min_size_content = .{ .w = 380, .h = 64 },
+            .margin = .{ .y = 8 },
+            .id_extra = 5300 + slot,
+        });
+        defer wave.deinit();
+        const wave_rect = rectFrom(wave.data().contentRectScale().r);
+        lane.wave_w = wave_rect.w;
+
+        if (lane.analysis) |*analysis| {
+            self.paintWave(lane, analysis, wave_rect);
+        } else {
+            labelStyled(@src(), "no analysis", .{
+                .color_text = .{ .color = Palette.muted },
+                .font = metaFont(),
+                .margin = .{ .x = 6, .y = 6 },
+                .id_extra = 5400 + slot,
+            });
+        }
+        self.hit_map.append(wave_rect, .{ .lane = slot });
+
+        var bar = dvui.box(@src(), .{ .dir = .horizontal }, .{
+            .expand = .horizontal,
+            .min_size_content = .{ .w = 380, .h = 14 },
+            .id_extra = 5500 + slot,
+        });
+        defer bar.deinit();
+        const bar_rect = rectFrom(bar.data().contentRectScale().r);
+        fillRect(self.allocator, bar_rect.x, bar_rect.y + 5, bar_rect.w, 4, Palette.field);
+        fillRect(self.allocator, bar_rect.x, bar_rect.y + 5, bar_rect.w * lane.filter, 4, Palette.green);
+        self.hit_map.append(bar_rect, .{ .slider = slot });
+    }
+
+    /// Waveform and beat lines, drawn straight into the lane's rectangle.
+    fn paintWave(self: *App, lane: *const Lane, analysis: *const pl.analysis.Analysis, rect: hit.Rect) void {
+        if (rect.w <= 0 or rect.h <= 0) return;
+        fillRect(self.allocator, rect.x, rect.y, rect.w, rect.h, Palette.field);
+
+        const bpm = if (analysis.bpm() > 0) analysis.bpm() else 128;
+        const samples_per_beat: f32 = @as(f32, pl.analysis.Analysis.samples_per_second) * 60 / bpm;
+        const start_sample = lane.start_beat * samples_per_beat;
+        const samples_per_px = samples_per_beat * beats_visible / rect.w;
+
+        var x: f32 = 0;
+        while (x < rect.w) : (x += 2) {
+            const from: usize = @intFromFloat(@max(0, start_sample + x * samples_per_px));
+            if (from >= analysis.waveform.len) break;
+            const to: usize = @min(analysis.waveform.len, @as(usize, @intFromFloat(@max(0, start_sample + (x + 2) * samples_per_px))));
+
+            var peak: u8 = 0;
+            for (analysis.waveform[from..to]) |value| peak = @max(peak, value);
+            const height = rect.h * (@as(f32, @floatFromInt(peak)) / 255);
+            fillRect(self.allocator, rect.x + x, rect.bottom() - height, 1.5, height, fade(Palette.purple, 70 + peak / 2));
+        }
+
+        var beat: f32 = @ceil(lane.start_beat);
+        while (beat < lane.start_beat + beats_visible) : (beat += 1) {
+            const bx = (beat - lane.start_beat) / beats_visible * rect.w;
+            const bar = @mod(@as(i32, @intFromFloat(beat)), 4) == 0;
+            fillRect(self.allocator, rect.x + bx, rect.y, if (bar) 2 else 1, rect.h, fade(Palette.muted, if (bar) 90 else 45));
+        }
     }
 
     /// A line across the gap the drop would land in.
