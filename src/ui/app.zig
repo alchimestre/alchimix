@@ -18,10 +18,6 @@ const Candidate = pl.suggest.Candidate;
 const Lane = struct {
     track_id: u64 = 0,
     analysis: ?pl.analysis.Analysis = null,
-    /// Beat at the left edge of the waveform.
-    start_beat: f32 = 0,
-    /// Unrounded drag position, so sub-beat movements are not lost to snapping.
-    start_raw: f32 = 0,
     /// Band filter, 0 closed to 1 open.
     filter: f32 = 1,
     /// Height of the filter strip, in physical pixels.
@@ -60,9 +56,10 @@ pub const App = struct {
     selected: std.ArrayListUnmanaged(usize) = .empty,
     /// One grid lane per block, in crate order.
     grid: std.ArrayListUnmanaged(Lane) = .empty,
-    /// Shared grid transport: a beat clock both lanes follow.
+    /// Shared grid transport: one window and one play position for every lane.
     grid_playing: bool = false,
-    grid_beat: f32 = 0,
+    grid_start: f32 = 0,
+    grid_start_raw: f32 = 0,
     grid_started_at: i128 = 0,
     /// Where the last press landed, for controls that act on absolute position.
     last_point: hit.Point = .{},
@@ -158,6 +155,7 @@ pub const App = struct {
         // is rebuilt from this frame's layout.
         self.handlePointer();
         self.syncGrid();
+
         self.hit_map.reset();
 
         frameToolbar();
@@ -172,6 +170,7 @@ pub const App = struct {
             self.refresh() catch {};
             dvui.refresh(null, @src(), null);
         }
+
         return true;
     }
 
@@ -527,16 +526,18 @@ pub const App = struct {
             },
             .seek_nav => |index| {
                 if (index >= self.grid.items.len) return;
+                self.rebaseClock();
                 const lane = &self.grid.items[index];
                 const total: f32 = @floatFromInt(totalBeats(lane));
                 const fraction = std.math.clamp((self.last_point.x - lane.nav_x) / @max(1, lane.nav_w), 0, 1);
-                lane.start_raw = fraction * total;
-                snapLane(lane);
+                self.grid_start_raw = fraction * total;
+                self.snapGrid();
                 dvui.refresh(null, @src(), null);
             },
             .toggle_transport => {
                 if (self.grid_playing) {
-                    self.grid_beat = self.gridPosition();
+                    self.grid_start = self.gridStart();
+                    self.grid_start_raw = self.grid_start;
                     self.grid_playing = false;
                 } else {
                     self.grid_started_at = std.Io.Timestamp.now(self.io, .awake).nanoseconds;
@@ -605,21 +606,44 @@ pub const App = struct {
         }
     }
 
-    /// Beat shown at the left edge of every lane. While the transport runs,
-    /// every lane shows the same window so the playhead stacks.
-    fn viewStart(self: *const App, lane: *const Lane) f32 {
-        if (self.grid_playing) return self.gridPosition() - beats_visible / 2;
-        return lane.start_beat;
-    }
-
-    /// Beat the grid transport is at, in track beats.
-    fn gridPosition(self: *const App) f32 {
-        if (!self.grid_playing) return self.grid_beat;
+    /// Beat at the left edge of the shared window.
+    fn gridStart(self: *const App) f32 {
+        if (!self.grid_playing) return self.grid_start;
         const now = std.Io.Timestamp.now(self.io, .awake).nanoseconds;
         const elapsed_ns: f64 = @floatFromInt(now - self.grid_started_at);
         const bpm = if (self.crate.seedTrack()) |track| track.bpm else 120;
-        const beat_increment: f32 = @floatCast(elapsed_ns / 1_000_000_000 * bpm / 60);
-        return self.grid_beat + beat_increment;
+        return self.grid_start + @as(f32, @floatCast(elapsed_ns / 1_000_000_000 * bpm / 60));
+    }
+
+    /// The playhead never moves: it is the middle of the window.
+    fn gridPosition(self: *const App) f32 {
+        return self.gridStart() + beats_visible / 2;
+    }
+
+    /// Fold elapsed time into the position before moving the window by hand.
+    fn rebaseClock(self: *App) void {
+        if (!self.grid_playing) return;
+        self.grid_start = self.gridStart();
+        self.grid_start_raw = self.grid_start;
+        self.grid_started_at = std.Io.Timestamp.now(self.io, .awake).nanoseconds;
+    }
+
+    fn gridTotal(self: *const App) usize {
+        var total: usize = std.math.maxInt(usize);
+        var seen = false;
+        for (self.grid.items) |*lane| {
+            const beats = totalBeats(lane);
+            if (beats == 0) continue;
+            total = @min(total, beats);
+            seen = true;
+        }
+        return if (seen) total else 0;
+    }
+
+    fn snapGrid(self: *App) void {
+        const last: f32 = @max(0, @as(f32, @floatFromInt(self.gridTotal())) - beats_visible);
+        self.grid_start_raw = std.math.clamp(self.grid_start_raw, 0, last);
+        self.grid_start = @round(self.grid_start_raw);
     }
 
     pub fn animating(self: *const App) bool {
@@ -654,19 +678,21 @@ pub const App = struct {
     fn applyPull(self: *App, pull: hit.Drag.Pull) void {
         switch (pull.target) {
             .lane => |slot| {
-                if (self.grid_playing or slot >= self.grid.items.len) return;
+                if (slot >= self.grid.items.len) return;
                 const lane = &self.grid.items[slot];
+                self.rebaseClock();
                 // Grab the wave: dragging right shows earlier audio.
-                lane.start_raw -= pull.dx * beats_visible / @max(1, lane.wave_w);
-                snapLane(lane);
+                self.grid_start_raw -= pull.dx * beats_visible / @max(1, lane.wave_w);
+                self.snapGrid();
                 dvui.refresh(null, @src(), null);
             },
             .nav => |slot| {
-                if (self.grid_playing or slot >= self.grid.items.len) return;
+                if (slot >= self.grid.items.len) return;
                 const lane = &self.grid.items[slot];
+                self.rebaseClock();
                 const total: f32 = @floatFromInt(totalBeats(lane));
-                lane.start_raw += pull.dx / @max(1, lane.nav_w) * total;
-                snapLane(lane);
+                self.grid_start_raw += pull.dx / @max(1, lane.nav_w) * total;
+                self.snapGrid();
                 dvui.refresh(null, @src(), null);
             },
             .filter => |slot| {
@@ -714,7 +740,7 @@ pub const App = struct {
                 const wave_rect = rectFrom(wave.data().contentRectScale().r).clipped(col_rect);
                 lane.wave_w = wave_rect.w;
 
-                const view = self.viewStart(lane);
+                const view = self.gridStart();
                 if (lane.analysis) |*analysis| {
                     self.paintWave(analysis, wave_rect, view);
                 } else {
@@ -726,13 +752,7 @@ pub const App = struct {
                     });
                 }
                 if (lane.analysis != null) {
-                    const beat = self.gridPosition();
-                    if (self.grid_playing) {
-                        fillRect(self.allocator, wave_rect.x + wave_rect.w / 2 - 1, wave_rect.y, 2.5, wave_rect.h, Palette.ink);
-                    } else if (beat >= view and beat <= view + beats_visible) {
-                        const x = wave_rect.x + (beat - view) / beats_visible * wave_rect.w;
-                        fillRect(self.allocator, x - 1, wave_rect.y, 2.5, wave_rect.h, Palette.ink);
-                    }
+                    fillRect(self.allocator, wave_rect.x + wave_rect.w / 2 - 1, wave_rect.y, 2.5, wave_rect.h, Palette.ink);
                 }
                 self.hit_map.append(wave_rect, .{ .lane = index });
             }
@@ -768,8 +788,7 @@ pub const App = struct {
 
             const total = totalBeats(lane);
             const visible: f32 = @min(beats_visible, @as(f32, @floatFromInt(total)));
-            const view = self.viewStart(lane);
-            const start = if (total > 0) view / @as(f32, @floatFromInt(total)) else 0;
+            const start = if (total > 0) self.gridStart() / @as(f32, @floatFromInt(total)) else 0;
             const span = if (total > 0) visible / @as(f32, @floatFromInt(total)) else 1;
 
             fillRect(self.allocator, bar_rect.x, bar_rect.y, bar_rect.w, bar_rect.h, Palette.field);
@@ -792,13 +811,6 @@ pub const App = struct {
         return analysis.beats.len;
     }
 
-    fn snapLane(lane: *Lane) void {
-        const total = totalBeats(lane);
-        const last: f32 = @max(0, @as(f32, @floatFromInt(total)) - beats_visible);
-        lane.start_raw = std.math.clamp(lane.start_raw, 0, last);
-        lane.start_beat = @round(lane.start_raw);
-    }
-
     /// Waveform and beat lines, drawn straight into the lane's rectangle.
     fn paintWave(self: *App, analysis: *const pl.analysis.Analysis, rect: hit.Rect, start_beat: f32) void {
         if (rect.w <= 0 or rect.h <= 0) return;
@@ -810,12 +822,15 @@ pub const App = struct {
         const start_sample = start_beat * samples_per_beat;
         const samples_per_px = samples_per_beat * beats_visible / rect.w;
 
+        var builder = dvui.Path.Builder.init(self.allocator);
+        defer builder.deinit();
+
         var x: f32 = 0;
         var smoothed: f32 = 0.35;
-        while (x < rect.w) : (x += 2) {
+        while (x < rect.w) : (x += 6) {
             const from: usize = @intFromFloat(@max(0, start_sample + x * samples_per_px));
             if (from >= analysis.waveform.len) break;
-            const to: usize = @min(analysis.waveform.len, @as(usize, @intFromFloat(@max(0, start_sample + (x + 2) * samples_per_px))));
+            const to: usize = @min(analysis.waveform.len, @as(usize, @intFromFloat(@max(0, start_sample + (x + 3) * samples_per_px))));
 
             var peak: u8 = 0;
             var sum: usize = 0;
@@ -828,7 +843,7 @@ pub const App = struct {
             // Heavy smoothing along x turns per-column spikes into hills.
             smoothed = smoothed * 0.75 + level * 0.25;
             const height = rect.h * smoothed;
-            fillRect(self.allocator, rect.x + x, rect.bottom() - height, 2, height, bandColor(smoothed));
+            fillRectInto(&builder, rect.x + x, rect.bottom() - height, 6, height, bandColor(smoothed));
         }
 
         var beat: f32 = @ceil(start_beat);
@@ -846,11 +861,14 @@ pub const App = struct {
         const len: f32 = @floatFromInt(analysis.waveform.len);
         const scale: f32 = 255 / @as(f32, @floatFromInt(@max(1, analysis.peak)));
 
+        var builder = dvui.Path.Builder.init(allocator);
+        defer builder.deinit();
+
         var x: f32 = 0;
         var smoothed: f32 = 0.35;
-        while (x < rect.w) : (x += 2) {
+        while (x < rect.w) : (x += 6) {
             const from: usize = @intFromFloat(@min(len - 1, x / rect.w * len));
-            const to: usize = @min(analysis.waveform.len, @as(usize, @intFromFloat(@max(@as(f32, @floatFromInt(from + 1)), (x + 2) / rect.w * len))));
+            const to: usize = @min(analysis.waveform.len, @as(usize, @intFromFloat(@max(@as(f32, @floatFromInt(from + 1)), (x + 3) / rect.w * len))));
 
             var peak: u8 = 0;
             var sum: usize = 0;
@@ -862,7 +880,7 @@ pub const App = struct {
             const level = @min(255, @max(average * 1.15, @as(f32, @floatFromInt(peak)) * 0.6) * scale * 0.55) / 255;
             smoothed = smoothed * 0.75 + level * 0.25;
             const height = rect.h * smoothed;
-            fillRect(allocator, rect.x + x, rect.bottom() - height, 2, height, bandColor(smoothed));
+            fillRectInto(&builder, rect.x + x, rect.bottom() - height, 6, height, bandColor(smoothed));
         }
     }
 
@@ -1289,6 +1307,17 @@ fn mixColor(a: dvui.Color, b: dvui.Color, t: f32) dvui.Color {
         .b = @intFromFloat(@as(f32, @floatFromInt(a.b)) + (@as(f32, @floatFromInt(b.b)) - @as(f32, @floatFromInt(a.b))) * f),
         .a = 0xff,
     };
+}
+
+/// Same as `fillRect`, but reuses the builder: a waveform is hundreds of
+/// columns per frame and allocating a path for each one stalls the UI.
+fn fillRectInto(builder: *dvui.Path.Builder, x: f32, y: f32, w: f32, h: f32, color: dvui.Color) void {
+    builder.points.clearRetainingCapacity();
+    builder.addPoint(.{ .x = x, .y = y });
+    builder.addPoint(.{ .x = x + w, .y = y });
+    builder.addPoint(.{ .x = x + w, .y = y + h });
+    builder.addPoint(.{ .x = x, .y = y + h });
+    dvui.Path.fillConvex(builder.build(), .{ .color = .{ .color = color } });
 }
 
 fn rectFrom(rect: dvui.Rect.Physical) hit.Rect {
