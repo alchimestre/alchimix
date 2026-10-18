@@ -79,6 +79,8 @@ pub const Target = union(enum) {
     master_lock,
     /// Keeps the pitch while the master tempo changes.
     pitch_lock,
+    /// Starts or stops one grid lane.
+    lane_play: usize,
 };
 
 /// Screen rectangles for one frame, with what each one means.
@@ -149,6 +151,7 @@ pub const Drag = struct {
         toggle_wave_mode,
         toggle_master_lock,
         toggle_pitch,
+        toggle_lane_play: usize,
         /// A press on a lane's scrub bar: jump the window to that point.
         seek_nav: usize,
         select_block: usize,
@@ -168,6 +171,7 @@ pub const Drag = struct {
             .wave_mode => .toggle_wave_mode,
             .master_lock => .toggle_master_lock,
             .pitch_lock => .toggle_pitch,
+            .lane_play => |index| .{ .toggle_lane_play = index },
             .block => |index| blk: {
                 if (shift) break :blk .{ .toggle_block = index };
                 self.pressed = target;
@@ -230,7 +234,7 @@ pub const Drag = struct {
         return switch (target) {
             .block => |from| .{ .move_block = .{ .from = from, .gap = to } },
             .row => |track| .{ .drop_track = .{ .gap = to, .track = track } },
-            .toggle, .notation, .lane, .nav, .filter, .transport, .wave_mode, .master_lock, .pitch_lock => .none,
+            .toggle, .notation, .lane, .nav, .filter, .transport, .wave_mode, .master_lock, .pitch_lock, .lane_play => .none,
         };
     }
 

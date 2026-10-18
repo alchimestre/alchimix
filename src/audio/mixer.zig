@@ -1,5 +1,6 @@
-//! Plays every grid lane at once: one ffplay per lane, all started on the same
-//! beat and retuned to the master tempo, each through its own low pass.
+//! Plays grid lanes: one ffplay per lane, so any subset can run together.
+//! Each process starts on its lane's playhead beat, at the master tempo, through
+//! that lane's low pass, and runs to the end of the track.
 
 const std = @import("std");
 const Track = @import("../domain/track.zig").Track;
@@ -16,72 +17,73 @@ pub const Lane = struct {
     keylock: bool,
 };
 
-pub const snippet_s: u32 = 15;
+pub const max_lanes = 64;
 
 pub const Mixer = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
-    children: std.ArrayListUnmanaged(std.process.Child) = .empty,
+    children: [max_lanes]?std.process.Child = @splat(null),
 
     pub fn init(allocator: std.mem.Allocator, io: std.Io) Mixer {
         return .{ .allocator = allocator, .io = io };
     }
 
     pub fn deinit(self: *Mixer) void {
-        self.stop();
-        self.children.deinit(self.allocator);
+        self.stopAll();
         self.* = undefined;
     }
 
-    pub fn play(self: *Mixer, lanes: []const Lane) void {
-        self.stop();
-        for (lanes) |lane| self.spawn(lane);
+    pub fn play(self: *Mixer, index: usize, lane: Lane) void {
+        self.stop(index);
+        if (index >= max_lanes) return;
+        self.children[index] = self.spawn(lane);
     }
 
-    pub fn stop(self: *Mixer) void {
-        for (self.children.items) |*child| {
+    pub fn stop(self: *Mixer, index: usize) void {
+        if (index >= max_lanes) return;
+        if (self.children[index]) |*child| {
             if (child.id) |pid| std.posix.kill(pid, std.posix.SIG.KILL) catch {};
             _ = child.wait(self.io) catch {};
+            self.children[index] = null;
         }
-        self.children.clearRetainingCapacity();
     }
 
-    pub fn active(self: *const Mixer) bool {
-        return self.children.items.len > 0;
+    pub fn stopAll(self: *Mixer) void {
+        for (0..max_lanes) |index| self.stop(index);
     }
 
-    fn spawn(self: *Mixer, lane: Lane) void {
-        if (lane.track.file_path.len == 0) return;
+    pub fn running(self: *const Mixer, index: usize) bool {
+        if (index >= max_lanes) return false;
+        return self.children[index] != null;
+    }
 
-        const start = std.fmt.allocPrint(self.allocator, "{d:.3}", .{lane.start_s}) catch return;
+    fn spawn(self: *Mixer, lane: Lane) ?std.process.Child {
+        if (lane.track.file_path.len == 0) return null;
+
+        const start = std.fmt.allocPrint(self.allocator, "{d:.3}", .{lane.start_s}) catch return null;
         defer self.allocator.free(start);
-        const length = std.fmt.allocPrint(self.allocator, "{d}", .{snippet_s}) catch return;
-        defer self.allocator.free(length);
+
         const ratio = std.math.clamp(lane.tempo, 0.5, 2.0);
         const chain = if (lane.keylock)
             std.fmt.allocPrint(self.allocator, "atempo={d:.3},lowpass=f={d:.0}", .{
                 ratio, lowPassHz(lane.filter),
-            }) catch return
+            }) catch return null
         else
             std.fmt.allocPrint(self.allocator, "asetrate={d:.0},aresample=48000,lowpass=f={d:.0}", .{
                 44100 * ratio, lowPassHz(lane.filter),
-            }) catch return;
+            }) catch return null;
         defer self.allocator.free(chain);
 
-        const child = std.process.spawn(self.io, .{
+        return std.process.spawn(self.io, .{
             .argv = &.{
                 "ffplay", "-nodisp", "-autoexit", "-loglevel", "error",
-                "-ss",    start,  "-t",        length,
-                "-af",    chain,  lane.track.file_path,
+                "-ss",    start,  "-af",      chain,
+                lane.track.file_path,
             },
             .stdin = .ignore,
             .stdout = .ignore,
             .stderr = .ignore,
-        }) catch return;
-
-        self.children.append(self.allocator, child) catch {
-            if (child.id) |pid| std.posix.kill(pid, std.posix.SIG.KILL) catch {};
-        };
+        }) catch null;
     }
 };
 
