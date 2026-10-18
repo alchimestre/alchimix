@@ -651,7 +651,25 @@ fn drawBlock(app: *App, index: usize, track: Track) Block {
         .id_extra = index * 16 + 3,
     });
 
-    progressBar(app, track, index * 16 + 9, 4);
+    {
+        var bottom = dvui.box(@src(), .{ .dir = .horizontal }, .{
+            .expand = .horizontal,
+            .id_extra = index * 16 + 10,
+        });
+        defer bottom.deinit();
+
+        progressBar(app, track, index * 16 + 9, 4);
+
+        if (track.genre.len > 0) {
+            var genre_buffer: [34]u8 = undefined;
+            labelStyled(@src(), clippedTitle(track.genre, &genre_buffer), .{
+                .color_text = .{ .color = Palette.secondary },
+                .font = metaFont(),
+                .margin = .{ .x = 8 },
+                .id_extra = index * 16 + 4,
+            });
+        }
+    }
 
     return .{ .action = if (removed) .remove else .none, .rect = rect };
 }
