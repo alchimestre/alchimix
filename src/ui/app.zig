@@ -597,16 +597,15 @@ pub const App = struct {
                 dvui.refresh(null, @src(), null);
             },
             .toggle_master_lock => {
+                self.freezeClock();
                 self.master_locked = !self.master_locked;
                 if (!self.master_locked) self.master_bpm = self.masterBpm();
-                self.stopAllLanes();
+                self.retunePlaying();
                 dvui.refresh(null, @src(), null);
             },
             .toggle_pitch => {
                 self.pitch_lock = !self.pitch_lock;
-                for (self.grid.items, 0..) |*lane, index| {
-                    if (lane.playing) self.restartLane(index);
-                }
+                self.retunePlaying();
                 dvui.refresh(null, @src(), null);
             },
             .toggle_wave_mode => {
@@ -844,6 +843,22 @@ pub const App = struct {
         if (index < self.grid.items.len) self.startLane(index);
     }
 
+    /// Pins the clock to its current beat, so a tempo change does not jump it.
+    fn freezeClock(self: *App) void {
+        if (!self.clock_running) return;
+        self.clock_beat = self.masterBeat();
+        self.clock_started_ns = self.nowNs();
+    }
+
+    /// Retunes every running lane in place, crossfaded, so the tempo changes
+    /// without a pause.
+    fn retunePlaying(self: *App) void {
+        for (self.grid.items, 0..) |*lane, index| {
+            if (!lane.playing) continue;
+            self.mixer.swap(lane.slot, self.laneSpec(index, 0));
+        }
+    }
+
     fn restartDirty(self: *App) void {
         for (self.grid.items, 0..) |*lane, index| {
             if (!lane.filter_dirty) continue;
@@ -961,11 +976,11 @@ pub const App = struct {
         entry.deinit();
 
         if (changed) {
+            self.freezeClock();
             const parsed = std.fmt.parseFloat(f32, self.master_text.items) catch null;
             if (parsed) |value| self.master_bpm = std.math.clamp(value, 40, 220);
             self.master_locked = false;
-            // Running lanes were tuned to the old tempo.
-            self.stopAllLanes();
+            self.retunePlaying();
         }
 
         {
@@ -1197,7 +1212,7 @@ pub const App = struct {
         {
             var bar = dvui.box(@src(), .{ .dir = .horizontal }, .{
                 .expand = .horizontal,
-                .min_size_content = .{ .w = 0, .h = 16 },
+                .min_size_content = .{ .w = 0, .h = 24 },
                 .id_extra = 9300 + index,
             });
             defer bar.deinit();
@@ -1278,6 +1293,8 @@ pub const App = struct {
         if (rect.w <= 0 or rect.h <= 0) return;
         fillRect(self.allocator, rect.x, rect.y, rect.w, rect.h, Palette.field);
 
+        paintPhrases(self.allocator, analysis, rect, start_beat, beats_visible, totalBeatsF(analysis));
+
         const bpm = if (analysis.bpm() > 0) analysis.bpm() else 128;
         const scale: f32 = 255 / @as(f32, @floatFromInt(@max(1, analysis.peak)));
         const samples_per_beat: f32 = @as(f32, pl.analysis.Analysis.samples_per_second) * 60 / bpm;
@@ -1335,6 +1352,10 @@ pub const App = struct {
         self.paintBeats(rect, start_beat);
     }
 
+    fn totalBeatsF(analysis: *const pl.analysis.Analysis) f32 {
+        return @floatFromInt(analysis.beats.len);
+    }
+
     fn paintBeats(self: *App, rect: hit.Rect, start_beat: f32) void {
         var beat: f32 = @ceil(start_beat);
         while (beat < start_beat + beats_visible) : (beat += 1) {
@@ -1348,6 +1369,7 @@ pub const App = struct {
     /// waveform rather than a slider.
     fn paintOverview(allocator: std.mem.Allocator, analysis: *const pl.analysis.Analysis, rect: hit.Rect) void {
         if (rect.w <= 0 or rect.h <= 0 or analysis.waveform.len == 0) return;
+        paintPhrases(allocator, analysis, rect, 0, totalBeatsF(analysis), totalBeatsF(analysis));
         const len: f32 = @floatFromInt(analysis.waveform.len);
         const scale: f32 = 255 / @as(f32, @floatFromInt(@max(1, analysis.peak)));
 
@@ -1781,6 +1803,46 @@ fn fade(color: dvui.Color, alpha: u8) dvui.Color {
 /// the colour through orange towards white.
 /// Heat map: quiet reads indigo, body red and orange, peaks yellow. The
 /// waveform carries one amplitude byte, so loudness is the only information.
+fn paintPhrases(
+    allocator: std.mem.Allocator,
+    analysis: *const pl.analysis.Analysis,
+    rect: hit.Rect,
+    start_beat: f32,
+    span: f32,
+    total: f32,
+) void {
+    if (rect.w <= 0 or rect.h <= 0 or span <= 0 or analysis.phrases.len == 0) return;
+
+    for (analysis.phrases, 0..) |phrase, index| {
+        const from: f32 = @floatFromInt(if (phrase.beat > 0) phrase.beat - 1 else 0);
+        const to: f32 = if (index + 1 < analysis.phrases.len)
+            @floatFromInt(if (analysis.phrases[index + 1].beat > 0) analysis.phrases[index + 1].beat - 1 else 0)
+        else
+            total;
+
+        const x0 = (from - start_beat) / span * rect.w;
+        const x1 = (to - start_beat) / span * rect.w;
+        const left = @max(0, x0);
+        const right = @min(rect.w, x1);
+        if (right <= left) continue;
+
+        fillRect(allocator, rect.x + left, rect.y, right - left, rect.h, fade(phraseColor(phrase.kind), 40));
+    }
+}
+
+fn phraseColor(kind: u8) dvui.Color {
+    return switch (kind) {
+        1 => dvui.Color{ .r = 0x4f, .g = 0x9c, .b = 0xff, .a = 0xff },
+        2 => dvui.Color{ .r = 0x4f, .g = 0xd1, .b = 0x8a, .a = 0xff },
+        3 => dvui.Color{ .r = 0xb5, .g = 0x7a, .b = 0xff, .a = 0xff },
+        4 => dvui.Color{ .r = 0xff, .g = 0xa5, .b = 0x3d, .a = 0xff },
+        5 => dvui.Color{ .r = 0xff, .g = 0x5d, .b = 0x5d, .a = 0xff },
+        6 => dvui.Color{ .r = 0x3d, .g = 0xd6, .b = 0xd6, .a = 0xff },
+        7 => dvui.Color{ .r = 0xff, .g = 0x7a, .b = 0xc0, .a = 0xff },
+        else => dvui.Color{ .r = 0x8a, .g = 0x8f, .b = 0xa8, .a = 0xff },
+    };
+}
+
 fn bandColor(level: f32) dvui.Color {
     const t = std.math.clamp(level, 0, 1);
     if (t < 0.25) return mixColor(Palette.heat0, Palette.heat1, t / 0.25);
