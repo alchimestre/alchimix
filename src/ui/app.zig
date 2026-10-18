@@ -18,43 +18,51 @@ const Candidate = pl.suggest.Candidate;
 const Lane = struct {
     track_id: u64 = 0,
     analysis: ?pl.analysis.Analysis = null,
-    /// Beat under the playhead: what playback starts on and what the window
-    /// is centred around.
-    beat: f32 = 0,
-    /// This lane's own process is running.
-    playing: bool = false,
-    /// Master beat when this lane started.
-    started_master: f32 = 0,
-    /// Wall clock when the audio should end.
-    end_ns: i128 = 0,
-    /// Filter moved while playing; restart on release.
-    filter_dirty: bool = false,
-    /// Unrounded drag position, so sub-beat movements are not lost to snapping.
-    beat_raw: f32 = 0,
-    /// Band filter, 0 closed to 1 open.
-    filter: f32 = 1,
-    /// Height of the filter strip, in physical pixels.
-    filter_h: f32 = 1,
-    /// Left edge and width of the scrub bar, for click-to-seek.
-    nav_x: f32 = 0,
-    /// Top edge of the filter strip, for click-to-set.
-    filter_y: f32 = 0,
-    /// The waveform was moved by hand, so this lane carries an offset.
-    manual: bool = false,
-    /// Full width of the whole-track navigator, in physical pixels.
-    nav_w: f32 = 1,
     /// Set when the source has no analysis for this track.
     missing: bool = false,
-    /// Width of the waveform, in physical pixels, for drag arithmetic.
-    wave_w: f32 = 1,
 };
+
+fn mixerOutputPlay(context: *anyopaque, lanes: []const pl.mixer.Lane) void {
+    const mixer: *pl.mixer.Mixer = @ptrCast(@alignCast(context));
+    mixer.play(lanes);
+}
+
+fn mixerOutputStop(context: *anyopaque) void {
+    const mixer: *pl.mixer.Mixer = @ptrCast(@alignCast(context));
+    mixer.stop();
+}
+
+fn mixerLaneState(context: *anyopaque, uid: u64) pl.mixer.LaneState {
+    const mixer: *pl.mixer.Mixer = @ptrCast(@alignCast(context));
+    return mixer.laneState(uid);
+}
+
+fn mixerClockNs(context: *anyopaque) i128 {
+    const mixer: *const pl.mixer.Mixer = @ptrCast(@alignCast(context));
+    return mixer.nowNs();
+}
+
+fn mixerSpectrum(context: *anyopaque, uid: u64, out: []f32) void {
+    const mixer: *pl.mixer.Mixer = @ptrCast(@alignCast(context));
+    mixer.spectrum(uid, out);
+}
+
+fn presetName(preset: pl.mixer.EqPreset) []const u8 {
+    return switch (preset) {
+        .lpf => "LPF",
+        .hpf => "HPF",
+        .bpf => "BPF",
+        .none => "",
+    };
+}
 
 pub const App = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
     library: pl.library.Library,
     player: pl.player.Player,
-    mixer: pl.mixer.Mixer,
+    mixer: *pl.mixer.Mixer,
+    transport: pl.transport.Transport,
     crate: pl.crate.Crate,
 
     query: std.ArrayList(u8) = .empty,
@@ -74,23 +82,14 @@ pub const App = struct {
     selected: std.ArrayListUnmanaged(usize) = .empty,
     /// One grid lane per block, in crate order.
     grid: std.ArrayListUnmanaged(Lane) = .empty,
-    
-    /// Fingerprint of the last mix, so unrelated UI work never restarts audio.
-    mix_key: u64 = 0,
-    /// Master clock every playing lane is derived from.
-    clock_running: bool = false,
-    clock_started_ns: i128 = 0,
-    clock_beat: f32 = 0,
-    /// A lane is playing but the clock waits for the mixer's buffers.
-    pending_start: bool = false,
-    /// Lane held down with the pointer: jog pause, resume on release.
-    jog_lane: ?usize = null,
+    /// A crate edit happened this frame, including moves that keep the same
+    /// track sequence, so the grid must be rebuilt anyway.
+    grid_dirty: bool = false,
+
     /// Master tempo: follows the seed while locked, manual otherwise.
     master_bpm: f32 = 128,
     master_text: std.ArrayList(u8) = .empty,
     master_locked: bool = true,
-    /// Keep the pitch while the tempo changes.
-    pitch_lock: bool = true,
     /// The master field had keyboard focus last frame, to detect leaving it.
     master_focus: bool = false,
 
@@ -130,20 +129,35 @@ pub const App = struct {
     /// resize lag a frame and flicker.
     const chrome_height: f32 = 104;
 
-    pub fn init(allocator: std.mem.Allocator, library: pl.library.Library, io: std.Io) App {
+    pub fn init(allocator: std.mem.Allocator, library: pl.library.Library, io: std.Io) !App {
+        const mixer = try allocator.create(pl.mixer.Mixer);
+        mixer.* = pl.mixer.Mixer.init(allocator, io);
         return .{
             .allocator = allocator,
             .io = io,
             .library = library,
             .player = pl.player.Player.init(io, allocator),
-            .mixer = pl.mixer.Mixer.init(allocator, io),
+            .mixer = mixer,
+            .transport = pl.transport.Transport.init(
+                allocator,
+                .{
+                    .context = mixer,
+                    .play = mixerOutputPlay,
+                    .stop = mixerOutputStop,
+                    .laneState = mixerLaneState,
+                    .spectrum = mixerSpectrum,
+                },
+                .{ .context = mixer, .nowNs = mixerClockNs },
+            ),
             .crate = pl.crate.Crate.init(allocator),
             .hit_map = hit.HitMap.init(allocator),
         };
     }
 
     pub fn deinit(self: *App) void {
+        self.transport.deinit();
         self.mixer.deinit();
+        self.allocator.destroy(self.mixer);
         for (self.grid.items) |*lane| {
             if (lane.analysis) |*a| a.deinit(self.allocator);
         }
@@ -186,20 +200,11 @@ pub const App = struct {
         self.scale_hint = root_scale.s;
 
         self.player.poll();
-        for (self.grid.items, 0..) |*lane, index| {
-            if (lane.playing and self.nowNs() >= lane.end_ns) self.stopLane(index);
-        }
+        self.transport.setTempo(self.masterBpm());
+        self.transport.sync();
 
         // The pointer pass reads the map the previous frame drew, then the map
         // is rebuilt from this frame's layout.
-        if (self.pending_start and self.mixer.ready()) {
-            self.pending_start = false;
-            self.startClock();
-            for (self.grid.items) |*lane| {
-                if (lane.playing) lane.started_master = 0;
-            }
-        }
-
         self.handlePointer();
         self.syncGrid();
 
@@ -513,7 +518,9 @@ pub const App = struct {
         switch (next_action) {
             .remove => |index| {
                 if (self.crate.at(index)) |track| self.player.stopPreview(track.id);
-                self.crate.remove(index) catch {};
+                self.crate.remove(index) catch return;
+                self.transport.remove(index);
+                self.grid_dirty = true;
                 self.selected.clearRetainingCapacity();
                 self.refresh() catch {};
                 dvui.refresh(null, @src(), null);
@@ -538,9 +545,7 @@ pub const App = struct {
                     self.apply(self.drag.press(target, p, mouse.mod.shift()));
                     switch (target) {
                         .lane => |index| {
-                            if (index < self.grid.items.len and self.grid.items[index].playing) {
-                                self.jogPause(index);
-                            }
+                            if (self.transport.isPlaying(index)) self.transport.jogPause(index, .now);
                         },
                         else => {},
                     }
@@ -554,8 +559,7 @@ pub const App = struct {
                 .release => {
                     if (!mouse.button.pointer()) continue;
                     self.apply(self.drag.release());
-                    self.jogResume();
-                    self.restartDirty();
+                    self.transport.jogResume();
                 },
                 else => {},
             }
@@ -581,51 +585,45 @@ pub const App = struct {
                 self.note_names = !self.note_names;
                 dvui.refresh(null, @src(), null);
             },
-            .set_filter => |index| {
-                if (index >= self.grid.items.len) return;
-                const lane = &self.grid.items[index];
-                const from_top = std.math.clamp((self.last_point.y - lane.filter_y) / @max(1, lane.filter_h), 0, 1);
-                lane.filter = 1 - from_top;
-                if (lane.playing) lane.filter_dirty = true;
+            .grab_eq => {},
+            .set_eq_preset => |at| {
+                if (at.lane >= self.grid.items.len) return;
+                const next: pl.mixer.EqPreset = if (self.transport.eqPreset(at.lane) == at.preset) .none else at.preset;
+                self.transport.setEqPreset(at.lane, next);
                 dvui.refresh(null, @src(), null);
             },
             .seek_nav => |index| {
                 if (index >= self.grid.items.len) return;
                 const total: f32 = @floatFromInt(totalBeats(&self.grid.items[index]));
-                const fraction = std.math.clamp((self.last_point.x - self.grid.items[index].nav_x) / @max(1, self.grid.items[index].nav_w), 0, 1);
-                // Only this lane moves; it lands on a bar.
-                self.seekLane(index, fraction * total);
+                const beat = self.hit_map.navBeatAt(index, self.last_point.x, total) orelse return;
+                self.transport.seek(index, beat);
                 dvui.refresh(null, @src(), null);
             },
             .toggle_master_lock => {
-                self.freezeClock();
                 self.master_locked = !self.master_locked;
                 if (!self.master_locked) self.master_bpm = self.masterBpm();
-                self.retunePlaying();
+                self.transport.setTempo(self.masterBpm());
                 dvui.refresh(null, @src(), null);
             },
             .toggle_pitch => {
-                self.pitch_lock = !self.pitch_lock;
-                self.retunePlaying();
+                self.transport.setKeylock(!self.transport.keylocked());
                 dvui.refresh(null, @src(), null);
             },
             .toggle_transport => {
-                if (self.anyPlaying()) {
-                    self.stopAllLanes();
+                if (self.transport.anyPlaying()) {
+                    self.transport.stopAll();
                 } else {
                     // A global start is one act: every lane starts together.
-                    for (self.grid.items, 0..) |*lane, index| {
-                        if (!lane.playing) self.startLaneJoin(index, true);
-                    }
+                    self.transport.startAll();
                 }
                 dvui.refresh(null, @src(), null);
             },
             .toggle_lane_play => |index| {
                 if (index >= self.grid.items.len) return;
-                if (self.grid.items[index].playing) {
-                    self.stopLane(index);
+                if (self.transport.isPlaying(index)) {
+                    self.transport.stop(index);
                 } else {
-                    self.startLane(index);
+                    self.transport.start(index, .bar);
                 }
                 dvui.refresh(null, @src(), null);
             },
@@ -635,14 +633,18 @@ pub const App = struct {
                 dvui.refresh(null, @src(), null);
             },
             .drop_track => |drop| {
-                _ = self.crate.insertAt(drop.gap, drop.track) catch {};
+                _ = self.crate.insertAt(drop.gap, drop.track) catch return;
+                self.transport.insert(drop.gap);
+                self.grid_dirty = true;
                 self.selected.clearRetainingCapacity();
                 self.refresh() catch {};
                 dvui.refresh(null, @src(), null);
             },
             .move_block => |move| {
                 if (self.crate.at(move.from)) |track| self.player.stopPreview(track.id);
-                self.crate.moveTo(move.from, move.gap) catch {};
+                self.crate.moveTo(move.from, move.gap) catch return;
+                self.transport.move(move.from, move.gap);
+                self.grid_dirty = true;
                 self.selected.clearRetainingCapacity();
                 self.refresh() catch {};
                 dvui.refresh(null, @src(), null);
@@ -670,319 +672,21 @@ pub const App = struct {
         return 128;
     }
 
-    fn nowNs(self: *const App) i128 {
-        return std.Io.Timestamp.now(self.io, .awake).nanoseconds;
-    }
-
-    /// Master beat: the one grid every playing lane follows.
-    fn masterBeat(self: *const App) f32 {
-        if (!self.clock_running) return self.clock_beat;
-        const now = self.nowNs();
-        const elapsed_ns: f64 = @floatFromInt(@max(0, now - self.clock_started_ns));
-        return self.clock_beat + @as(f32, @floatCast(elapsed_ns / 1_000_000_000 * self.masterBpm() / 60));
-    }
-
-    fn startClock(self: *App) void {
-        if (self.clock_running) return;
-        // The clock starts on a bar of its own grid.
-        self.clock_beat = @round(self.clock_beat / 4) * 4;
-        self.clock_started_ns = self.nowNs();
-        self.clock_running = true;
-    }
-
-    fn stopClock(self: *App) void {
-        if (!self.clock_running) return;
-        self.clock_beat = self.masterBeat();
-        self.clock_running = false;
-    }
-
-    /// Beat under the playhead: the lane's base plus whatever the master clock
-    /// has advanced since the lane started.
-    fn laneBeat(self: *const App, lane: *const Lane) f32 {
-        if (!lane.playing or !self.clock_running) return lane.beat;
-        const master = self.masterBeat();
-        if (master < lane.started_master) return lane.beat;
-        return lane.beat + (master - lane.started_master);
-    }
-
     /// Beat at the left edge of a lane's window. Negative at the start of a
     /// track, before the first bar.
-    fn laneStart(self: *const App, lane: *const Lane) f32 {
-        return self.laneBeat(lane) - beats_visible / 2;
-    }
-
-    /// Folds elapsed time without rounding: jog and filter changes must not
-    /// move the playhead.
-    fn foldLane(self: *App, lane: *Lane) void {
-        if (!lane.playing) return;
-        lane.beat = self.laneBeat(lane);
-        lane.beat_raw = lane.beat;
-    }
-
-    fn offsetOf(lane: *const Lane) f32 {
-        if (lane.analysis) |*analysis| return analysis.downbeatOffset();
-        return 0;
-    }
-
-    /// Stopping lands on a downbeat of the rekordbox bar, not on an arbitrary
-    /// multiple of four.
-    fn snapBar(lane: *Lane) void {
-        const offset = offsetOf(lane);
-        const snapped = @round((lane.beat + offset) / 4) * 4 - offset;
-        lane.beat = @max(0, snapped);
-        lane.beat_raw = lane.beat;
-    }
-
-    fn snapLane(lane: *Lane) void {
-        const total: f32 = @floatFromInt(totalBeats(lane));
-        lane.beat_raw = std.math.clamp(lane.beat_raw, 0, total);
-        const offset = offsetOf(lane);
-        const snapped = @round((lane.beat_raw + offset) / 4) * 4 - offset;
-        lane.beat = @max(0, snapped);
-    }
-
-    fn snapBeat(lane: *Lane) void {
-        const total: f32 = @floatFromInt(totalBeats(lane));
-        lane.beat_raw = std.math.clamp(lane.beat_raw, 0, total);
-        lane.beat = @round(lane.beat_raw);
-    }
-
-    fn mixHash(seed: u64, value: u64) u64 {
-        return (seed ^ value) *% 1099511628211;
-    }
-
-    fn laneSpec(self: *App, index: usize, delay_ms: u32) pl.mixer.Lane {
-        const track = self.crate.at(index).?.*;
-        const lane = &self.grid.items[index];
-        const grid_bpm: f32 = if (lane.analysis) |*analysis| blk: {
-            if (analysis.bpm() > 0) break :blk analysis.bpm();
-            break :blk 128;
-        } else if (track.bpm > 0) @floatCast(track.bpm) else 128;
-
-        // Seconds come from the analysed grid: the first beat is rarely at 0.
-        // A playing lane keeps its base beat: the mixer already started the
-        // decoder there, and resending the advanced position would restart it.
-        const beat = lane.beat;
-        const start_s: f64 = if (lane.analysis) |*analysis|
-            analysis.beatTimeMs(beat) / 1000
-        else
-            beat * 60 / grid_bpm;
-
-        if (std.c.getenv("PLAYLISTER_DEBUG") != null) {
-            std.debug.print(
-                "lane {d} beat={d:.3} grid_bpm={d:.2} master={d:.2} start={d:.3}s tempo={d:.4} delay={d}ms\n",
-                .{ index, beat, grid_bpm, self.masterBpm(), start_s, self.masterBpm() / grid_bpm, delay_ms },
-            );
-        }
-
-        return .{
-            .track = track,
-            .start_s = start_s,
-            .tempo = self.masterBpm() / grid_bpm,
-            .filter = self.grid.items[index].filter,
-            .keylock = self.pitch_lock,
-            .delay_ms = delay_ms,
-        };
-    }
-
-    fn startLane(self: *App, index: usize) void {
-        self.startLaneJoin(index, false);
-    }
-
-    /// Rebuilds the single mixed stream from every lane that is playing. Only
-    /// the lane that is joining gets a bar delay; the others keep playing.
-    fn rebuildMix(self: *App) void {
-        self.rebuildMixDelayed(null, 0);
-    }
-
-    fn rebuildMixDelayed(self: *App, delayed: ?usize, delay_ms: u32) void {
-        var specs: [64]pl.mixer.Lane = undefined;
-        var count: usize = 0;
-        var key: u64 = 1469598103934665603;
-
-        for (self.grid.items, 0..) |*lane, index| {
-            if (!lane.playing or lane.analysis == null) continue;
-            if (count >= specs.len) break;
-            const delay: u32 = if (delayed != null and delayed.? == index) delay_ms else 0;
-            specs[count] = self.laneSpec(index, delay);
-            count += 1;
-
-            key = mixHash(key, specs[count - 1].track.id);
-            key = mixHash(key, @bitCast(specs[count - 1].start_s));
-            key = mixHash(key, @as(u32, @bitCast(specs[count - 1].tempo)));
-            key = mixHash(key, @as(u32, @bitCast(specs[count - 1].filter)));
-            key = mixHash(key, delay);
-        }
-
-        // Nothing audible changed: leave the running pipeline alone.
-        if (count > 0 and key == self.mix_key and self.mixer.active()) return;
-
-        self.mix_key = key;
-        self.mixer.play(specs[0..count]);
-    }
-
-    fn startLaneJoin(self: *App, index: usize, immediate: bool) void {
-        if (index >= self.grid.items.len or index >= self.crate.len()) return;
-        const lane = &self.grid.items[index];
-        if (lane.analysis == null) return;
-        // A lane starts on its grid's first downbeat. Starting on beat 1 of
-        // the grid instead leaves the bars of two tracks up to three beats
-        // apart, which is visible and audible as unsynced.
-        if (!lane.manual) {
-            if (lane.analysis) |*analysis| {
-                const first: f32 = @floatFromInt(analysis.firstDownbeat());
-                if (lane.beat < first) {
-                    lane.beat = first;
-                    lane.beat_raw = first;
-                }
-            }
-        }
-        const was_running = self.clock_running;
-        if (was_running) {
-            self.startClock();
-        } else {
-            // The clock starts on the first frame the audio is actually ready,
-            // so a slow decoder cannot leave every lane behind the playhead.
-            self.pending_start = true;
-            self.clock_beat = 0;
-            lane.started_master = 0;
-        }
-
-        // Mid-bar starts are delayed to the next master bar, so every lane's
-        // downbeats line up in time.
-        const phase = @mod(self.masterBeat(), 4);
-        const wait: f32 = if (!immediate and was_running and phase > 0.25) 4 - phase else 0;
-        // The decoder needs a moment to fill before it produces sound; the
-        // clock starts where the audio will, not where the process did.
-        const lead: f32 = @as(f32, @floatFromInt(pl.mixer.prefill_ms)) / 1000 * self.masterBpm() / 60;
-        if (was_running) lane.started_master = self.masterBeat() + wait + lead;
-
-        const remaining: f32 = @as(f32, @floatFromInt(totalBeats(lane))) - lane.beat;
-        lane.end_ns = self.nowNs() + @as(i128, @intFromFloat((wait + lead + @max(0, remaining)) * 60 / self.masterBpm() * 1_000_000_000));
-        lane.playing = true;
-        // The mute must also cover the decoder's prefill: the clock already
-        // leads by that much, so starting the audio earlier would put this lane
-        // ahead of every other one.
-        const wait_ms: u32 = @intFromFloat(wait * 60 / self.masterBpm() * 1000);
-        const delay_ms: u32 = wait_ms + pl.mixer.prefill_ms;
-        self.rebuildMixDelayed(index, delay_ms);
-    }
-
-    fn stopLane(self: *App, index: usize) void {
-        if (index >= self.grid.items.len) return;
-        const lane = &self.grid.items[index];
-        self.foldLane(lane);
-        // A stop always returns the lane to bar sync; the jog offset lives only
-        // while the lane keeps playing.
-        snapBar(lane);
-        lane.manual = false;
-        lane.playing = false;
-        self.rebuildMix();
-        if (!self.anyPlaying()) self.stopClock();
-    }
-
-    fn stopAllLanes(self: *App) void {
-        for (self.grid.items) |*lane| {
-            if (lane.playing) {
-                self.foldLane(lane);
-                snapBar(lane);
-                lane.manual = false;
-                lane.playing = false;
-            }
-        }
-        self.mixer.stop();
-        self.stopClock();
-    }
-
-    fn anyPlaying(self: *const App) bool {
-        for (self.grid.items) |*lane| {
-            if (lane.playing) return true;
-        }
-        return false;
-    }
-
-    /// Restarts a lane at its playhead, picking up tempo or filter changes.
-    fn restartLane(self: *App, index: usize) void {
-        if (index >= self.grid.items.len) return;
-        const lane = &self.grid.items[index];
-        if (!lane.playing) return;
-        // Resume from where the audio has reached, not from the last start.
-        self.foldLane(lane);
-        lane.playing = false;
-        self.startLane(index);
-    }
-
-    /// Seek: the lane stops, moves, and resumes if it was running.
-    fn seekLane(self: *App, index: usize, beat: f32) void {
-        if (index >= self.grid.items.len) return;
-        const was_playing = self.grid.items[index].playing;
-        self.foldLane(&self.grid.items[index]);
-        self.grid.items[index].playing = false;
-        self.grid.items[index].beat_raw = beat;
-        snapLane(&self.grid.items[index]);
-        self.grid.items[index].manual = false;
-        if (was_playing) self.startLaneJoin(index, true);
+    fn laneStart(self: *App, index: usize) f32 {
+        return self.transport.beat(index) - beats_visible / 2;
     }
 
     pub fn animating(self: *const App) bool {
-        return self.anyPlaying();
-    }
-
-    /// After a filter drag, put the new cutoff into the audio.
-    /// Holding a playing lane pauses it; releasing resumes from the same beat.
-    fn jogPause(self: *App, index: usize) void {
-        const lane = &self.grid.items[index];
-        self.foldLane(lane);
-        lane.playing = false;
-        self.rebuildMix();
-        if (!self.anyPlaying()) self.stopClock();
-        self.jog_lane = index;
-    }
-
-    fn jogResume(self: *App) void {
-        const index = self.jog_lane orelse return;
-        self.jog_lane = null;
-        // Resume on the beat the jog left the lane at, without waiting for
-        // the next master bar: the jog is the only way to leave bar sync.
-        if (index < self.grid.items.len) self.startLaneJoin(index, true);
-    }
-
-    /// Pins the clock to its current beat, so a tempo change does not jump it.
-    fn freezeClock(self: *App) void {
-        if (!self.clock_running) return;
-        self.clock_beat = self.masterBeat();
-        self.clock_started_ns = self.nowNs();
-    }
-
-    /// A tempo change restarts each decoder, so the lane's position must be
-    /// folded first: starting again from the beat the lane originally began at
-    /// would throw it back in time and desync it.
-    fn retunePlaying(self: *App) void {
-        const lead: f32 = @as(f32, @floatFromInt(pl.mixer.prefill_ms)) / 1000 * self.masterBpm() / 60;
-        for (self.grid.items) |*lane| {
-            if (!lane.playing) continue;
-            self.foldLane(lane);
-            lane.started_master = self.masterBeat() + lead;
-        }
-        self.rebuildMix();
-    }
-
-    /// Filter changes go to the running mix; no decoder is restarted.
-    fn restartDirty(self: *App) void {
-        var dirty = false;
-        for (self.grid.items) |*lane| {
-            if (!lane.filter_dirty) continue;
-            lane.filter_dirty = false;
-            if (lane.playing) dirty = true;
-        }
-        if (dirty) self.rebuildMix();
+        return self.transport.anyPlaying();
     }
 
     /// Loads a grid lane for every block. Lanes survive edits: a lane matched
     /// by track keeps its audio, position and analysis, and a new block starts
     /// paused.
     fn syncGrid(self: *App) void {
-        if (self.grid.items.len == self.crate.len()) {
+        if (!self.grid_dirty and self.grid.items.len == self.crate.len()) {
             var same = true;
             for (0..self.crate.len()) |index| {
                 if (self.grid.items[index].track_id != self.crate.at(index).?.id) {
@@ -1019,16 +723,35 @@ pub const App = struct {
             next.append(self.allocator, lane) catch {};
         }
 
-        var stopped = false;
+        self.transport.beginSync();
+        for (next.items, 0..) |*lane, index| self.resolveLane(index, lane);
+        self.transport.endSync();
+
         for (self.grid.items, 0..) |*old, old_index| {
             if (consumed[old_index]) continue;
-            if (old.playing) stopped = true;
             if (old.analysis) |*a| a.deinit(self.allocator);
         }
 
         self.grid.deinit(self.allocator);
         self.grid = next;
-        if (stopped) self.rebuildMix();
+        self.grid_dirty = false;
+    }
+
+    fn resolveLane(self: *App, index: usize, lane: *Lane) void {
+        const track = self.crate.at(index) orelse return;
+        const analysis: ?*const pl.analysis.Analysis = if (lane.analysis) |*a| a else null;
+        const grid_bpm: f32 = if (analysis) |a| blk: {
+            if (a.bpm() > 0) break :blk a.bpm();
+            break :blk 128;
+        } else if (track.bpm > 0) @floatCast(track.bpm) else 128;
+        self.transport.resolve(index, .{
+            .track = track.*,
+            .analysis = analysis,
+            .grid_bpm = grid_bpm,
+            .total_beats = if (analysis) |a| @floatFromInt(a.beats.len) else 0,
+            .offset = if (analysis) |a| a.downbeatOffset() else 0,
+            .first_downbeat = if (analysis) |a| @floatFromInt(a.firstDownbeat()) else 0,
+        });
     }
 
     /// Picks a block for the previewer; three lanes is the cap.
@@ -1044,11 +767,10 @@ pub const App = struct {
     }
 
     fn commitMaster(self: *App) void {
-        self.freezeClock();
         const parsed = std.fmt.parseFloat(f32, self.master_text.items) catch null;
         if (parsed) |value| self.master_bpm = std.math.clamp(value, 40, 220);
         self.master_locked = false;
-        self.retunePlaying();
+        self.transport.setTempo(self.masterBpm());
     }
 
     /// Master tempo at the right corner, with a lock that ties it to the seed.
@@ -1119,8 +841,8 @@ pub const App = struct {
                 .id_extra = 74,
             });
             defer chip.deinit();
-            labelStyled(@src(), if (self.pitch_lock) "pitch" else "vinyl", .{
-                .color_text = .{ .color = if (self.pitch_lock) Palette.green else Palette.secondary },
+            labelStyled(@src(), if (self.transport.keylocked()) "pitch" else "vinyl", .{
+                .color_text = .{ .color = if (self.transport.keylocked()) Palette.green else Palette.secondary },
                 .font = metaFont(),
                 .id_extra = 75,
             });
@@ -1144,7 +866,7 @@ pub const App = struct {
         const center_x = rect.x + rect.w / 2;
         const center_y = rect.y + rect.h / 2;
 
-        const playing = index < self.grid.items.len and self.grid.items[index].playing;
+        const playing = index < self.grid.items.len and self.transport.isPlaying(index);
         if (playing) {
             drawPauseBars(self.allocator, center_x, center_y, 5 * scale);
         } else {
@@ -1164,8 +886,8 @@ pub const App = struct {
         });
         defer chip.deinit();
 
-        labelStyled(@src(), if (self.anyPlaying()) "stop" else "play", .{
-            .color_text = .{ .color = if (self.anyPlaying()) Palette.green else Palette.secondary },
+        labelStyled(@src(), if (self.transport.anyPlaying()) "stop" else "play", .{
+            .color_text = .{ .color = if (self.transport.anyPlaying()) Palette.green else Palette.secondary },
             .font = metaFont(),
             .id_extra = 81,
         });
@@ -1183,31 +905,23 @@ pub const App = struct {
         switch (pull.target) {
             .lane => |slot| {
                 if (slot >= self.grid.items.len) return;
-                const lane = &self.grid.items[slot];
-                // Jog: pause for the duration of the drag and resume on
-                // release, instead of leaving the lane stopped.
-                if (lane.playing) self.jogPause(slot);
-                // Grab the wave: dragging right shows earlier audio.
-                lane.beat_raw -= pull.dx * beats_visible / @max(1, lane.wave_w);
-                snapBeat(lane);
-                lane.manual = true;
+                const delta = self.hit_map.waveformDragBeats(slot, pull.dx, beats_visible) orelse return;
+                if (self.transport.isPlaying(slot)) self.transport.jogPause(slot, .now);
+                self.transport.dragBeats(slot, delta);
                 dvui.refresh(null, @src(), null);
             },
             .nav => |slot| {
                 if (slot >= self.grid.items.len) return;
-                const lane = &self.grid.items[slot];
-                if (lane.playing) self.jogPause(slot);
-                const total: f32 = @floatFromInt(totalBeats(lane));
-                lane.beat_raw += pull.dx / @max(1, lane.nav_w) * total;
-                snapLane(lane);
-                lane.manual = false;
+                const total: f32 = @floatFromInt(totalBeats(&self.grid.items[slot]));
+                const delta = self.hit_map.navDragBeats(slot, pull.dx, total) orelse return;
+                if (self.transport.isPlaying(slot)) self.transport.jogPause(slot, .bar);
+                self.transport.dragBar(slot, delta);
                 dvui.refresh(null, @src(), null);
             },
-            .filter => |slot| {
-                if (slot >= self.grid.items.len) return;
-                const lane = &self.grid.items[slot];
-                lane.filter = std.math.clamp(lane.filter - pull.dy / @max(1, lane.filter_h), 0, 1);
-                if (lane.playing) lane.filter_dirty = true;
+            .eq_node => |at| {
+                if (at.lane >= self.grid.items.len) return;
+                const point = self.hit_map.eqPointAt(at.lane, pull.p) orelse return;
+                self.transport.setEqNode(at.lane, at.band, point.gain_db, point.freq_hz);
                 dvui.refresh(null, @src(), null);
             },
             else => {},
@@ -1251,15 +965,17 @@ pub const App = struct {
                 });
                 defer wave.deinit();
                 const full_rect = rectFrom(wave.data().contentRectScale().r).clipped(col_rect);
+                // The expanding box can report the whole row before the fixed
+                // EQ panel is placed; keep the drawing out from under it.
+                const eq_reserved = (46 + 124 + 4) * self.scale_hint;
                 const wave_rect = hit.Rect{
                     .x = full_rect.x,
                     .y = full_rect.y,
-                    .w = @max(0, full_rect.w - 20),
+                    .w = @max(0, @min(full_rect.w, col_rect.x + col_rect.w - eq_reserved - full_rect.x)),
                     .h = full_rect.h,
                 };
-                lane.wave_w = wave_rect.w;
 
-                const view = self.laneStart(lane);
+                const view = self.laneStart(index);
                 if (lane.analysis) |*analysis| {
                     self.paintWave(analysis, wave_rect, view, analysis.downbeatOffset());
                 } else {
@@ -1276,21 +992,45 @@ pub const App = struct {
                 self.hit_map.append(wave_rect, .{ .lane = index });
             }
 
-        }
+            {
+                var presets = dvui.box(@src(), .{ .dir = .vertical }, .{
+                    .min_size_content = .{ .w = 46, .h = 0 },
+                    .id_extra = 9400 + index,
+                });
+                defer presets.deinit();
+                const order = [_]pl.mixer.EqPreset{ .hpf, .bpf, .lpf };
+                for (order, 0..) |preset, choice| {
+                    const active = self.transport.eqPreset(index) == preset;
+                    var chip = dvui.box(@src(), .{ .dir = .horizontal }, .{
+                        .min_size_content = .{ .w = 40, .h = 20 },
+                        .margin = .{ .x = 2, .y = 2 },
+                        .background = true,
+                        .color_fill = .{ .color = if (active) Palette.green else Palette.field },
+                        .id_extra = 9410 + index * 4 + choice,
+                    });
+                    defer chip.deinit();
+                    labelStyled(@src(), presetName(preset), .{
+                        .color_text = .{ .color = if (active) Palette.background else Palette.secondary },
+                        .font = metaFont(),
+                        .gravity_x = 0.5,
+                        .gravity_y = 0.5,
+                        .id_extra = 9430 + index * 4 + choice,
+                    });
+                    self.hit_map.append(rectFrom(chip.data().contentRectScale().r), .{ .eq_preset = .{ .lane = index, .preset = preset } });
+                }
+            }
 
-        {
-            const strip_rect = hit.Rect{
-                .x = col_rect.x + col_rect.w - 18,
-                .y = col_rect.y,
-                .w = 18,
-                .h = @max(0, col_rect.h - 24),
-            };
-            lane.filter_h = strip_rect.h;
-            lane.filter_y = strip_rect.y;
-            fillRect(self.allocator, strip_rect.x + 6, strip_rect.y, 6, strip_rect.h, fade(Palette.muted, 55));
-            const knob_y = strip_rect.y + (1 - lane.filter) * @max(0, strip_rect.h - 12);
-            fillRect(self.allocator, strip_rect.x + 2, knob_y, 14, 12, Palette.green);
-            self.hit_map.append(strip_rect, .{ .filter = index });
+            {
+                var plot = dvui.box(@src(), .{ .dir = .vertical }, .{
+                    .min_size_content = .{ .w = 124, .h = 0 },
+                    .expand = .vertical,
+                    .id_extra = 9500 + index,
+                });
+                defer plot.deinit();
+                const plot_rect = rectFrom(plot.data().contentRectScale().r).clipped(col_rect);
+                self.drawEqPlot(index, plot_rect);
+            }
+
         }
 
         {
@@ -1301,12 +1041,10 @@ pub const App = struct {
             });
             defer bar.deinit();
             const bar_rect = rectFrom(bar.data().contentRectScale().r).clipped(col_rect);
-            lane.nav_w = bar_rect.w;
-            lane.nav_x = bar_rect.x;
 
             const total = totalBeats(lane);
             const visible: f32 = @min(beats_visible, @as(f32, @floatFromInt(total)));
-            const window_start = @max(0, self.laneStart(lane));
+            const window_start = @max(0, self.laneStart(index));
             const start = if (total > 0) window_start / @as(f32, @floatFromInt(total)) else 0;
             const span = if (total > 0)
                 @min(visible, @max(1, @as(f32, @floatFromInt(total)) - window_start)) / @as(f32, @floatFromInt(total))
@@ -1325,6 +1063,57 @@ pub const App = struct {
             fillRect(self.allocator, window_x + window_w - 1.5, bar_rect.y, 1.5, bar_rect.h, Palette.ink);
             self.hit_map.append(bar_rect, .{ .nav = index });
         }
+    }
+
+    /// Spectrum bars under the EQ curve, with one draggable node per band.
+    fn drawEqPlot(self: *App, index: usize, rect: hit.Rect) void {
+        if (rect.w <= 2 or rect.h <= 2) return;
+        var builder = dvui.Path.Builder.init(self.allocator);
+        defer builder.deinit();
+
+        fillRectInto(&builder, rect.x, rect.y, rect.w, rect.h, fade(Palette.background, 230));
+        fillRectInto(&builder, rect.x, rect.y + rect.h / 2, rect.w, 1, fade(Palette.muted, 40));
+
+        var spectrum: [pl.mixer.spectrum_bins]f32 = @splat(0);
+        self.transport.spectrum(index, &spectrum);
+        const bar_w = rect.w / pl.mixer.spectrum_bins;
+        for (spectrum, 0..) |level, band| {
+            if (level <= 0.01) continue;
+            const height = level * (rect.h - 2);
+            fillRectInto(&builder, rect.x + @as(f32, @floatFromInt(band)) * bar_w, rect.y + rect.h - height, @max(1, bar_w - 1), height, fade(Palette.secondary, 90));
+        }
+
+        const params = self.transport.eqParams(index);
+        const ratio = pl.mixer.eq_max_hz / pl.mixer.eq_min_hz;
+        const samples: usize = 64;
+        var prev_y: f32 = rect.y + rect.h / 2;
+        var step: usize = 0;
+        while (step <= samples) : (step += 1) {
+            const fraction = @as(f32, @floatFromInt(step)) / samples;
+            const hz = pl.mixer.eq_min_hz * std.math.pow(f32, ratio, fraction);
+            const db = pl.mixer.responseDb(params, hz);
+            const y = rect.y + std.math.clamp(0.5 - db / (2 * pl.mixer.eq_max_gain_db), 0, 1) * rect.h;
+            const top = @min(prev_y, y);
+            const bottom = @max(prev_y, y);
+            fillRectInto(&builder, rect.x + fraction * rect.w - 0.75, top, 1.5, @max(1, bottom - top), Palette.green);
+            prev_y = y;
+        }
+
+        for (0..pl.mixer.band_count) |band| {
+            const hz = std.math.clamp(params.freq_hz[band], pl.mixer.eq_min_hz, pl.mixer.eq_max_hz);
+            const fx = @log(hz / pl.mixer.eq_min_hz) / @log(ratio);
+            const fy = 0.5 - params.gain_db[band] / (2 * pl.mixer.eq_max_gain_db);
+            const cx = rect.x + fx * rect.w;
+            const cy = rect.y + fy * rect.h;
+            const node = hit.Rect{ .x = cx - 9, .y = cy - 9, .w = 18, .h = 18 };
+            fillRectInto(&builder, node.x, node.y, node.w, node.h, Palette.ink);
+            fillRectInto(&builder, node.x + 3, node.y + 3, node.w - 6, node.h - 6, Palette.green);
+            // The ball stays small; the grab area around it does not.
+            const grab = hit.Rect{ .x = cx - 20, .y = cy - 20, .w = 40, .h = 40 };
+            self.hit_map.append(grab, .{ .eq_node = .{ .lane = index, .band = band } });
+        }
+        // Appended last so a press on a ball wins over the plot behind it.
+        self.hit_map.append(rect, .{ .eq_plot = index });
     }
 
     /// Beat count of the lane's track, from its grid.
@@ -1369,10 +1158,6 @@ pub const App = struct {
         }
 
         self.paintBeats(rect, start_beat, beat_offset);
-    }
-
-    fn totalBeatsF(analysis: *const pl.analysis.Analysis) f32 {
-        return @floatFromInt(analysis.beats.len);
     }
 
     fn paintBeats(self: *App, rect: hit.Rect, start_beat: f32, beat_offset: f32) void {
