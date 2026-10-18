@@ -21,6 +21,12 @@ const Lane = struct {
     /// Beat under the playhead: what playback starts on and what the window
     /// is centred around.
     beat: f32 = 0,
+    /// This lane's own process is running.
+    playing: bool = false,
+    started_ns: i128 = 0,
+    end_ns: i128 = 0,
+    /// Filter moved while playing; restart on release.
+    filter_dirty: bool = false,
     /// Unrounded drag position, so sub-beat movements are not lost to snapping.
     beat_raw: f32 = 0,
     /// Band filter, 0 closed to 1 open.
@@ -62,12 +68,7 @@ pub const App = struct {
     selected: std.ArrayListUnmanaged(usize) = .empty,
     /// One grid lane per block, in crate order.
     grid: std.ArrayListUnmanaged(Lane) = .empty,
-    /// Transport: every lane scrolls at the master tempo, each from its own
-    /// window, and the playhead stays at the centre of each lane.
-    grid_playing: bool = false,
-    grid_started_at: i128 = 0,
-    /// When the current grid snippet runs out.
-    mix_end_ns: i128 = 0,
+    
     /// Bars or polygon fills, for A/B comparison.
     poly: bool = false,
     /// Smoothed frame cost, shown next to the renderer switch.
@@ -171,8 +172,8 @@ pub const App = struct {
         self.scale_hint = root_scale.s;
 
         self.player.poll();
-        if (self.grid_playing and std.Io.Timestamp.now(self.io, .awake).nanoseconds >= self.mix_end_ns) {
-            self.stopTransport();
+        for (self.grid.items, 0..) |*lane, index| {
+            if (lane.playing and self.nowNs() >= lane.end_ns) self.stopLane(index);
         }
 
         // The pointer pass reads the map the previous frame drew, then the map
@@ -526,6 +527,7 @@ pub const App = struct {
                 .release => {
                     if (!mouse.button.pointer()) continue;
                     self.apply(self.drag.release());
+                    self.restartDirty();
                 },
                 else => {},
             }
@@ -553,23 +555,22 @@ pub const App = struct {
             },
             .seek_nav => |index| {
                 if (index >= self.grid.items.len) return;
-                if (self.grid_playing) self.stopTransport() else self.foldElapsed();
-                const lane = &self.grid.items[index];
-                const total: f32 = @floatFromInt(totalBeats(lane));
-                const fraction = std.math.clamp((self.last_point.x - lane.nav_x) / @max(1, lane.nav_w), 0, 1);
-                lane.beat_raw = fraction * total;
-                snapLane(lane);
+                const total: f32 = @floatFromInt(totalBeats(&self.grid.items[index]));
+                const fraction = std.math.clamp((self.last_point.x - self.grid.items[index].nav_x) / @max(1, self.grid.items[index].nav_w), 0, 1);
+                self.seekLane(index, fraction * total);
                 dvui.refresh(null, @src(), null);
             },
             .toggle_master_lock => {
                 self.master_locked = !self.master_locked;
                 if (!self.master_locked) self.master_bpm = self.masterBpm();
-                if (self.grid_playing) self.stopTransport();
+                self.stopAllLanes();
                 dvui.refresh(null, @src(), null);
             },
             .toggle_pitch => {
                 self.pitch_lock = !self.pitch_lock;
-                if (self.grid_playing) self.stopTransport();
+                for (self.grid.items, 0..) |*lane, index| {
+                    if (lane.playing) self.restartLane(index);
+                }
                 dvui.refresh(null, @src(), null);
             },
             .toggle_wave_mode => {
@@ -577,14 +578,21 @@ pub const App = struct {
                 dvui.refresh(null, @src(), null);
             },
             .toggle_transport => {
-                if (self.grid_playing) {
-                    self.stopTransport();
+                if (self.anyPlaying()) {
+                    self.stopAllLanes();
                 } else {
-                    const now = std.Io.Timestamp.now(self.io, .awake).nanoseconds;
-                    self.grid_started_at = now;
-                    self.mix_end_ns = now + @as(i128, pl.mixer.snippet_s) * 1_000_000_000;
-                    self.grid_playing = true;
-                    self.startMix();
+                    for (self.grid.items, 0..) |*lane, index| {
+                        if (!lane.playing) self.startLane(index);
+                    }
+                }
+                dvui.refresh(null, @src(), null);
+            },
+            .toggle_lane_play => |index| {
+                if (index >= self.grid.items.len) return;
+                if (self.grid.items[index].playing) {
+                    self.stopLane(index);
+                } else {
+                    self.startLane(index);
                 }
                 dvui.refresh(null, @src(), null);
             },
@@ -622,45 +630,19 @@ pub const App = struct {
         return 128;
     }
 
-    /// Hands every lane to the mixer, starting on the playhead beat.
-    fn startMix(self: *App) void {
-        var lanes: [64]pl.mixer.Lane = undefined;
-        var count: usize = 0;
-        const master = self.masterBpm();
-
-        for (self.grid.items, 0..) |*lane, index| {
-            if (lane.analysis == null or index >= self.crate.len()) continue;
-            const track = self.crate.at(index).?.*;
-            const bpm: f32 = if (track.bpm > 0) @floatCast(track.bpm) else 128;
-            lanes[count] = .{
-                .track = track,
-                .start_s = lane.beat * 60 / bpm,
-                .tempo = master / bpm,
-                .filter = lane.filter,
-                .keylock = self.pitch_lock,
-            };
-            count += 1;
-        }
-        self.mixer.play(lanes[0..count]);
+    fn nowNs(self: *const App) i128 {
+        return std.Io.Timestamp.now(self.io, .awake).nanoseconds;
     }
 
-    fn stopTransport(self: *App) void {
-        self.mixer.stop();
-        self.foldElapsed();
-        self.grid_playing = false;
+    fn elapsedBeatsSince(self: *const App, started: i128) f32 {
+        const elapsed_ns: f64 = @floatFromInt(self.nowNs() - started);
+        return @as(f32, @floatCast(elapsed_ns / 1_000_000_000 * self.masterBpm() / 60));
     }
 
-    fn elapsedBeats(self: *const App) f32 {
-        if (!self.grid_playing) return 0;
-        const now = std.Io.Timestamp.now(self.io, .awake).nanoseconds;
-        const elapsed_ns: f64 = @floatFromInt(now - self.grid_started_at);
-        const bpm = if (self.crate.seedTrack()) |track| track.bpm else 120;
-        return @as(f32, @floatCast(elapsed_ns / 1_000_000_000 * bpm / 60));
-    }
-
-    /// Beat under the playhead, including whatever the transport has played.
+    /// Beat under the playhead, including whatever this lane has played.
     fn laneBeat(self: *const App, lane: *const Lane) f32 {
-        return lane.beat + self.elapsedBeats();
+        if (!lane.playing) return lane.beat;
+        return lane.beat + self.elapsedBeatsSince(lane.started_ns);
     }
 
     /// Beat at the left edge of a lane's window. Negative at the start of a
@@ -669,21 +651,96 @@ pub const App = struct {
         return self.laneBeat(lane) - beats_visible / 2;
     }
 
-    /// Fold elapsed time into every lane, so a manual move starts from now.
-    fn foldElapsed(self: *App) void {
-        if (!self.grid_playing) return;
-        const elapsed = self.elapsedBeats();
-        for (self.grid.items) |*lane| {
-            lane.beat_raw += elapsed;
-            lane.beat = @round(lane.beat_raw);
-        }
-        self.grid_started_at = std.Io.Timestamp.now(self.io, .awake).nanoseconds;
+    fn foldLane(self: *App, lane: *Lane) void {
+        if (!lane.playing) return;
+        lane.beat = lane.beat + self.elapsedBeatsSince(lane.started_ns);
+        lane.beat_raw = lane.beat;
     }
 
     fn snapLane(lane: *Lane) void {
         const total: f32 = @floatFromInt(totalBeats(lane));
         lane.beat_raw = std.math.clamp(lane.beat_raw, 0, total);
-        lane.beat = @round(lane.beat_raw);
+        // Bars, not beats: four beats per step.
+        lane.beat = @round(lane.beat_raw / 4) * 4;
+    }
+
+    fn laneSpec(self: *App, index: usize) pl.mixer.Lane {
+        const track = self.crate.at(index).?.*;
+        const bpm: f32 = if (track.bpm > 0) @floatCast(track.bpm) else 128;
+        return .{
+            .track = track,
+            .start_s = self.laneBeat(&self.grid.items[index]) * 60 / bpm,
+            .tempo = self.masterBpm() / bpm,
+            .filter = self.grid.items[index].filter,
+            .keylock = self.pitch_lock,
+        };
+    }
+
+    fn startLane(self: *App, index: usize) void {
+        if (index >= self.grid.items.len or index >= self.crate.len()) return;
+        const lane = &self.grid.items[index];
+        if (lane.analysis == null) return;
+        lane.started_ns = self.nowNs();
+        const remaining: f32 = @as(f32, @floatFromInt(totalBeats(lane))) - lane.beat;
+        lane.end_ns = lane.started_ns + @as(i128, @intFromFloat(@max(0, remaining) * 60 / self.masterBpm() * 1_000_000_000));
+        lane.playing = true;
+        self.mixer.play(index, self.laneSpec(index));
+    }
+
+    fn stopLane(self: *App, index: usize) void {
+        if (index >= self.grid.items.len) return;
+        self.mixer.stop(index);
+        const lane = &self.grid.items[index];
+        self.foldLane(lane);
+        lane.playing = false;
+    }
+
+    fn stopAllLanes(self: *App) void {
+        self.mixer.stopAll();
+        for (self.grid.items) |*lane| {
+            self.foldLane(lane);
+            lane.playing = false;
+        }
+    }
+
+    fn anyPlaying(self: *const App) bool {
+        for (self.grid.items) |*lane| {
+            if (lane.playing) return true;
+        }
+        return false;
+    }
+
+    /// Restarts a lane at its playhead, picking up tempo or filter changes.
+    fn restartLane(self: *App, index: usize) void {
+        if (index >= self.grid.items.len) return;
+        if (!self.grid.items[index].playing) return;
+        self.mixer.stop(index);
+        self.startLane(index);
+    }
+
+    /// Seek: the lane stops, moves, and resumes if it was running.
+    fn seekLane(self: *App, index: usize, beat: f32) void {
+        if (index >= self.grid.items.len) return;
+        const was_playing = self.grid.items[index].playing;
+        self.mixer.stop(index);
+        self.grid.items[index].playing = false;
+        self.grid.items[index].beat_raw = beat;
+        snapLane(&self.grid.items[index]);
+        if (was_playing) self.startLane(index);
+    }
+
+    pub fn animating(self: *const App) bool {
+        return self.anyPlaying();
+    }
+
+    /// After a filter drag, put the new cutoff into the audio.
+    fn restartDirty(self: *App) void {
+        for (self.grid.items, 0..) |*lane, index| {
+            if (lane.filter_dirty) {
+                lane.filter_dirty = false;
+                self.restartLane(index);
+            }
+        }
     }
 
     /// Picks a block for the previewer; three lanes is the cap.
@@ -766,10 +823,6 @@ pub const App = struct {
         self.grid_start = @round(self.grid_start_raw);
     }
 
-    pub fn animating(self: *const App) bool {
-        return self.grid_playing;
-    }
-
     /// Master tempo at the right corner, with a lock that ties it to the seed.
     fn frameMaster(self: *App) void {
         labelStyled(@src(), "master", .{
@@ -810,8 +863,8 @@ pub const App = struct {
             const parsed = std.fmt.parseFloat(f32, self.master_text.items) catch null;
             if (parsed) |value| self.master_bpm = std.math.clamp(value, 40, 220);
             self.master_locked = false;
-            // The running snippet was tuned to the old tempo.
-            if (self.grid_playing) self.stopTransport();
+            // Running lanes were tuned to the old tempo.
+            self.stopAllLanes();
         }
 
         {
@@ -849,6 +902,32 @@ pub const App = struct {
         }
     }
 
+    fn lanePlayButton(self: *App, index: usize) void {
+        var chip = dvui.box(@src(), .{ .dir = .horizontal }, .{
+            .min_size_content = .{ .w = 26, .h = 26 },
+            .margin = .{ .x = 4 },
+            .background = true,
+            .color_fill = .{ .color = Palette.background },
+            .id_extra = 7000 + index,
+        });
+        defer chip.deinit();
+
+        const rect_scale = chip.data().contentRectScale();
+        const rect = rect_scale.r;
+        const scale = rect_scale.s;
+        const center_x = rect.x + rect.w / 2;
+        const center_y = rect.y + rect.h / 2;
+
+        const playing = index < self.grid.items.len and self.grid.items[index].playing;
+        if (playing) {
+            drawPauseBars(self.allocator, center_x, center_y, 5 * scale);
+        } else {
+            drawPlayTriangle(self.allocator, center_x, center_y, 6 * scale);
+        }
+
+        self.hit_map.append(rectFrom(rect), .{ .lane_play = index });
+    }
+
     fn waveModeChip(self: *App) void {
         var chip = dvui.box(@src(), .{ .dir = .horizontal }, .{
             .margin = .{ .x = 8, .y = 4 },
@@ -883,8 +962,8 @@ pub const App = struct {
         });
         defer chip.deinit();
 
-        labelStyled(@src(), if (self.grid_playing) "stop" else "play", .{
-            .color_text = .{ .color = if (self.grid_playing) Palette.green else Palette.secondary },
+        labelStyled(@src(), if (self.anyPlaying()) "stop" else "play", .{
+            .color_text = .{ .color = if (self.anyPlaying()) Palette.green else Palette.secondary },
             .font = metaFont(),
             .id_extra = 81,
         });
@@ -902,8 +981,8 @@ pub const App = struct {
         switch (pull.target) {
             .lane => |slot| {
                 if (slot >= self.grid.items.len) return;
-                if (self.grid_playing) self.stopTransport() else self.foldElapsed();
                 const lane = &self.grid.items[slot];
+                if (lane.playing) self.stopLane(slot);
                 // Grab the wave: dragging right shows earlier audio.
                 lane.beat_raw -= pull.dx * beats_visible / @max(1, lane.wave_w);
                 snapLane(lane);
@@ -911,8 +990,8 @@ pub const App = struct {
             },
             .nav => |slot| {
                 if (slot >= self.grid.items.len) return;
-                if (self.grid_playing) self.stopTransport() else self.foldElapsed();
                 const lane = &self.grid.items[slot];
+                if (lane.playing) self.stopLane(slot);
                 const total: f32 = @floatFromInt(totalBeats(lane));
                 lane.beat_raw += pull.dx / @max(1, lane.nav_w) * total;
                 snapLane(lane);
@@ -922,6 +1001,7 @@ pub const App = struct {
                 if (slot >= self.grid.items.len) return;
                 const lane = &self.grid.items[slot];
                 lane.filter = std.math.clamp(lane.filter - pull.dy / @max(1, lane.filter_h), 0, 1);
+                if (lane.playing) lane.filter_dirty = true;
                 dvui.refresh(null, @src(), null);
             },
             else => {},
@@ -954,7 +1034,7 @@ pub const App = struct {
             defer wave_row.deinit();
 
             if (index < self.crate.len()) {
-                _ = transportButton(self, self.crate.at(index).?.*, 7000 + index);
+                self.lanePlayButton(index);
             }
 
             {
@@ -1632,37 +1712,7 @@ fn pointFrom(point: dvui.Point.Physical) hit.Point {
 
 /// Along the bottom: the direction filters on the left, the tempo window and
 /// the colour key on the right.
-fn frameFooter(app: *App) void {
-    var bar = dvui.box(@src(), .{ .dir = .horizontal }, .{
-        .expand = .horizontal,
-        .min_size_content = .{ .h = 40 },
-        .padding = .{ .x = 20, .y = 6 },
-        .background = true,
-        .color_fill = .{ .color = Palette.panel },
-    });
-    defer bar.deinit();
-
-    labelStyled(@src(), "energy", .{
-        .color_text = .{ .color = Palette.muted },
-        .font = metaFont(),
-        .margin = .{ .x = 4, .y = 6 },
-    });
-
-    app.transportToggle();
-    app.waveModeChip();
-    app.energyToggle("=", Palette.green, &app.filter_hold, .hold);
-    app.energyToggle("↑", Palette.orange, &app.filter_up, .up);
-    app.energyToggle("↓", Palette.orange, &app.filter_down, .down);
-    app.notationToggle();
-
-    var spacer = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal });
-    spacer.deinit();
-
-    app.frameBpmWindow();
-
-    var spacer2 = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal });
-    spacer2.deinit();
-
+fn frameLegend() void {
     const entries = [_]struct { severity: f32, text: []const u8 }{
         .{ .severity = 0, .text = "=" },
         .{ .severity = 0.3, .text = "+1" },
@@ -1674,10 +1724,10 @@ fn frameFooter(app: *App) void {
     for (entries, 0..) |entry, index| {
         var swatch = dvui.box(@src(), .{ .dir = .horizontal }, .{
             .min_size_content = .{ .w = 10, .h = 10 },
-            .margin = .{ .x = 8, .y = 8 },
+            .margin = .{ .x = 6, .y = 8 },
             .background = true,
             .color_fill = .{ .color = rampColor(entry.severity) },
-            .id_extra = index,
+            .id_extra = 200 + index,
         });
         swatch.deinit();
 
@@ -1685,10 +1735,44 @@ fn frameFooter(app: *App) void {
             .color_text = .{ .color = Palette.secondary },
             .font = metaFont(),
             .margin = .{ .y = 6 },
-            .id_extra = 100 + index,
+            .id_extra = 300 + index,
         });
     }
+}
 
+fn frameFooter(app: *App) void {
+    var bar = dvui.box(@src(), .{ .dir = .horizontal }, .{
+        .expand = .horizontal,
+        .min_size_content = .{ .h = 40 },
+        .padding = .{ .x = 20, .y = 6 },
+        .background = true,
+        .color_fill = .{ .color = Palette.panel },
+    });
+    defer bar.deinit();
+
+    frameLegend();
+
+    labelStyled(@src(), "energy", .{
+        .color_text = .{ .color = Palette.muted },
+        .font = metaFont(),
+        .margin = .{ .x = 12, .y = 6 },
+    });
+
+    app.energyToggle("=", Palette.green, &app.filter_hold, .hold);
+    app.energyToggle("↑", Palette.orange, &app.filter_up, .up);
+    app.energyToggle("↓", Palette.orange, &app.filter_down, .down);
+    app.notationToggle();
+    app.frameBpmWindow();
+
+    var spacer = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal });
+    spacer.deinit();
+
+    app.transportToggle();
+
+    var spacer2 = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal });
+    spacer2.deinit();
+
+    app.waveModeChip();
     app.frameMaster();
 }
 
