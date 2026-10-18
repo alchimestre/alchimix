@@ -627,6 +627,11 @@ pub const App = struct {
                 }
                 dvui.refresh(null, @src(), null);
             },
+            .toggle_lane_mute => |index| {
+                if (index >= self.grid.items.len) return;
+                self.transport.setMute(index, !self.transport.muted(index));
+                dvui.refresh(null, @src(), null);
+            },
             .select_block => |index| self.pending_select = index,
             .toggle_block => |index| {
                 self.toggleSelected(index);
@@ -876,6 +881,28 @@ pub const App = struct {
         self.hit_map.append(rectFrom(rect), .{ .lane_play = index });
     }
 
+    fn laneMuteButton(self: *App, index: usize) void {
+        var chip = dvui.box(@src(), .{ .dir = .horizontal }, .{
+            .min_size_content = .{ .w = 26, .h = 18 },
+            .margin = .{ .x = 4 },
+            .background = true,
+            .color_fill = .{ .color = Palette.background },
+            .id_extra = 7500 + index,
+        });
+        defer chip.deinit();
+
+        const muted = self.transport.muted(index);
+        labelStyled(@src(), "M", .{
+            .color_text = .{ .color = if (muted) Palette.green else Palette.secondary },
+            .font = metaFont(),
+            .gravity_x = 0.5,
+            .gravity_y = 0.5,
+            .id_extra = 7600 + index,
+        });
+
+        self.hit_map.append(rectFrom(chip.data().contentRectScale().r), .{ .lane_mute = index });
+    }
+
     fn transportToggle(self: *App) void {
         var chip = dvui.box(@src(), .{ .dir = .horizontal }, .{
             .margin = .{ .x = 8, .y = 4 },
@@ -954,7 +981,13 @@ pub const App = struct {
             defer wave_row.deinit();
 
             if (index < self.crate.len()) {
+                var buttons = dvui.box(@src(), .{ .dir = .vertical }, .{
+                    .min_size_content = .{ .w = 34, .h = 0 },
+                    .id_extra = 9060 + index,
+                });
+                defer buttons.deinit();
                 self.lanePlayButton(index);
+                self.laneMuteButton(index);
             }
 
             {

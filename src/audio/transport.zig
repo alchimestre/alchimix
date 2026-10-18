@@ -71,6 +71,8 @@ const Slot = struct {
     start_at_ns: i128 = 0,
     eq: mixer.EqParams = .{},
     eq_preset: mixer.EqPreset = .none,
+    /// Plays on silently: the lane keeps its clock and position.
+    muted: bool = false,
     /// Set for a retune, so the mixer restarts this decoder even when the
     /// folded position and tempo round to the same values.
     restart: bool = false,
@@ -380,6 +382,20 @@ pub const Transport = struct {
         return slot.eq_preset;
     }
 
+    /// Silences a lane without stopping it: the decoder, position and clock
+    /// all carry on.
+    pub fn setMute(self: *Transport, index: usize, on: bool) void {
+        const slot = self.slotAt(index) orelse return;
+        if (slot.muted == on) return;
+        slot.muted = on;
+        if (slot.playing) self.pushMix();
+    }
+
+    pub fn muted(self: *Transport, index: usize) bool {
+        const slot = self.slotAt(index) orelse return false;
+        return slot.muted;
+    }
+
     /// The lane's live spectrum, for the EQ panel.
     pub fn spectrum(self: *Transport, index: usize, out: []f32) void {
         const slot = self.slotAt(index) orelse {
@@ -595,6 +611,7 @@ pub const Transport = struct {
             .start_s = secondsAt(slot, slot.beat),
             .tempo = self.bpm / slot.grid_bpm,
             .eq = slot.eq,
+            .muted = slot.muted,
             .keylock = self.keylock,
             .start_at_ns = slot.start_at_ns,
             .restart = slot.restart,
@@ -615,6 +632,7 @@ pub const Transport = struct {
             key = mixHash(key, @bitCast(lane.start_s));
             key = mixHash(key, @as(u32, @bitCast(lane.tempo)));
             key = hashEq(key, lane.eq);
+            key = mixHash(key, @intFromBool(lane.muted));
             key = mixHash(key, @intFromBool(lane.keylock));
             key = mixHash(key, @intFromBool(lane.restart));
             key = mixHash(key, @as(u64, @intCast(@max(0, lane.start_at_ns) / 1_000_000)));
@@ -861,6 +879,40 @@ test "cold start waits for audio and advances from its own clock" {
     // 1.5 s at 120 BPM.
     try expectApprox(3, t.beat(0));
     try expectApprox(3, t.beat(1));
+}
+
+test "mute reaches the mixer lane and the beat keeps advancing" {
+    var fake = FakeOutput{};
+    var clock = TestClock{};
+    var t = setup(&fake, &clock);
+    defer t.deinit();
+
+    t.beginSync();
+    t.resolve(0, laneInfo(1));
+    t.endSync();
+    t.startAll();
+
+    fake.markStarted(1, 0);
+    clock.now = 1_000_000_000;
+    t.sync();
+    const before = fake.playingLane(1) orelse return error.NoLane;
+    try testing.expect(!before.muted);
+    try expectApprox(2, t.beat(0));
+
+    t.setMute(0, true);
+    const muted = fake.playingLane(1) orelse return error.NoLane;
+    try testing.expect(muted.muted);
+    try testing.expect(@abs(before.start_s - muted.start_s) < 1e-9);
+    try testing.expect(t.isPlaying(0));
+    try expectApprox(2, t.beat(0));
+
+    clock.now = 1_500_000_000;
+    t.sync();
+    try expectApprox(3, t.beat(0));
+
+    t.setMute(0, false);
+    const unmuted = fake.playingLane(1) orelse return error.NoLane;
+    try testing.expect(!unmuted.muted);
 }
 
 test "late join waits for the next bar and starts pending" {

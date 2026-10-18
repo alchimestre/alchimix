@@ -83,6 +83,8 @@ pub const Target = union(enum) {
     pitch_lock,
     /// Starts or stops one grid lane.
     lane_play: usize,
+    /// Silences one grid lane without stopping it.
+    lane_mute: usize,
 };
 
 /// Screen rectangles for one frame, with what each one means.
@@ -215,6 +217,7 @@ pub const Drag = struct {
         toggle_master_lock,
         toggle_pitch,
         toggle_lane_play: usize,
+        toggle_lane_mute: usize,
         /// A press on a lane's scrub bar: jump the window to that point.
         seek_nav: usize,
         /// A press on a band node: the drag moves it in frequency and gain.
@@ -238,6 +241,7 @@ pub const Drag = struct {
             .master_lock => .toggle_master_lock,
             .pitch_lock => .toggle_pitch,
             .lane_play => |index| .{ .toggle_lane_play = index },
+            .lane_mute => |index| .{ .toggle_lane_mute = index },
             .block => |index| blk: {
                 if (shift) break :blk .{ .toggle_block = index };
                 self.pressed = target;
@@ -308,7 +312,7 @@ pub const Drag = struct {
         return switch (target) {
             .block => |from| .{ .move_block = .{ .from = from, .gap = to } },
             .row => |track| .{ .drop_track = .{ .gap = to, .track = track } },
-            .toggle, .notation, .lane, .nav, .eq_node, .eq_plot, .eq_preset, .transport, .master_lock, .pitch_lock, .lane_play => .none,
+            .toggle, .notation, .lane, .nav, .eq_node, .eq_plot, .eq_preset, .transport, .master_lock, .pitch_lock, .lane_play, .lane_mute => .none,
         };
     }
 
@@ -513,6 +517,21 @@ test "a toggle flips on the press and carries nothing" {
         else => return error.WrongAction,
     }
     try std.testing.expect(!drag.motion(.{ .x = 60, .y = 60 }, 6, viewport, &map));
+    try std.testing.expect(isNone(drag.release()));
+}
+
+test "a press on the mute button toggles that lane and carries nothing" {
+    var map = HitMap.init(std.testing.allocator);
+    defer map.deinit();
+    map.append(.{ .x = 0, .y = 0, .w = 26, .h = 18 }, .{ .lane_mute = 2 });
+
+    var drag = Drag{};
+    const action = drag.press(.{ .lane_mute = 2 }, .{ .x = 10, .y = 10 }, false);
+    switch (action) {
+        .toggle_lane_mute => |index| try std.testing.expectEqual(@as(usize, 2), index),
+        else => return error.WrongAction,
+    }
+    try std.testing.expect(!drag.motion(.{ .x = 90, .y = 60 }, 6, viewport, &map));
     try std.testing.expect(isNone(drag.release()));
 }
 
