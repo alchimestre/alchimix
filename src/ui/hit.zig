@@ -69,6 +69,10 @@ pub const Target = union(enum) {
     lane: usize,
     /// The whole-track navigator under a preview lane.
     nav: usize,
+    /// The band filter beside a lane's waveform.
+    filter: usize,
+    /// Starts and stops the grid's shared transport.
+    transport,
 };
 
 /// Screen rectangles for one frame, with what each one means.
@@ -135,6 +139,7 @@ pub const Drag = struct {
         none,
         toggle: Toggle,
         toggle_notation,
+        toggle_transport,
         select_block: usize,
         toggle_block: usize,
         move_block: struct { from: usize, gap: usize },
@@ -148,12 +153,13 @@ pub const Drag = struct {
         return switch (target) {
             .toggle => |toggle| .{ .toggle = toggle },
             .notation => .toggle_notation,
+            .transport => .toggle_transport,
             .block => |index| blk: {
                 if (shift) break :blk .{ .toggle_block = index };
                 self.pressed = target;
                 break :blk .{ .select_block = index };
             },
-            .row, .lane, .nav => blk: {
+            .row, .lane, .nav, .filter => blk: {
                 self.pressed = target;
                 break :blk .none;
             },
@@ -164,6 +170,7 @@ pub const Drag = struct {
         target: Target,
         /// Movement since the previous call, in screen units.
         dx: f32,
+        dy: f32,
     };
 
     /// Horizontal movement of a lane or a slider, measured incrementally so the
@@ -171,19 +178,20 @@ pub const Drag = struct {
     pub fn pull(self: *Drag, p: Point) ?Pull {
         const pressed = self.pressed orelse return null;
         switch (pressed) {
-            .lane, .nav => {},
+            .lane, .nav, .filter => {},
             else => return null,
         }
         const dx = p.x - self.press_at.x;
+        const dy = p.y - self.press_at.y;
         self.press_at = p;
-        return .{ .target = pressed, .dx = dx };
+        return .{ .target = pressed, .dx = dx, .dy = dy };
     }
 
     /// True when the frame has something new to draw.
     pub fn motion(self: *Drag, p: Point, threshold: f32, canvas: Rect, hit_map: *const HitMap) bool {
         const pressed = self.pressed orelse return false;
         switch (pressed) {
-            .lane, .nav => return false,
+            .lane, .nav, .filter => return false,
             else => {},
         }
         if (self.carrying == null) {
@@ -204,7 +212,7 @@ pub const Drag = struct {
         return switch (target) {
             .block => |from| .{ .move_block = .{ .from = from, .gap = to } },
             .row => |track| .{ .drop_track = .{ .gap = to, .track = track } },
-            .toggle, .notation, .lane, .nav => .none,
+            .toggle, .notation, .lane, .nav, .filter, .transport => .none,
         };
     }
 
