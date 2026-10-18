@@ -16,6 +16,9 @@ pub const Analysis = struct {
     beats: []Beat,
     /// One sample per 1/150 s of the track.
     waveform: []u8,
+    /// Loudest sample in the waveform, so a track can be coloured against its
+    /// own range rather than an absolute one.
+    peak: u8,
 
     pub const samples_per_second = 150;
 
@@ -66,9 +69,13 @@ pub fn parse(allocator: std.mem.Allocator, dat: []const u8, ext: []const u8) !An
     const waveform = try allocator.dupe(u8, preview);
     errdefer allocator.free(waveform);
 
+    var peak: u8 = 0;
+    for (waveform) |sample| peak = @max(peak, sample);
+
     return .{
         .beats = try beats.toOwnedSlice(allocator),
         .waveform = waveform,
+        .peak = peak,
     };
 }
 

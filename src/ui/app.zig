@@ -805,16 +805,17 @@ pub const App = struct {
         fillRect(self.allocator, rect.x, rect.y, rect.w, rect.h, Palette.field);
 
         const bpm = if (analysis.bpm() > 0) analysis.bpm() else 128;
+        const scale: f32 = 255 / @as(f32, @floatFromInt(@max(1, analysis.peak)));
         const samples_per_beat: f32 = @as(f32, pl.analysis.Analysis.samples_per_second) * 60 / bpm;
         const start_sample = start_beat * samples_per_beat;
         const samples_per_px = samples_per_beat * beats_visible / rect.w;
 
         var x: f32 = 0;
-        var smoothed: f32 = 0.5;
-        while (x < rect.w) : (x += 1) {
+        var smoothed: f32 = 0.35;
+        while (x < rect.w) : (x += 2) {
             const from: usize = @intFromFloat(@max(0, start_sample + x * samples_per_px));
             if (from >= analysis.waveform.len) break;
-            const to: usize = @min(analysis.waveform.len, @as(usize, @intFromFloat(@max(0, start_sample + (x + 1) * samples_per_px))));
+            const to: usize = @min(analysis.waveform.len, @as(usize, @intFromFloat(@max(0, start_sample + (x + 2) * samples_per_px))));
 
             var peak: u8 = 0;
             var sum: usize = 0;
@@ -823,11 +824,11 @@ pub const App = struct {
                 sum += value;
             }
             const average = @as(f32, @floatFromInt(sum)) / @as(f32, @floatFromInt(@max(1, to - from)));
-            const level = @min(255, @max(average * 1.3, @as(f32, @floatFromInt(peak)) * 0.7)) / 255;
-            // Smoothing along x turns the per-column spikes into hills.
-            smoothed = smoothed * 0.55 + level * 0.45;
+            const level = @min(255, @max(average * 1.15, @as(f32, @floatFromInt(peak)) * 0.6) * scale * 0.55) / 255;
+            // Heavy smoothing along x turns per-column spikes into hills.
+            smoothed = smoothed * 0.75 + level * 0.25;
             const height = rect.h * smoothed;
-            fillRect(self.allocator, rect.x + x, rect.bottom() - height, 1, height, bandColor(smoothed));
+            fillRect(self.allocator, rect.x + x, rect.bottom() - height, 2, height, bandColor(smoothed));
         }
 
         var beat: f32 = @ceil(start_beat);
@@ -843,8 +844,10 @@ pub const App = struct {
     fn paintOverview(allocator: std.mem.Allocator, analysis: *const pl.analysis.Analysis, rect: hit.Rect) void {
         if (rect.w <= 0 or rect.h <= 0 or analysis.waveform.len == 0) return;
         const len: f32 = @floatFromInt(analysis.waveform.len);
+        const scale: f32 = 255 / @as(f32, @floatFromInt(@max(1, analysis.peak)));
 
         var x: f32 = 0;
+        var smoothed: f32 = 0.35;
         while (x < rect.w) : (x += 2) {
             const from: usize = @intFromFloat(@min(len - 1, x / rect.w * len));
             const to: usize = @min(analysis.waveform.len, @as(usize, @intFromFloat(@max(@as(f32, @floatFromInt(from + 1)), (x + 2) / rect.w * len))));
@@ -856,9 +859,10 @@ pub const App = struct {
                 sum += value;
             }
             const average = @as(f32, @floatFromInt(sum)) / @as(f32, @floatFromInt(@max(1, to - from)));
-            const level = @min(255, @max(average * 1.8, @as(f32, @floatFromInt(peak)) * 0.9));
-            const height = rect.h * (level / 255);
-            fillRect(allocator, rect.x + x, rect.bottom() - height, 2, height, bandColor(level / 255));
+            const level = @min(255, @max(average * 1.15, @as(f32, @floatFromInt(peak)) * 0.6) * scale * 0.55) / 255;
+            smoothed = smoothed * 0.75 + level * 0.25;
+            const height = rect.h * smoothed;
+            fillRect(allocator, rect.x + x, rect.bottom() - height, 2, height, bandColor(smoothed));
         }
     }
 
@@ -1267,12 +1271,14 @@ fn fade(color: dvui.Color, alpha: u8) dvui.Color {
 
 /// Pioneer's colour waveform in spirit: steady bass reads blue, transients push
 /// the colour through orange towards white.
-/// Quiet passages blue, body orange, peaks white. The waveform carries one
-/// amplitude byte, so loudness is the only band information available.
+/// Heat map: quiet reads indigo, body red and orange, peaks yellow. The
+/// waveform carries one amplitude byte, so loudness is the only information.
 fn bandColor(level: f32) dvui.Color {
     const t = std.math.clamp(level, 0, 1);
-    if (t < 0.55) return mixColor(Palette.bass, Palette.mid, t / 0.55);
-    return mixColor(Palette.mid, Palette.high, (t - 0.55) / 0.45);
+    if (t < 0.25) return mixColor(Palette.heat0, Palette.heat1, t / 0.25);
+    if (t < 0.5) return mixColor(Palette.heat1, Palette.heat2, (t - 0.25) / 0.25);
+    if (t < 0.75) return mixColor(Palette.heat2, Palette.heat3, (t - 0.5) / 0.25);
+    return mixColor(Palette.heat3, Palette.heat4, (t - 0.75) / 0.25);
 }
 
 fn mixColor(a: dvui.Color, b: dvui.Color, t: f32) dvui.Color {
@@ -1506,10 +1512,12 @@ const Palette = struct {
     const block = dvui.Color{ .r = 0x34, .g = 0x37, .b = 0x46, .a = 0xff };
     const selection = dvui.Color{ .r = 0x44, .g = 0x47, .b = 0x5a, .a = 0xff };
     const hover = dvui.Color{ .r = 0x3a, .g = 0x3d, .b = 0x4d, .a = 0xff };
-    /// Pioneer's three-band waveform: lows blue, mids orange, highs white.
-    const bass = dvui.Color{ .r = 0x2e, .g = 0x6b, .b = 0xf0, .a = 0xff };
-    const mid = dvui.Color{ .r = 0xff, .g = 0x9a, .b = 0x3c, .a = 0xff };
-    const high = dvui.Color{ .r = 0xf2, .g = 0xf2, .b = 0xf2, .a = 0xff };
+    /// Heat ramp for loudness: deep indigo through red and orange to yellow.
+    const heat0 = dvui.Color{ .r = 0x1a, .g = 0x1f, .b = 0x4b, .a = 0xff };
+    const heat1 = dvui.Color{ .r = 0x6a, .g = 0x2c, .b = 0x8f, .a = 0xff };
+    const heat2 = dvui.Color{ .r = 0xc0, .g = 0x3a, .b = 0x2b, .a = 0xff };
+    const heat3 = dvui.Color{ .r = 0xf2, .g = 0x8f, .b = 0x24, .a = 0xff };
+    const heat4 = dvui.Color{ .r = 0xff, .g = 0xd7, .b = 0x5e, .a = 0xff };
     const field = dvui.Color{ .r = 0x21, .g = 0x22, .b = 0x2c, .a = 0xff };
     const ink = dvui.Color{ .r = 0xf8, .g = 0xf8, .b = 0xf2, .a = 0xff };
     /// Dracula's own comment blue is about 3:1 on this background, which is too
