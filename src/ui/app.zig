@@ -425,6 +425,7 @@ pub const App = struct {
                 dvui.refresh(null, @src(), null);
             },
             .move_block => |move| {
+                if (self.crate.at(move.from)) |track| self.player.stopPreview(track.id);
                 self.crate.moveTo(move.from, move.gap) catch {};
                 self.refresh() catch {};
                 dvui.refresh(null, @src(), null);
