@@ -1,0 +1,13 @@
+.{
+    .name = .playlister,
+    .version = "0.0.1",
+    .dependencies = .{
+        .dvui = .{
+            .url = "git+https://github.com/david-vanderson/dvui#e94e391c1600b8e8b5efca985e4e3cf515ed64da",
+            .hash = "dvui-0.6.0-dev-AQFJmac1BAGpCNPLcS4iJMnpgpFcRRWWqVyhBozYxPDa",
+        },
+    },
+    .minimum_zig_version = "0.17.0",
+    .paths = .{""},
+    .fingerprint = 0xadc23092b65d2feb,
+}
