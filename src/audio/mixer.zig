@@ -679,7 +679,15 @@ pub const Mixer = struct {
         return (slot.head + ring_frames - slot.tail) % ring_frames;
     }
 
-    fn freeFrames(slot: *const Slot) usize {
+    /// Frames of silence before a scheduled start falls inside this block.
+fn startOffset(now: i128, start_at_ns: i128, frames: usize) usize {
+    if (start_at_ns <= now) return 0;
+    const delta = start_at_ns - now;
+    const offset: usize = @intFromFloat(@as(f64, @floatFromInt(delta)) * sample_rate / 1_000_000_000);
+    return @min(offset, frames);
+}
+
+fn freeFrames(slot: *const Slot) usize {
         const occupied = (slot.head + ring_frames - slot.tail) % ring_frames;
         return ring_frames - 1 - occupied;
     }
@@ -698,8 +706,9 @@ pub const Mixer = struct {
             self.gate = false;
         }
 
+        const block_ns: i128 = @intFromFloat(@as(f64, @floatFromInt(frames)) * 1_000_000_000 / sample_rate);
         for (&self.slots) |*slot| {
-            if (!slot.active or slot.start_at_ns > now) continue;
+            if (!slot.active or slot.start_at_ns > now + block_ns) continue;
 
             // Wait for a real buffer before the first sample: otherwise the
             // lane begins wherever the decoder happened to be by the time the
@@ -711,11 +720,20 @@ pub const Mixer = struct {
             if (slot.muted) @memset(&slot.spectrum, 0);
             slot.level *= level_decay;
             if (slot.head == slot.tail) continue;
+            // Honour a scheduled start inside this block instead of rounding
+            // it up to the next tick: a lane joining mid-song would otherwise
+            // sit up to 10 ms behind the others.
+            var first_frame: usize = 0;
+            if (!slot.started and slot.start_at_ns > now) {
+                first_frame = startOffset(now, slot.start_at_ns, frames);
+                if (first_frame >= frames) continue;
+            }
             // First audible frame: this is the time the transport must use,
             // whatever the decoder's own latency was.
             if (!slot.started) {
                 slot.started = true;
-                slot.started_ns = now;
+                const offset_ns: i128 = @intFromFloat(@as(f64, @floatFromInt(first_frame)) * 1_000_000_000 / sample_rate);
+                slot.started_ns = now + offset_ns;
             }
             // All bands at unity is a true bypass: three biquads still colour
             // the signal and cost cycles.
@@ -728,7 +746,7 @@ pub const Mixer = struct {
             }
             const gain = trimGain(slot.trim_db);
             var peak: f32 = 0;
-            var frame: usize = 0;
+            var frame: usize = first_frame;
             while (frame < frames and slot.tail != slot.head) : (frame += 1) {
                 if (slot.muted) {
                     slot.tail = (slot.tail + 1) % ring_frames;
@@ -934,4 +952,12 @@ test "the spectrum peaks in the band that contains the tone" {
     }
     try testing.expect(spectrumFreq(best) <= tone_hz);
     try testing.expect(tone_hz < spectrumFreq(best + 1));
+}
+
+test "a scheduled start lands on its exact frame" {
+    try testing.expectEqual(@as(usize, 0), Mixer.startOffset(0, 0, 480));
+    try testing.expectEqual(@as(usize, 240), Mixer.startOffset(0, 5_000_000, 480));
+    try testing.expectEqual(@as(usize, 479), Mixer.startOffset(0, 9_999_999, 480));
+    try testing.expectEqual(@as(usize, 480), Mixer.startOffset(0, 10_000_000, 480));
+    try testing.expectEqual(@as(usize, 0), Mixer.startOffset(7_000, 3_000, 480));
 }
