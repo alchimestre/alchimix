@@ -9,6 +9,10 @@ pub const Color = struct { r: u8, g: u8, b: u8, a: u8 = 0xff };
 pub const Scheme = enum { band_rgb, band_rgb_level, pastel, heat };
 pub const Curve = enum { linear, sqrt, square, fixed };
 
+/// The lane waveform's look. Change these two lines to retune it.
+pub const chosen_scheme: Scheme = .band_rgb_level;
+pub const chosen_curve: Curve = .sqrt;
+
 pub fn applyCurve(curve: Curve, level: f32) f32 {
     const t = std.math.clamp(level, 0, 1);
     return switch (curve) {
