@@ -7,6 +7,11 @@ const pl = @import("playlister");
 
 pub const Color = struct { r: u8, g: u8, b: u8, a: u8 = 0xff };
 
+/// One colour per band for the stacked three-band waveform.
+pub const low_color = Color{ .r = 0xff, .g = 0x55, .b = 0x55 };
+pub const mid_color = Color{ .r = 0x50, .g = 0xfa, .b = 0x7b };
+pub const high_color = Color{ .r = 0x8b, .g = 0xe9, .b = 0xfd };
+
 /// Mean band levels over a span, at the waveform's brightness.
 pub fn tintBands(level: f32, bands: []const pl.analysis.Band) Color {
     var low: f32 = 0;
