@@ -237,6 +237,16 @@ pub const HitMap = struct {
         }
         return gap;
     }
+
+    /// The insertion gap from full row rectangles, which keep their true
+    /// centres even when scrolled out of view.
+    pub fn gapAtRows(rows: []const Rect, y: f32) usize {
+        var gap: usize = 0;
+        for (rows) |row| {
+            if (row.centerY() < y) gap += 1;
+        }
+        return gap;
+    }
 };
 
 /// Press selects, movement past a threshold turns the press into a drag, release
@@ -347,7 +357,7 @@ pub const Drag = struct {
     }
 
     /// True when the frame has something new to draw.
-    pub fn motion(self: *Drag, p: Point, threshold: f32, canvas: Rect, hit_map: *const HitMap) bool {
+    pub fn motion(self: *Drag, p: Point, threshold: f32, canvas: Rect, rows: []const Rect) bool {
         const pressed = self.pressed orelse return false;
         switch (pressed) {
             .lane, .nav, .eq_node, .eq_plot, .eq_preset, .trim, .clear, .playlist, .playlist_toggle, .save_playlist, .group => return false,
@@ -357,7 +367,7 @@ pub const Drag = struct {
             if (!moved(self.press_at, p, threshold)) return false;
             self.carrying = pressed;
         }
-        self.gap = if (canvas.contains(p)) hit_map.gapAt(p.y) else null;
+        self.gap = if (canvas.contains(p)) HitMap.gapAtRows(rows, p.y) else null;
         return true;
     }
 
@@ -456,6 +466,22 @@ test "a row clipped by its viewport only takes presses inside it" {
     try std.testing.expect(map.hit(.{ .x = 10, .y = 620 }) == null);
 }
 
+fn blockRows(map: *const HitMap, buffer: *[8]Rect) []const Rect {
+    var count: usize = 0;
+    for (map.entries.items) |entry| {
+        switch (entry.target) {
+            .block => {
+                if (count < buffer.len) {
+                    buffer[count] = entry.rect;
+                    count += 1;
+                }
+            },
+            else => {},
+        }
+    }
+    return buffer[0..count];
+}
+
 test "the gap is the number of block middles above the pointer" {
     var map = HitMap.init(std.testing.allocator);
     defer map.deinit();
@@ -470,14 +496,29 @@ test "the gap is the number of block middles above the pointer" {
     try std.testing.expectEqual(@as(usize, 3), map.gapAt(400));
 }
 
+test "a scrolled-out row keeps its centre for the gap" {
+    // The first row is above the viewport, so its clipped rect would sit on the
+    // top edge and read as a drop before it; the full rect does not.
+    const rows = [_]Rect{
+        .{ .x = 0, .y = -60, .w = 400, .h = 100 },
+        .{ .x = 0, .y = 40, .w = 400, .h = 100 },
+        .{ .x = 0, .y = 140, .w = 400, .h = 100 },
+    };
+    try std.testing.expectEqual(@as(usize, 1), HitMap.gapAtRows(&rows, 30));
+    try std.testing.expectEqual(@as(usize, 2), HitMap.gapAtRows(&rows, 120));
+}
+
 test "a press with no movement adds nothing" {
     var map = HitMap.init(std.testing.allocator);
     defer map.deinit();
     map.append(.{ .x = 0, .y = 0, .w = 400, .h = 80 }, .{ .row = T.track(1) });
 
+    var rows_buffer: [8]Rect = undefined;
+    const rows = blockRows(&map, &rows_buffer);
+
     var drag = Drag{};
     _ = drag.press(.{ .row = T.track(1) }, .{ .x = 10, .y = 10 }, false);
-    try std.testing.expect(!drag.motion(.{ .x = 12, .y = 11 }, 6, viewport, &map));
+    try std.testing.expect(!drag.motion(.{ .x = 12, .y = 11 }, 6, viewport, rows));
     try std.testing.expect(isNone(drag.release()));
 }
 
@@ -486,9 +527,12 @@ test "movement past the threshold starts carrying" {
     defer map.deinit();
     map.append(.{ .x = 0, .y = 0, .w = 400, .h = 80 }, .{ .row = T.track(7) });
 
+    var rows_buffer: [8]Rect = undefined;
+    const rows = blockRows(&map, &rows_buffer);
+
     var drag = Drag{};
     _ = drag.press(.{ .row = T.track(7) }, .{ .x = 10, .y = 10 }, false);
-    try std.testing.expect(drag.motion(.{ .x = 40, .y = 40 }, 6, viewport, &map));
+    try std.testing.expect(drag.motion(.{ .x = 40, .y = 40 }, 6, viewport, rows));
     try std.testing.expectEqual(@as(u64, 7), drag.carriedTrack().?.id);
     try std.testing.expectEqual(@as(?usize, 0), drag.gapIndex());
 }
@@ -499,9 +543,12 @@ test "releasing over the canvas drops the carried track at the gap" {
     map.append(.{ .x = 0, .y = 0, .w = 400, .h = 100 }, .{ .block = 0 });
     map.append(.{ .x = 0, .y = 100, .w = 400, .h = 100 }, .{ .block = 1 });
 
+    var rows_buffer: [8]Rect = undefined;
+    const rows = blockRows(&map, &rows_buffer);
+
     var drag = Drag{};
     _ = drag.press(.{ .row = T.track(9) }, .{ .x = 10, .y = 10 }, false);
-    _ = drag.motion(.{ .x = 300, .y = 180 }, 6, viewport, &map);
+    _ = drag.motion(.{ .x = 300, .y = 180 }, 6, viewport, rows);
 
     const action = drag.release();
     switch (action) {
@@ -518,9 +565,12 @@ test "releasing outside the canvas drops nothing" {
     defer map.deinit();
     map.append(.{ .x = 0, .y = 0, .w = 400, .h = 100 }, .{ .block = 0 });
 
+    var rows_buffer: [8]Rect = undefined;
+    const rows = blockRows(&map, &rows_buffer);
+
     var drag = Drag{};
     _ = drag.press(.{ .row = T.track(9) }, .{ .x = 10, .y = 10 }, false);
-    _ = drag.motion(.{ .x = 900, .y = 10 }, 6, viewport, &map);
+    _ = drag.motion(.{ .x = 900, .y = 10 }, 6, viewport, rows);
     try std.testing.expect(drag.gapIndex() == null);
     try std.testing.expect(isNone(drag.release()));
 }
@@ -531,6 +581,9 @@ test "a block drag reports the move and its source" {
     map.append(.{ .x = 0, .y = 0, .w = 400, .h = 100 }, .{ .block = 0 });
     map.append(.{ .x = 0, .y = 100, .w = 400, .h = 100 }, .{ .block = 1 });
 
+    var rows_buffer: [8]Rect = undefined;
+    const rows = blockRows(&map, &rows_buffer);
+
     var drag = Drag{};
     const pressed = drag.press(.{ .block = 0 }, .{ .x = 10, .y = 10 }, false);
     switch (pressed) {
@@ -538,7 +591,7 @@ test "a block drag reports the move and its source" {
         else => return error.WrongAction,
     }
 
-    _ = drag.motion(.{ .x = 10, .y = 150 }, 6, viewport, &map);
+    _ = drag.motion(.{ .x = 10, .y = 150 }, 6, viewport, rows);
     const action = drag.release();
     switch (action) {
         .move_block => |move| {
@@ -560,7 +613,9 @@ test "the notation toggle fires on the press and carries nothing" {
         .toggle_notation => {},
         else => return error.WrongAction,
     }
-    try std.testing.expect(!drag.motion(.{ .x = 90, .y = 60 }, 6, viewport, &map));
+    var rows_buffer: [8]Rect = undefined;
+    const rows = blockRows(&map, &rows_buffer);
+    try std.testing.expect(!drag.motion(.{ .x = 90, .y = 60 }, 6, viewport, rows));
     try std.testing.expect(isNone(drag.release()));
 }
 
@@ -575,7 +630,9 @@ test "a width press reports the span and carries nothing" {
         .set_width => |beats| try std.testing.expectEqual(@as(u8, 32), beats),
         else => return error.WrongAction,
     }
-    try std.testing.expect(!drag.motion(.{ .x = 90, .y = 60 }, 6, viewport, &map));
+    var rows_buffer: [8]Rect = undefined;
+    const rows = blockRows(&map, &rows_buffer);
+    try std.testing.expect(!drag.motion(.{ .x = 90, .y = 60 }, 6, viewport, rows));
     try std.testing.expect(isNone(drag.release()));
 }
 
@@ -598,7 +655,7 @@ test "a toggle flips on the press and carries nothing" {
         .toggle => |toggle| try std.testing.expectEqual(Toggle.up, toggle),
         else => return error.WrongAction,
     }
-    try std.testing.expect(!drag.motion(.{ .x = 60, .y = 60 }, 6, viewport, &map));
+    try std.testing.expect(!drag.motion(.{ .x = 60, .y = 60 }, 6, viewport, &.{}));
     try std.testing.expect(isNone(drag.release()));
 }
 
@@ -613,7 +670,9 @@ test "a press on the mute button toggles that lane and carries nothing" {
         .toggle_lane_mute => |index| try std.testing.expectEqual(@as(usize, 2), index),
         else => return error.WrongAction,
     }
-    try std.testing.expect(!drag.motion(.{ .x = 90, .y = 60 }, 6, viewport, &map));
+    var rows_buffer: [8]Rect = undefined;
+    const rows = blockRows(&map, &rows_buffer);
+    try std.testing.expect(!drag.motion(.{ .x = 90, .y = 60 }, 6, viewport, rows));
     try std.testing.expect(isNone(drag.release()));
 }
 
@@ -628,7 +687,7 @@ test "a shift press toggles the block without carrying it" {
         .toggle_block => |index| try std.testing.expectEqual(@as(usize, 2), index),
         else => return error.WrongAction,
     }
-    try std.testing.expect(!drag.motion(.{ .x = 10, .y = 200 }, 6, viewport, &map));
+    try std.testing.expect(!drag.motion(.{ .x = 10, .y = 200 }, 6, viewport, &.{}));
     try std.testing.expect(isNone(drag.release()));
 }
 
@@ -833,5 +892,5 @@ test "a trim press sets the gain and drags in place" {
         .trim => |index| try std.testing.expectEqual(@as(usize, 0), index),
         else => return error.TestUnexpectedResult,
     }
-    try std.testing.expect(!drag.motion(.{ .x = 908, .y = 250 }, 4, viewport, &map));
+    try std.testing.expect(!drag.motion(.{ .x = 908, .y = 250 }, 4, viewport, &.{}));
 }
