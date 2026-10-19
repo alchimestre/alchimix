@@ -1333,7 +1333,7 @@ pub const App = struct {
                 const width = @min(rect.w - x, @max(1, next_x - x));
                 if (has_bands) {
                     const bands = bandMeans(analysis.bands, a, b, bucket);
-                    drawBand(&builder, rect, rect.x + x, width, bands);
+                    drawBand(&builder, rect, rect.x + x, width, bands, smoothed);
                 } else {
                     const height = rect.h * smoothed;
                     fillRectInto(&builder, rect.x + x, rect.bottom() - height, width, height, bandColor(smoothed));
@@ -1823,16 +1823,22 @@ fn meanBands(bands: []const pl.analysis.Band, from: usize, to: usize) BandMeans 
     return .{ .low = low / count, .mid = mid / count, .high = high / count };
 }
 
-/// One column of the three-band waveform: kick at the bottom, mids in the
-/// middle, highs at the top, each growing inside its third.
-fn drawBand(builder: *dvui.Path.Builder, rect: hit.Rect, x: f32, width: f32, bands: BandMeans) void {
-    const third = rect.h / 3;
-    const low_h = third * @sqrt(bands.low);
-    const mid_h = third * @sqrt(bands.mid);
-    const high_h = third * @sqrt(bands.high);
-    fillRectInto(builder, x, rect.bottom() - low_h, width, low_h, waveColor(wave_colour.low_color));
-    fillRectInto(builder, x, rect.bottom() - third - mid_h, width, mid_h, waveColor(wave_colour.mid_color));
-    fillRectInto(builder, x, rect.y + third - high_h, width, high_h, waveColor(wave_colour.high_color));
+/// One column of the three-band waveform: the overall level is split into
+/// stacked segments, lows at the bottom, mids above them, highs on top.
+fn drawBand(builder: *dvui.Path.Builder, rect: hit.Rect, x: f32, width: f32, bands: BandMeans, level: f32) void {
+    const sum = bands.low + bands.mid + bands.high;
+    if (sum <= 0.001) return;
+    const height = rect.h * @sqrt(std.math.clamp(level, 0, 1));
+    const low_h = height * bands.low / sum;
+    const mid_h = height * bands.mid / sum;
+    const high_h = height * bands.high / sum;
+
+    var bottom = rect.bottom();
+    fillRectInto(builder, x, bottom - low_h, width, low_h, waveColor(wave_colour.low_color));
+    bottom -= low_h;
+    fillRectInto(builder, x, bottom - mid_h, width, mid_h, waveColor(wave_colour.mid_color));
+    bottom -= mid_h;
+    fillRectInto(builder, x, bottom - high_h, width, high_h, waveColor(wave_colour.high_color));
 }
 
 fn spanLevel(samples: []const u8, from: usize, to: usize, scale: f32) f32 {
