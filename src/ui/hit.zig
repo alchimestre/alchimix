@@ -89,6 +89,8 @@ pub const Target = union(enum) {
     save_playlist,
     /// The brace marking the lanes under global play/stop.
     group,
+    /// Orders the suggestions by BPM.
+    sort_bpm,
     /// Freezes the master tempo to the seed's BPM, or frees it.
     master_lock,
     /// Keeps the pitch while the master tempo changes.
@@ -263,6 +265,7 @@ pub const Drag = struct {
         toggle_notation,
         toggle_transport,
         clear_all,
+        toggle_sort_bpm,
         select_playlist: usize,
         toggle_playlist: usize,
         save_playlist,
@@ -295,6 +298,7 @@ pub const Drag = struct {
             .notation => .toggle_notation,
             .transport => .toggle_transport,
             .clear => .clear_all,
+            .sort_bpm => .toggle_sort_bpm,
             .playlist => |index| .{ .select_playlist = index },
             .playlist_toggle => |index| .{ .toggle_playlist = index },
             .save_playlist => .save_playlist,
@@ -360,7 +364,7 @@ pub const Drag = struct {
     pub fn motion(self: *Drag, p: Point, threshold: f32, canvas: Rect, rows: []const Rect) bool {
         const pressed = self.pressed orelse return false;
         switch (pressed) {
-            .lane, .nav, .eq_node, .eq_plot, .eq_preset, .trim, .clear, .playlist, .playlist_toggle, .save_playlist, .group => return false,
+            .lane, .nav, .eq_node, .eq_plot, .eq_preset, .trim, .clear, .playlist, .playlist_toggle, .save_playlist, .group, .sort_bpm => return false,
             else => {},
         }
         if (self.carrying == null) {
@@ -381,7 +385,7 @@ pub const Drag = struct {
         return switch (target) {
             .block => |from| .{ .move_block = .{ .from = from, .gap = to } },
             .row => |track| .{ .drop_track = .{ .gap = to, .track = track } },
-            .toggle, .notation, .lane, .nav, .eq_node, .eq_plot, .eq_preset, .trim, .transport, .clear, .playlist, .playlist_toggle, .save_playlist, .group, .master_lock, .pitch_lock, .lane_play, .lane_mute, .width => .none,
+            .toggle, .notation, .lane, .nav, .eq_node, .eq_plot, .eq_preset, .trim, .transport, .clear, .playlist, .playlist_toggle, .save_playlist, .group, .sort_bpm, .master_lock, .pitch_lock, .lane_play, .lane_mute, .width => .none,
         };
     }
 
