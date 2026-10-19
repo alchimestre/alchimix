@@ -547,7 +547,7 @@ pub const Transport = struct {
         return count;
     }
 
-    fn nowNs(self: *const Transport) i128 {
+    pub fn nowNs(self: *const Transport) i128 {
         return self.clock.nowNs(self.clock.context);
     }
 
@@ -615,6 +615,11 @@ pub const Transport = struct {
         const phase = @mod(self.masterBeatAt(now), 4);
         const wait: f32 = if (phase > 0.25) 4 - phase else 0;
         return now + @as(i128, @intFromFloat(@as(f64, wait) * 60 / self.bpm * 1_000_000_000));
+    }
+
+    /// The next master bar in audio-clock time; zero when the clock is stopped.
+    pub fn nextBarTime(self: *Transport) i128 {
+        return self.nextBarAt(self.nowNs());
     }
 
     /// The next master bar after `now`, never the current one: a lane rejoining

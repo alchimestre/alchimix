@@ -93,10 +93,14 @@ pub const App = struct {
     /// Lanes inside the canvas viewport this frame; global transport uses them
     /// once more than four tracks are loaded.
     lane_rects: [64]hit.Rect = undefined,
+    lane_drawn: [64]bool = @splat(false),
     lane_count: usize = 0,
     lane_right: f32 = 0,
     /// First lane of the four-lane group global play/stop acts on.
     group_start: usize = 0,
+    /// A preview waiting for the next master bar so it lands in sync.
+    preview_pending: ?Track = null,
+    preview_at_ns: i128 = 0,
     group: [4]usize = undefined,
 
     query: std.ArrayList(u8) = .empty,
@@ -243,6 +247,14 @@ pub const App = struct {
         self.transport.setTempo(self.masterBpm());
         self.transport.sync();
 
+        if (self.preview_pending) |track| {
+            if (self.transport.nowNs() >= self.preview_at_ns) {
+                self.preview_pending = null;
+                const tempo: f32 = if (track.bpm > 0) self.masterBpm() / @as(f32, @floatCast(track.bpm)) else 1;
+                self.player.play(track, tempo);
+            }
+        }
+
         // The pointer pass reads the map the previous frame drew, then the map
         // is rebuilt from this frame's layout.
         self.handlePointer();
@@ -359,6 +371,7 @@ pub const App = struct {
         defer if (ids.len > 0) self.allocator.free(ids);
 
         self.player.stopAll();
+        self.preview_pending = null;
         self.transport.stopAll();
         self.transport.beginSync();
         self.transport.endSync();
@@ -757,6 +770,7 @@ pub const App = struct {
 
         self.lane_count = 0;
         self.lane_right = 0;
+        self.lane_drawn = @splat(false);
 
         if (self.crate.len() == 0) {
             labelStyled(@src(), "Drag a track here to start the crate.", .{
@@ -796,7 +810,12 @@ pub const App = struct {
                     .none => {},
                 }
                 self.dropLine(index, block.rect);
-                self.drawLane(index);
+                // Only the rows near the viewport are painted; a crate of
+                // dozens of tracks otherwise redraws every waveform per frame.
+                const margin: f32 = 320;
+                const near = block.rect.y + block.rect.h >= self.canvas.y - margin and
+                    block.rect.y <= self.canvas.bottom() + margin;
+                if (near) self.drawLane(index);
             }
 
             if (self.crate.transition(index)) |step| connector(self.allocator, index, step);
@@ -1264,6 +1283,7 @@ pub const App = struct {
 
     fn clearAll(self: *App) void {
         self.player.stopAll();
+        self.preview_pending = null;
         self.transport.stopAll();
         self.transport.beginSync();
         self.transport.endSync();
@@ -1494,6 +1514,7 @@ pub const App = struct {
     fn noteLane(self: *App, index: usize, rect: hit.Rect) void {
         if (index >= self.lane_rects.len) return;
         self.lane_rects[index] = rect;
+        self.lane_drawn[index] = true;
         self.lane_count = @max(self.lane_count, index + 1);
         self.lane_right = @max(self.lane_right, rect.x + rect.w);
     }
@@ -1510,6 +1531,7 @@ pub const App = struct {
         if (total <= 4) return;
         const start = self.groupStart();
         if (start + 3 >= self.lane_count) return;
+        if (!self.lane_drawn[start] or !self.lane_drawn[start + 3]) return;
 
         const top = self.lane_rects[start].y + 3;
         const bottom = self.lane_rects[start + 3].y + self.lane_rects[start + 3].h - 3;
@@ -1539,6 +1561,24 @@ pub const App = struct {
             .w = 48,
             .h = bottom - top,
         }, .group);
+    }
+
+    fn preview(self: *App, track: Track) void {
+        const tempo: f32 = if (track.bpm > 0) self.masterBpm() / @as(f32, @floatCast(track.bpm)) else 1;
+        if (self.player.holds(track.id)) {
+            self.player.toggle(track, tempo);
+            return;
+        }
+        if (self.transport.anyPlaying()) {
+            // Spawn just before the bar: ffplay takes a moment to produce sound.
+            const bar = self.transport.nextBarTime();
+            const lead: i128 = 200_000_000;
+            self.preview_pending = track;
+            self.preview_at_ns = @max(self.transport.nowNs(), bar - lead);
+            return;
+        }
+        self.preview_pending = null;
+        self.player.toggle(track, tempo);
     }
 
     fn transportGroup(self: *App) []const usize {
@@ -2100,7 +2140,7 @@ fn transportButton(app: *App, track: Track, id_extra: usize) bool {
     }
 
     if (!dvui.clicked(area.data(), .{})) return false;
-    app.player.toggle(track);
+    app.preview(track);
     return true;
 }
 

@@ -22,6 +22,8 @@ pub const Player = struct {
 
     path: [max_path]u8 = undefined,
     path_len: usize = 0,
+    /// Playback-rate ratio for the current snippet.
+    tempo: f32 = 1,
     /// Seconds into the track where the current snippet starts.
     snippet_start_s: u32 = 0,
     /// How long the current snippet runs, in milliseconds.
@@ -69,12 +71,18 @@ pub const Player = struct {
         return std.math.clamp(@as(f32, @floatFromInt(done)) / @as(f32, @floatFromInt(self.window_ms)), 0, 1);
     }
 
-    pub fn toggle(self: *Player, track: Track) void {
+    pub fn toggle(self: *Player, track: Track, tempo: f32) void {
         if (self.holds(track.id)) {
             if (self.paused) self.resumePlayback() else self.pause();
             return;
         }
+        self.play(track, tempo);
+    }
+
+    /// Starts a fresh snippet from the middle, at `tempo` times normal speed.
+    pub fn play(self: *Player, track: Track, tempo: f32) void {
         self.stop();
+        self.tempo = std.math.clamp(tempo, 0.5, 2.0);
         self.start(track, middleStart(track), snippet_seconds);
     }
 
@@ -114,11 +122,28 @@ pub const Player = struct {
         const length = std.fmt.allocPrint(self.allocator, "{d}", .{length_s}) catch return;
         defer self.allocator.free(length);
 
+        const rate = if (@abs(self.tempo - 1) > 0.001)
+            std.fmt.allocPrint(self.allocator, "atempo={d:.3}", .{self.tempo}) catch null
+        else
+            null;
+        defer if (rate) |text| self.allocator.free(text);
+
+        var argv: [14][]const u8 = undefined;
+        var argc: usize = 0;
+        for ([_][]const u8{ "ffplay", "-nodisp", "-autoexit", "-loglevel", "error", "-ss", offset, "-t", length }) |arg| {
+            argv[argc] = arg;
+            argc += 1;
+        }
+        if (rate) |text| {
+            argv[argc] = "-af";
+            argv[argc + 1] = text;
+            argc += 2;
+        }
+        argv[argc] = self.path[0..self.path_len];
+        argc += 1;
+
         self.child = std.process.spawn(self.io, .{
-            .argv = &.{
-                "ffplay", "-nodisp", "-autoexit", "-loglevel", "error",
-                "-ss",    offset,  "-t",        length,      self.path[0..self.path_len],
-            },
+            .argv = argv[0..argc],
             .stdin = .ignore,
             .stdout = .ignore,
             .stderr = .ignore,
