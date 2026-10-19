@@ -146,11 +146,17 @@ pub const Source = struct {
             const rc = c.sqlite3_step(s);
             if (rc == c.SQLITE_DONE) break;
             if (rc != c.SQLITE_ROW) return Error.QueryFailed;
+            const attribute = c.sqlite3_column_int(s, 3);
             try self.playlists.append(a, .{
                 .id = try a.dupe(u8, column(s, 0)),
                 .name = try a.dupe(u8, column(s, 1)),
                 .parent = try a.dupe(u8, column(s, 2)),
-                .folder = c.sqlite3_column_int(s, 3) != 0,
+                // 1 is a folder, 4 is an intelligent playlist (SmartList).
+                .kind = switch (attribute) {
+                    1 => .folder,
+                    4 => .smart,
+                    else => .list,
+                },
             });
         }
     }
