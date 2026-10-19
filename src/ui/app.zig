@@ -1322,7 +1322,7 @@ pub const App = struct {
             // Heavy smoothing along x turns per-column spikes into hills.
             smoothed = smoothed * 0.75 + level * 0.25;
             const height = rect.h * smoothed;
-            const color = if (has_bands) bandsTint(analysis.bands[from..to], smoothed) else bandColor(smoothed);
+            const color = if (has_bands) bandsTint(analysis.bands[from..to]) else bandColor(smoothed);
             fillRectInto(&builder, rect.x + x, rect.bottom() - height, 6, height, color);
         }
 
@@ -1367,7 +1367,7 @@ pub const App = struct {
             const level = @min(255, @max(average * 1.15, @as(f32, @floatFromInt(peak)) * 0.6) * scale * 0.55) / 255;
             smoothed = smoothed * 0.75 + level * 0.25;
             const height = rect.h * smoothed;
-            const color = if (has_bands) bandsTint(analysis.bands[from..to], smoothed) else bandColor(smoothed);
+            const color = if (has_bands) bandsTint(analysis.bands[from..to]) else bandColor(smoothed);
             fillRectInto(&builder, rect.x + x, rect.bottom() - height, 6, height, color);
         }
     }
@@ -1782,8 +1782,9 @@ pub fn fade(color: dvui.Color, alpha: u8) dvui.Color {
 /// the colour through orange towards white.
 /// Heat map: quiet reads indigo, body red and orange, peaks yellow. The
 /// waveform carries one amplitude byte, so loudness is the only information.
-/// Rekordbox's band colours: kick red, mid green, high blue, dimmed by level.
-pub fn bandsTint(bands: []const pl.analysis.Band, level: f32) dvui.Color {
+/// Rekordbox's band colours at full saturation: kick red, mid green, high
+/// blue. The strongest band fills its channel; loudness is the column height.
+pub fn bandsTint(bands: []const pl.analysis.Band) dvui.Color {
     var low: f32 = 0;
     var mid: f32 = 0;
     var high: f32 = 0;
@@ -1792,12 +1793,13 @@ pub fn bandsTint(bands: []const pl.analysis.Band, level: f32) dvui.Color {
         mid += @floatFromInt(band.mid);
         high += @floatFromInt(band.high);
     }
-    const count = @as(f32, @floatFromInt(@max(1, bands.len))) * 7;
-    const lit = std.math.clamp(level, 0.12, 1) * 255;
+    const strongest = @max(@max(low, mid), high);
+    if (strongest < 0.001) return Palette.field;
+    const scale = 255 / strongest;
     return .{
-        .r = @intFromFloat(@min(1, 0.18 + low / count * 0.82) * lit),
-        .g = @intFromFloat(@min(1, 0.18 + mid / count * 0.82) * lit),
-        .b = @intFromFloat(@min(1, 0.18 + high / count * 0.82) * lit),
+        .r = @intFromFloat(low * scale),
+        .g = @intFromFloat(mid * scale),
+        .b = @intFromFloat(high * scale),
         .a = 0xff,
     };
 }
