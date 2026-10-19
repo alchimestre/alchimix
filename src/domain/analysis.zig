@@ -75,8 +75,26 @@ pub const Analysis = struct {
         return (4 - (position - 1)) % 4;
     }
 
+    /// The tempo most of the grid agrees on. Live recordings wobble and can
+    /// carry a short section at another tempo; the first beat alone would put
+    /// the whole transport on the wrong bar length.
     pub fn bpm(self: Analysis) f32 {
         if (self.beats.len == 0) return 0;
+        var hist: [1800]u16 = @splat(0);
+        var counted: usize = 0;
+        for (self.beats) |beat| {
+            if (beat.bpm < 60 or beat.bpm >= 240) continue;
+            const bucket: usize = @intFromFloat(beat.bpm * 10);
+            hist[bucket - 600] += 1;
+            counted += 1;
+        }
+        if (counted == 0) return self.beats[0].bpm;
+        const half = counted / 2;
+        var seen: usize = 0;
+        for (hist, 0..) |count, index| {
+            seen += count;
+            if (seen > half) return @as(f32, @floatFromInt(600 + index)) / 10;
+        }
         return self.beats[0].bpm;
     }
 
@@ -260,6 +278,17 @@ test "reads the three-band colour waveform" {
     try testing.expectEqual(@as(u3, 0), analysis.bands[1].low);
     try testing.expectEqual(@as(u3, 3), analysis.bands[1].mid);
     try testing.expectEqual(@as(u3, 7), analysis.bands[1].high);
+}
+
+test "the median tempo ignores a minority section" {
+    var beats = [_]Beat{
+        .{ .time_ms = 0, .bpm = 151.25, .position = 1 },
+        .{ .time_ms = 397, .bpm = 151.38, .position = 2 },
+        .{ .time_ms = 794, .bpm = 143.30, .position = 3 },
+        .{ .time_ms = 1213, .bpm = 151.39, .position = 4 },
+    };
+    const analysis = Analysis{ .beats = &beats, .waveform = &.{}, .bands = &.{}, .peak = 0 };
+    try std.testing.expectApproxEqAbs(@as(f32, 151.3), analysis.bpm(), 0.2);
 }
 
 test "a file without a beat grid is rejected" {
