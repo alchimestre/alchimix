@@ -5,6 +5,14 @@ const std = @import("std");
 const Track = @import("../domain/track.zig").Track;
 const Analysis = @import("../domain/analysis.zig").Analysis;
 
+/// One rekordbox playlist or folder. Strings live as long as the source.
+pub const Playlist = struct {
+    id: []const u8,
+    name: []const u8,
+    parent: []const u8,
+    folder: bool,
+};
+
 pub const Library = struct {
     ctx: *anyopaque,
     vtable: *const VTable,
@@ -19,6 +27,14 @@ pub const Library = struct {
         /// The beat grid and preview waveform for one track. The caller owns
         /// the result and must `deinit` it with the same allocator.
         analysis: *const fn (ctx: *anyopaque, allocator: std.mem.Allocator, track_id: u64) anyerror!Analysis,
+        /// Every playlist and folder, in source order.
+        playlists: *const fn (ctx: *anyopaque) anyerror![]const Playlist,
+        /// Track ids in a playlist, in playlist order. Caller frees.
+        playlistTracks: *const fn (ctx: *anyopaque, allocator: std.mem.Allocator, playlist_id: []const u8) anyerror![]const u64,
+        /// Writes a new playlist with the given tracks, in order.
+        createPlaylist: *const fn (ctx: *anyopaque, name: []const u8, track_ids: []const u64) anyerror!void,
+        /// Appends one track unless it is already there.
+        addToPlaylist: *const fn (ctx: *anyopaque, playlist_id: []const u8, track_id: u64) anyerror!void,
         /// Shown in the UI so the active source is never a guess.
         name: *const fn (ctx: *anyopaque) []const u8,
         deinit: *const fn (ctx: *anyopaque) void,
@@ -34,6 +50,22 @@ pub const Library = struct {
 
     pub fn analysis(self: Library, allocator: std.mem.Allocator, track_id: u64) !Analysis {
         return self.vtable.analysis(self.ctx, allocator, track_id);
+    }
+
+    pub fn playlists(self: Library) ![]const Playlist {
+        return self.vtable.playlists(self.ctx);
+    }
+
+    pub fn playlistTracks(self: Library, allocator: std.mem.Allocator, playlist_id: []const u8) ![]const u64 {
+        return self.vtable.playlistTracks(self.ctx, allocator, playlist_id);
+    }
+
+    pub fn createPlaylist(self: Library, playlist_name: []const u8, track_ids: []const u64) !void {
+        return self.vtable.createPlaylist(self.ctx, playlist_name, track_ids);
+    }
+
+    pub fn addToPlaylist(self: Library, playlist_id: []const u8, track_id: u64) !void {
+        return self.vtable.addToPlaylist(self.ctx, playlist_id, track_id);
     }
 
     pub fn name(self: Library) []const u8 {
