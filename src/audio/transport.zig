@@ -38,6 +38,7 @@ pub const Output = struct {
     stop: *const fn (*anyopaque) void,
     laneState: *const fn (*anyopaque, uid: u64) mixer.LaneState,
     spectrum: *const fn (*anyopaque, uid: u64, out: []f32) void,
+    level: *const fn (*anyopaque, uid: u64) f32,
 };
 
 /// Whether a fresh lane waits for the next master bar or starts at once.
@@ -73,6 +74,8 @@ const Slot = struct {
     eq_preset: mixer.EqPreset = .none,
     /// Plays on silently: the lane keeps its clock and position.
     muted: bool = false,
+    /// Post-EQ lane gain, in dB.
+    trim_db: f32 = 0,
     /// Set for a retune, so the mixer restarts this decoder even when the
     /// folded position and tempo round to the same values.
     restart: bool = false,
@@ -396,6 +399,24 @@ pub const Transport = struct {
         return slot.muted;
     }
 
+    /// Applies the lane's trim without restarting its decoder.
+    pub fn setTrim(self: *Transport, index: usize, db: f32) void {
+        const slot = self.slotAt(index) orelse return;
+        slot.trim_db = std.math.clamp(db, -mixer.trim_max_db, mixer.trim_max_db);
+        if (slot.playing) self.pushMix();
+    }
+
+    pub fn trim(self: *Transport, index: usize) f32 {
+        const slot = self.slotAt(index) orelse return 0;
+        return slot.trim_db;
+    }
+
+    /// The lane's live post-trim peak, for its meter.
+    pub fn level(self: *Transport, index: usize) f32 {
+        const slot = self.slotAt(index) orelse return 0;
+        return self.output.level(self.output.context, slot.uid);
+    }
+
     /// The lane's live spectrum, for the EQ panel.
     pub fn spectrum(self: *Transport, index: usize, out: []f32) void {
         const slot = self.slotAt(index) orelse {
@@ -612,6 +633,7 @@ pub const Transport = struct {
             .tempo = self.bpm / slot.grid_bpm,
             .eq = slot.eq,
             .muted = slot.muted,
+            .trim_db = slot.trim_db,
             .keylock = self.keylock,
             .start_at_ns = slot.start_at_ns,
             .restart = slot.restart,
@@ -633,6 +655,7 @@ pub const Transport = struct {
             key = mixHash(key, @as(u32, @bitCast(lane.tempo)));
             key = hashEq(key, lane.eq);
             key = mixHash(key, @intFromBool(lane.muted));
+            key = mixHash(key, @as(u32, @bitCast(lane.trim_db)));
             key = mixHash(key, @intFromBool(lane.keylock));
             key = mixHash(key, @intFromBool(lane.restart));
             key = mixHash(key, @as(u64, @intCast(@max(0, lane.start_at_ns) / 1_000_000)));
@@ -726,6 +749,7 @@ const FakeEntry = struct {
     start_s: f64 = 0,
     tempo: f32 = 0,
     keylock: bool = false,
+    level: f32 = 0,
 };
 
 const FakeOutput = struct {
@@ -742,11 +766,18 @@ const FakeOutput = struct {
             .stop = stop,
             .laneState = laneState,
             .spectrum = spectrum,
+            .level = level,
         };
     }
 
     fn spectrum(_: *anyopaque, _: u64, out: []f32) void {
         @memset(out, 0);
+    }
+
+    fn level(context: *anyopaque, uid: u64) f32 {
+        const self: *FakeOutput = @ptrCast(@alignCast(context));
+        const entry = self.find(uid) orelse return 0;
+        return entry.level;
     }
 
     fn play(context: *anyopaque, lanes: []const mixer.Lane) void {
@@ -1135,6 +1166,35 @@ test "presets reach the mixer and moving a node clears them" {
     try expectApprox(3, moved.eq.gain_db[2]);
     try expectApprox(4000, moved.eq.freq_hz[2]);
     try testing.expectEqual(mixer.EqPreset.none, t.eqPreset(0));
+}
+
+test "trim reaches the mixer lane without restarting it" {
+    var fake = FakeOutput{};
+    var clock = TestClock{};
+    var t = setup(&fake, &clock);
+    defer t.deinit();
+
+    t.beginSync();
+    t.resolve(0, laneInfo(1));
+    t.endSync();
+    t.start(0, .now);
+    fake.markStarted(1, 0);
+    t.sync();
+
+    clock.now = 500_000_000;
+    t.sync();
+    const before = (fake.playingLane(1) orelse return error.NoLane).start_s;
+    t.setTrim(0, -6);
+
+    const lane = fake.playingLane(1) orelse return error.NoLane;
+    try expectApprox(-6, lane.trim_db);
+    try expectApprox(@floatCast(before), @floatCast(lane.start_s));
+    try testing.expectEqual(@as(usize, 2), fake.plays);
+    const entry = fake.findByTrack(1) orelse return error.NoLane;
+    try testing.expectEqual(mixer.LaneState{ .started = 0 }, entry.state);
+
+    fake.findByTrack(1).?.level = 0.5;
+    try expectApprox(0.5, t.level(0));
 }
 
 test "tempo change folds the position before restarting" {

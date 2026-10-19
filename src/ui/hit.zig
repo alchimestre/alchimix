@@ -75,6 +75,8 @@ pub const Target = union(enum) {
     eq_node: struct { lane: usize, band: usize },
     /// One preset choice left of the plot.
     eq_preset: struct { lane: usize, preset: pl.mixer.EqPreset },
+    /// The trim slider and meter at the far right of a lane.
+    trim: usize,
     /// Starts and stops the grid's shared transport.
     transport,
     /// Freezes the master tempo to the seed's BPM, or frees it.
@@ -195,6 +197,23 @@ pub const HitMap = struct {
         };
     }
 
+    fn trimRect(self: *const HitMap, lane: usize) ?Rect {
+        for (self.entries.items) |entry| {
+            switch (entry.target) {
+                .trim => |at| if (at == lane and !entry.rect.isEmpty()) return entry.rect,
+                else => {},
+            }
+        }
+        return null;
+    }
+
+    /// Maps a pointer position on a trim bar to decibels: top is full boost,
+    /// bottom full cut, and anything outside clamps to that range.
+    pub fn trimValueAt(self: *const HitMap, lane: usize, y: f32) ?f32 {
+        const rect = self.trimRect(lane) orelse return null;
+        return (0.5 - verticalFraction(rect, y)) * 2 * pl.mixer.trim_max_db;
+    }
+
     /// The gap nearest `y`: how many block middles sit above it.
     pub fn gapAt(self: *const HitMap, y: f32) usize {
         var gap: usize = 0;
@@ -235,6 +254,8 @@ pub const Drag = struct {
         grab_eq: struct { lane: usize, band: usize },
         /// A press on a preset: applies it, or clears the EQ when already on.
         set_eq_preset: struct { lane: usize, preset: pl.mixer.EqPreset },
+        /// A press or drag on a trim bar: sets the lane's gain from the pointer.
+        set_trim: usize,
         select_block: usize,
         toggle_block: usize,
         move_block: struct { from: usize, gap: usize },
@@ -268,6 +289,10 @@ pub const Drag = struct {
                 break :blk .{ .grab_eq = .{ .lane = at.lane, .band = at.band } };
             },
             .eq_preset => |at| .{ .set_eq_preset = .{ .lane = at.lane, .preset = at.preset } },
+            .trim => |index| blk: {
+                self.pressed = target;
+                break :blk .{ .set_trim = index };
+            },
             .eq_plot => .none,
             .row, .lane => blk: {
                 self.pressed = target;
@@ -290,7 +315,7 @@ pub const Drag = struct {
     pub fn pull(self: *Drag, p: Point) ?Pull {
         const pressed = self.pressed orelse return null;
         switch (pressed) {
-            .lane, .nav, .eq_node => {},
+            .lane, .nav, .eq_node, .trim => {},
             else => return null,
         }
         const dx = p.x - self.press_at.x;
@@ -303,7 +328,7 @@ pub const Drag = struct {
     pub fn motion(self: *Drag, p: Point, threshold: f32, canvas: Rect, hit_map: *const HitMap) bool {
         const pressed = self.pressed orelse return false;
         switch (pressed) {
-            .lane, .nav, .eq_node, .eq_plot, .eq_preset => return false,
+            .lane, .nav, .eq_node, .eq_plot, .eq_preset, .trim => return false,
             else => {},
         }
         if (self.carrying == null) {
@@ -324,7 +349,7 @@ pub const Drag = struct {
         return switch (target) {
             .block => |from| .{ .move_block = .{ .from = from, .gap = to } },
             .row => |track| .{ .drop_track = .{ .gap = to, .track = track } },
-            .toggle, .notation, .lane, .nav, .eq_node, .eq_plot, .eq_preset, .transport, .master_lock, .pitch_lock, .lane_play, .lane_mute, .width => .none,
+            .toggle, .notation, .lane, .nav, .eq_node, .eq_plot, .eq_preset, .trim, .transport, .master_lock, .pitch_lock, .lane_play, .lane_mute, .width => .none,
         };
     }
 
@@ -753,4 +778,38 @@ test "an EQ node drag reports the current point" {
     const pull = drag.pull(.{ .x = 505, .y = 125 }).?;
     try expectClose(505, pull.p.x);
     try expectClose(125, pull.p.y);
+}
+
+test "a trim bar maps the top to boost and the bottom to cut" {
+    var map = HitMap.init(std.testing.allocator);
+    defer map.deinit();
+    const bar: Rect = .{ .x = 900, .y = 100, .w = 16, .h = 200 };
+    map.append(bar, .{ .trim = 0 });
+
+    try expectClose(pl.mixer.trim_max_db, map.trimValueAt(0, bar.y).?);
+    try expectClose(0, map.trimValueAt(0, bar.centerY()).?);
+    try expectClose(-pl.mixer.trim_max_db, map.trimValueAt(0, bar.bottom()).?);
+    try expectClose(pl.mixer.trim_max_db, map.trimValueAt(0, bar.y - 50).?);
+    try expectClose(-pl.mixer.trim_max_db, map.trimValueAt(0, bar.bottom() + 50).?);
+    try std.testing.expect(map.trimValueAt(1, bar.centerY()) == null);
+}
+
+test "a trim press sets the gain and drags in place" {
+    var map = HitMap.init(std.testing.allocator);
+    defer map.deinit();
+    map.append(.{ .x = 900, .y = 100, .w = 16, .h = 200 }, .{ .trim = 0 });
+
+    var drag = Drag{};
+    const action = drag.press(.{ .trim = 0 }, .{ .x = 908, .y = 150 }, false);
+    switch (action) {
+        .set_trim => |index| try std.testing.expectEqual(@as(usize, 0), index),
+        else => return error.TestUnexpectedResult,
+    }
+
+    const pull = drag.pull(.{ .x = 908, .y = 250 }).?;
+    switch (pull.target) {
+        .trim => |index| try std.testing.expectEqual(@as(usize, 0), index),
+        else => return error.TestUnexpectedResult,
+    }
+    try std.testing.expect(!drag.motion(.{ .x = 908, .y = 250 }, 4, viewport, &map));
 }
