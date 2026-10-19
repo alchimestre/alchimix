@@ -2,6 +2,7 @@ const std = @import("std");
 const pl = @import("playlister");
 const runApp = @import("ui/run.zig").run;
 const runWaveformDemo = @import("ui/run.zig").runWaveformDemo;
+const runColourDemo = @import("ui/run.zig").runColourDemo;
 const App = @import("ui/app.zig").App;
 
 pub fn main(init: std.process.Init) !void {
@@ -22,6 +23,9 @@ pub fn main(init: std.process.Init) !void {
     }
     if (std.mem.eql(u8, command, "waveform-demo")) {
         return runWaveformDemo(init);
+    }
+    if (std.mem.eql(u8, command, "waveform-colours")) {
+        return runColourDemo(init);
     }
     usage();
 }
@@ -49,6 +53,7 @@ fn usage() void {
         \\  suggest <text>     rank what could follow the first match
         \\  mix <out> <s> <files...>  render the mixer to raw f32le, no window
         \\  waveform-demo      compare four lane waveform renderings
+        \\  waveform-colours   compare waveform colour schemes and curves
         \\
     , .{});
 }
