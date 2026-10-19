@@ -10,6 +10,7 @@ const std = @import("std");
 const dvui = @import("dvui");
 const pl = @import("playlister");
 const hit = @import("hit.zig");
+const wave_colour = @import("wave_colour.zig");
 
 const Track = pl.track.Track;
 const Transition = pl.crate.Transition;
@@ -1323,7 +1324,7 @@ pub const App = struct {
                 const after = if (b + bucket <= analysis.waveform.len) spanLevel(analysis.waveform, b, b + bucket, scale) else current;
                 const smoothed = before * 0.25 + current * 0.5 + after * 0.25;
                 const height = rect.h * smoothed;
-                const color = if (has_bands) bandsTint(analysis.bands[a..b]) else bandColor(smoothed);
+                const color = if (has_bands) waveColor(wave_colour.tintBands(wave_colour.chosen_scheme, wave_colour.chosen_curve, smoothed, analysis.bands[a..b])) else bandColor(smoothed);
                 fillRectInto(&builder, rect.x + x, rect.bottom() - height, step, height, color);
             }
         }
@@ -1369,7 +1370,7 @@ pub const App = struct {
             const level = @min(255, @max(average * 1.15, @as(f32, @floatFromInt(peak)) * 0.6) * scale * 0.55) / 255;
             smoothed = smoothed * 0.75 + level * 0.25;
             const height = rect.h * smoothed;
-            const color = if (has_bands) bandsTint(analysis.bands[from..to]) else bandColor(smoothed);
+            const color = if (has_bands) waveColor(wave_colour.tintBands(wave_colour.chosen_scheme, wave_colour.chosen_curve, smoothed, analysis.bands[from..to])) else bandColor(smoothed);
             fillRectInto(&builder, rect.x + x, rect.bottom() - height, 6, height, color);
         }
     }
@@ -1784,8 +1785,6 @@ pub fn fade(color: dvui.Color, alpha: u8) dvui.Color {
 /// the colour through orange towards white.
 /// Heat map: quiet reads indigo, body red and orange, peaks yellow. The
 /// waveform carries one amplitude byte, so loudness is the only information.
-/// Rekordbox's band colours at full saturation: kick red, mid green, high
-/// blue. The strongest band fills its channel; loudness is the column height.
 fn spanLevel(samples: []const u8, from: usize, to: usize, scale: f32) f32 {
     var peak: u8 = 0;
     var sum: usize = 0;
@@ -1797,32 +1796,12 @@ fn spanLevel(samples: []const u8, from: usize, to: usize, scale: f32) f32 {
     return @min(255, @max(average * 1.15, @as(f32, @floatFromInt(peak)) * 0.6) * scale * 0.55) / 255;
 }
 
-pub fn bandsTint(bands: []const pl.analysis.Band) dvui.Color {
-    var low: f32 = 0;
-    var mid: f32 = 0;
-    var high: f32 = 0;
-    for (bands) |band| {
-        low += @floatFromInt(band.low);
-        mid += @floatFromInt(band.mid);
-        high += @floatFromInt(band.high);
-    }
-    const strongest = @max(@max(low, mid), high);
-    if (strongest < 0.001) return Palette.field;
-    const scale = 255 / strongest;
-    return .{
-        .r = @intFromFloat(low * scale),
-        .g = @intFromFloat(mid * scale),
-        .b = @intFromFloat(high * scale),
-        .a = 0xff,
-    };
+fn waveColor(color: wave_colour.Color) dvui.Color {
+    return .{ .r = color.r, .g = color.g, .b = color.b, .a = color.a };
 }
 
 pub fn bandColor(level: f32) dvui.Color {
-    const t = std.math.clamp(level, 0, 1);
-    if (t < 0.25) return mixColor(Palette.heat0, Palette.heat1, t / 0.25);
-    if (t < 0.5) return mixColor(Palette.heat1, Palette.heat2, (t - 0.25) / 0.25);
-    if (t < 0.75) return mixColor(Palette.heat2, Palette.heat3, (t - 0.5) / 0.25);
-    return mixColor(Palette.heat3, Palette.heat4, (t - 0.75) / 0.25);
+    return waveColor(wave_colour.heat(level));
 }
 
 pub fn mixColor(a: dvui.Color, b: dvui.Color, t: f32) dvui.Color {
