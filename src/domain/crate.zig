@@ -59,6 +59,12 @@ pub const Crate = struct {
         if (index < self.items.items.len) self.seed = index;
     }
 
+    /// Empties the crate and forgets the seed: the starting state.
+    pub fn clear(self: *Crate) void {
+        self.items.clearRetainingCapacity();
+        self.seed = null;
+    }
+
     /// Append and return the new index.
     pub fn append(self: *Crate, t: Track) !usize {
         try self.items.append(self.allocator, t);
@@ -171,6 +177,18 @@ const T = struct {
         return t;
     }
 };
+
+test "clear empties the crate and drops the seed" {
+    var c = Crate.init(std.testing.allocator);
+    defer c.deinit();
+    _ = try c.append(try T.make(1, 12800, "Am"));
+    _ = try c.append(try T.make(2, 12800, "Em"));
+    try std.testing.expect(c.seedTrack() != null);
+
+    c.clear();
+    try std.testing.expectEqual(@as(usize, 0), c.len());
+    try std.testing.expect(c.seedTrack() == null);
+}
 
 test "append and seed" {
     var c = Crate.init(std.testing.allocator);
