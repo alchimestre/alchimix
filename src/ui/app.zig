@@ -84,6 +84,9 @@ pub const App = struct {
     note_names: bool = false,
     /// Beats shown across a preview lane: 16, 32 or 64.
     beats_visible: u8 = 16,
+    /// Waveform colour scheme and intensity curve, chosen live.
+    wave_scheme: wave_colour.Scheme = .band_rgb,
+    wave_curve: wave_colour.Curve = .linear,
     /// Candidates the tempo window admits, so the field shows its effect even
     /// when the top of the list looks the same.
     in_range: usize = 0,
@@ -252,6 +255,37 @@ pub const App = struct {
 
         var spacer = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal });
         spacer.deinit();
+    }
+
+    /// Live colour scheme and intensity curve for the waveform.
+    fn frameWaveColour(self: *App) void {
+        const schemes = [_][]const u8{ "rgb", "rgb · level", "pastel", "heat" };
+        var scheme: usize = @intFromEnum(self.wave_scheme);
+        if (dvui.dropdown(@src(), &schemes, .{ .choice = &scheme }, .{}, .{
+            .min_size_content = .{ .w = 112, .h = 26 },
+            .margin = .{ .x = 6, .y = 4 },
+            .padding = .{ .x = 6, .y = 2 },
+            .background = true,
+            .color_fill = .{ .color = Palette.field },
+            .font = metaFont(),
+        })) {
+            self.wave_scheme = @enumFromInt(scheme);
+            dvui.refresh(null, @src(), null);
+        }
+
+        const curves = [_][]const u8{ "linear", "sqrt", "square", "fixed" };
+        var curve: usize = @intFromEnum(self.wave_curve);
+        if (dvui.dropdown(@src(), &curves, .{ .choice = &curve }, .{}, .{
+            .min_size_content = .{ .w = 92, .h = 26 },
+            .margin = .{ .x = 4, .y = 4 },
+            .padding = .{ .x = 6, .y = 2 },
+            .background = true,
+            .color_fill = .{ .color = Palette.field },
+            .font = metaFont(),
+        })) {
+            self.wave_curve = @enumFromInt(curve);
+            dvui.refresh(null, @src(), null);
+        }
     }
 
     /// Three fixed spans. The active one is filled, so the current width reads
@@ -1201,7 +1235,7 @@ pub const App = struct {
 
             fillRect(self.allocator, bar_rect.x, bar_rect.y, bar_rect.w, bar_rect.h, Palette.field);
             if (lane.analysis) |*analysis| {
-                paintOverview(self.allocator, analysis, bar_rect);
+                paintOverview(self.allocator, analysis, bar_rect, self.wave_scheme, self.wave_curve);
             }
 
             const window_x = bar_rect.x + bar_rect.w * start;
@@ -1324,7 +1358,7 @@ pub const App = struct {
                 const after = if (b + bucket <= analysis.waveform.len) spanLevel(analysis.waveform, b, b + bucket, scale) else current;
                 const smoothed = before * 0.25 + current * 0.5 + after * 0.25;
                 const height = rect.h * smoothed;
-                const color = if (has_bands) waveColor(wave_colour.tintBands(wave_colour.chosen_scheme, wave_colour.chosen_curve, smoothed, analysis.bands[a..b])) else bandColor(smoothed);
+                const color = if (has_bands) waveColor(wave_colour.tintBands(self.wave_scheme, self.wave_curve, smoothed, analysis.bands[a..b])) else bandColor(smoothed);
                 fillRectInto(&builder, rect.x + x, rect.bottom() - height, step, height, color);
             }
         }
@@ -1344,7 +1378,7 @@ pub const App = struct {
 
     /// The whole track at the lane's width, so the navigator reads as a
     /// waveform rather than a slider.
-    fn paintOverview(allocator: std.mem.Allocator, analysis: *const pl.analysis.Analysis, rect: hit.Rect) void {
+    fn paintOverview(allocator: std.mem.Allocator, analysis: *const pl.analysis.Analysis, rect: hit.Rect, scheme: wave_colour.Scheme, curve: wave_colour.Curve) void {
         if (rect.w <= 0 or rect.h <= 0 or analysis.waveform.len == 0) return;
         const len: f32 = @floatFromInt(analysis.waveform.len);
         const scale: f32 = 255 / @as(f32, @floatFromInt(@max(1, analysis.peak)));
@@ -1370,7 +1404,7 @@ pub const App = struct {
             const level = @min(255, @max(average * 1.15, @as(f32, @floatFromInt(peak)) * 0.6) * scale * 0.55) / 255;
             smoothed = smoothed * 0.75 + level * 0.25;
             const height = rect.h * smoothed;
-            const color = if (has_bands) waveColor(wave_colour.tintBands(wave_colour.chosen_scheme, wave_colour.chosen_curve, smoothed, analysis.bands[from..to])) else bandColor(smoothed);
+            const color = if (has_bands) waveColor(wave_colour.tintBands(scheme, curve, smoothed, analysis.bands[from..to])) else bandColor(smoothed);
             fillRectInto(&builder, rect.x + x, rect.bottom() - height, 6, height, color);
         }
     }
@@ -1880,6 +1914,7 @@ fn frameFooter(app: *App) void {
     var spacer2 = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal });
     spacer2.deinit();
 
+    app.frameWaveColour();
     app.frameWidthSelector();
     app.frameMaster();
 }
