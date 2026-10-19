@@ -1313,6 +1313,10 @@ pub const App = struct {
         const origin_bucket: usize = if (start_sample <= 0) 0 else @as(usize, @intFromFloat(@floor(start_sample / @as(f32, @floatFromInt(bucket)))));
         const origin = origin_bucket * bucket;
 
+        // The grid sits under the bars: over them its half-transparent lines
+        // shimmered on the coloured waveform.
+        self.paintBeats(rect, start_beat, beat_offset);
+
         var a: usize = origin;
         while (a < analysis.waveform.len) : (a += bucket) {
             const b = @min(analysis.waveform.len, a + bucket);
@@ -1325,11 +1329,13 @@ pub const App = struct {
                 const smoothed = before * 0.25 + current * 0.5 + after * 0.25;
                 const height = rect.h * smoothed;
                 const color = if (has_bands) waveColor(wave_colour.tintBands(smoothed, analysis.bands[a..b])) else bandColor(smoothed);
-                fillRectInto(&builder, rect.x + x, rect.bottom() - height, step, height, color);
+                // Cover up to the next bucket so sub-pixel scrolling cannot
+                // leave seams that read as a flickering grid.
+                const next_x = (@as(f32, @floatFromInt(a + bucket)) - start_sample) / samples_per_px;
+                const width = @min(rect.w - x, @max(1, next_x - x));
+                fillRectInto(&builder, rect.x + x, rect.bottom() - height, width, height, color);
             }
         }
-
-        self.paintBeats(rect, start_beat, beat_offset);
     }
 
     fn paintBeats(self: *App, rect: hit.Rect, start_beat: f32, beat_offset: f32) void {
