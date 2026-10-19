@@ -84,8 +84,6 @@ pub const App = struct {
     note_names: bool = false,
     /// Beats shown across a preview lane: 16, 32 or 64.
     beats_visible: u8 = 16,
-    /// How strong a low hit must be before the kick line moves.
-    kick_gate: f32 = 0.35,
     /// Candidates the tempo window admits, so the field shows its effect even
     /// when the top of the list looks the same.
     in_range: usize = 0,
@@ -1319,8 +1317,6 @@ pub const App = struct {
         // shimmered on the coloured waveform.
         self.paintBeats(rect, start_beat, beat_offset);
 
-        var line_ready = false;
-        var line_y: f32 = 0;
         var a: usize = origin;
         while (a < analysis.waveform.len) : (a += bucket) {
             const b = @min(analysis.waveform.len, a + bucket);
@@ -1339,26 +1335,6 @@ pub const App = struct {
                 const color = if (has_bands) waveColor(wave_colour.tintBands(smoothed, analysis.bands[a..b])) else bandColor(smoothed);
                 fillRectInto(&builder, rect.x + x, rect.bottom() - height, width, height, color);
 
-                if (has_bands) {
-                    // Kick indicator: the low band must be both loud and
-                    // dominant. Below the gate the line stays on the floor.
-                    const bands = bandMeans(analysis.bands, a, b, bucket);
-                    const total = bands.low + bands.mid + bands.high;
-                    const share = if (total > 0.001) bands.low / total else 0;
-                    const score = bands.low * share;
-                    const span = @max(0.001, 1 - self.kick_gate);
-                    const gated = std.math.clamp((score - self.kick_gate) / span, 0, 1);
-                    const current_y = rect.bottom() - height * gated;
-                    if (line_ready) {
-                        const top = @min(line_y, current_y);
-                        const bottom = @max(line_y, current_y);
-                        fillRectInto(&builder, rect.x + x - 1, top, width + 1, @max(2, bottom - top + 2), waveColor(wave_colour.low_line));
-                    } else {
-                        fillRectInto(&builder, rect.x + x, current_y, width, 2, waveColor(wave_colour.low_line));
-                    }
-                    line_y = current_y;
-                    line_ready = true;
-                }
             }
         }
     }
@@ -1816,34 +1792,6 @@ pub fn fade(color: dvui.Color, alpha: u8) dvui.Color {
 /// the colour through orange towards white.
 /// Heat map: quiet reads indigo, body red and orange, peaks yellow. The
 /// waveform carries one amplitude byte, so loudness is the only information.
-const BandMeans = struct { low: f32, mid: f32, high: f32 };
-
-/// Symmetric 25/50/25 mean of each band across the current and neighbouring
-/// buckets, so the envelopes do not flicker while scrolling.
-fn bandMeans(bands: []const pl.analysis.Band, from: usize, to: usize, bucket: usize) BandMeans {
-    const current = meanBands(bands, from, to);
-    const before = if (from >= bucket) meanBands(bands, from - bucket, from) else current;
-    const after = if (to + bucket <= bands.len) meanBands(bands, to, to + bucket) else current;
-    return .{
-        .low = before.low * 0.25 + current.low * 0.5 + after.low * 0.25,
-        .mid = before.mid * 0.25 + current.mid * 0.5 + after.mid * 0.25,
-        .high = before.high * 0.25 + current.high * 0.5 + after.high * 0.25,
-    };
-}
-
-fn meanBands(bands: []const pl.analysis.Band, from: usize, to: usize) BandMeans {
-    var low: f32 = 0;
-    var mid: f32 = 0;
-    var high: f32 = 0;
-    for (bands[from..to]) |band| {
-        low += @floatFromInt(band.low);
-        mid += @floatFromInt(band.mid);
-        high += @floatFromInt(band.high);
-    }
-    const count = @as(f32, @floatFromInt(@max(1, to - from))) * 7;
-    return .{ .low = low / count, .mid = mid / count, .high = high / count };
-}
-
 fn spanLevel(samples: []const u8, from: usize, to: usize, scale: f32) f32 {
     var peak: u8 = 0;
     var sum: usize = 0;
@@ -1939,15 +1887,6 @@ fn frameFooter(app: *App) void {
     var spacer2 = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal });
     spacer2.deinit();
 
-    dvui.labelNoFmt(@src(), "kick", .{}, .{
-        .font = metaFont(),
-        .color_text = .{ .color = Palette.muted },
-        .margin = .{ .x = 6, .y = 4 },
-    });
-    _ = dvui.slider(@src(), .{ .fraction = &app.kick_gate }, .{
-        .min_size_content = .{ .w = 110, .h = 16 },
-        .margin = .{ .x = 4, .y = 4 },
-    });
     app.frameWidthSelector();
     app.frameMaster();
 }

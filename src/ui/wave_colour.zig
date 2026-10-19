@@ -7,8 +7,6 @@ const pl = @import("playlister");
 
 pub const Color = struct { r: u8, g: u8, b: u8, a: u8 = 0xff };
 
-/// The low-band envelope line drawn over the waveform.
-pub const low_line = Color{ .r = 0x9f, .g = 0xd8, .b = 0xff };
 
 
 /// Mean band levels over a span, at the waveform's brightness.
