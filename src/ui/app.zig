@@ -84,6 +84,8 @@ pub const App = struct {
     note_names: bool = false,
     /// Beats shown across a preview lane: 16, 32 or 64.
     beats_visible: u8 = 16,
+    /// How strong a low hit must be before the kick line moves.
+    kick_gate: f32 = 0.35,
     /// Candidates the tempo window admits, so the field shows its effect even
     /// when the top of the list looks the same.
     in_range: usize = 0,
@@ -1338,12 +1340,15 @@ pub const App = struct {
                 fillRectInto(&builder, rect.x + x, rect.bottom() - height, width, height, color);
 
                 if (has_bands) {
-                    // Same vertical scale as the bar: the line rides the top of
-                    // the low band's share of that bar, so it stays low.
+                    // Kick indicator: the low band must be both loud and
+                    // dominant. Below the gate the line stays on the floor.
                     const bands = bandMeans(analysis.bands, a, b, bucket);
                     const total = bands.low + bands.mid + bands.high;
                     const share = if (total > 0.001) bands.low / total else 0;
-                    const current_y = rect.bottom() - height * share;
+                    const score = bands.low * share;
+                    const span = @max(0.001, 1 - self.kick_gate);
+                    const gated = std.math.clamp((score - self.kick_gate) / span, 0, 1);
+                    const current_y = rect.bottom() - height * gated;
                     if (line_ready) {
                         const top = @min(line_y, current_y);
                         const bottom = @max(line_y, current_y);
@@ -1934,6 +1939,15 @@ fn frameFooter(app: *App) void {
     var spacer2 = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal });
     spacer2.deinit();
 
+    dvui.labelNoFmt(@src(), "kick", .{}, .{
+        .font = metaFont(),
+        .color_text = .{ .color = Palette.muted },
+        .margin = .{ .x = 6, .y = 4 },
+    });
+    _ = dvui.slider(@src(), .{ .fraction = &app.kick_gate }, .{
+        .min_size_content = .{ .w = 110, .h = 16 },
+        .margin = .{ .x = 4, .y = 4 },
+    });
     app.frameWidthSelector();
     app.frameMaster();
 }
