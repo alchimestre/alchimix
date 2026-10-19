@@ -918,18 +918,11 @@ pub const App = struct {
                 dvui.refresh(null, @src(), null);
             },
             .toggle_transport => {
-                const group = self.transportGroup();
-                var any = false;
-                for (group) |index| {
-                    if (self.transport.isPlaying(index)) {
-                        any = true;
-                        break;
-                    }
-                }
-                if (any) {
-                    self.transport.stopGroup(group);
+                // Stop is global; play starts only the braced four lanes.
+                if (self.transport.anyPlaying()) {
+                    self.transport.stopAll();
                 } else {
-                    self.transport.startGroup(group);
+                    self.transport.startGroup(self.transportGroup());
                 }
                 dvui.refresh(null, @src(), null);
             },
@@ -1525,9 +1518,9 @@ pub const App = struct {
         var builder = dvui.Path.Builder.init(self.allocator);
         defer builder.deinit();
         // Clear of the trim bar, and thick enough to grab.
-        const x = self.lane_right + 56;
+        const x = self.lane_right + 90;
         const mid = (top + bottom) / 2;
-        const thickness: f32 = 7;
+        const thickness: f32 = 11;
         const color: dvui.Color = .{ .r = 0xbd, .g = 0x93, .b = 0xf9, .a = 0xff };
 
         fillRectInto(&builder, x, top, thickness, mid - top - 8, color);
@@ -1541,9 +1534,9 @@ pub const App = struct {
         fillRectInto(&builder, x + thickness, mid + 5, 4, thickness, color);
 
         self.hit_map.append(.{
-            .x = x - 14,
+            .x = x - 18,
             .y = top,
-            .w = 36,
+            .w = 48,
             .h = bottom - top,
         }, .group);
     }
