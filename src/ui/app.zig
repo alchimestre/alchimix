@@ -1304,26 +1304,28 @@ pub const App = struct {
 
         const has_bands = analysis.bands.len == analysis.waveform.len;
 
-        var x: f32 = 0;
-        var smoothed: f32 = 0.35;
-        while (x < rect.w) : (x += 6) {
-            const from: usize = @intFromFloat(@max(0, start_sample + x * samples_per_px));
-            if (from >= analysis.waveform.len) break;
-            const to: usize = @min(analysis.waveform.len, @as(usize, @intFromFloat(@max(0, start_sample + (x + 3) * samples_per_px))));
+        // Buckets are anchored to the audio, not to the screen: a bar keeps the
+        // same height as it scrolls. Smoothing looks both ways for the same
+        // reason, instead of carrying state from the left edge.
+        const step: f32 = 6;
+        const bucket: usize = @max(1, @as(usize, @intFromFloat(@round(samples_per_px * step))));
+        const origin_bucket: usize = if (start_sample <= 0) 0 else @as(usize, @intFromFloat(@floor(start_sample / @as(f32, @floatFromInt(bucket)))));
+        const origin = origin_bucket * bucket;
 
-            var peak: u8 = 0;
-            var sum: usize = 0;
-            for (analysis.waveform[from..to]) |value| {
-                peak = @max(peak, value);
-                sum += value;
+        var a: usize = origin;
+        while (a < analysis.waveform.len) : (a += bucket) {
+            const b = @min(analysis.waveform.len, a + bucket);
+            const x = (@as(f32, @floatFromInt(a)) - start_sample) / samples_per_px;
+            if (x >= rect.w) break;
+            if (x + step > 0) {
+                const current = spanLevel(analysis.waveform, a, b, scale);
+                const before = if (a >= bucket) spanLevel(analysis.waveform, a - bucket, a, scale) else current;
+                const after = if (b + bucket <= analysis.waveform.len) spanLevel(analysis.waveform, b, b + bucket, scale) else current;
+                const smoothed = before * 0.25 + current * 0.5 + after * 0.25;
+                const height = rect.h * smoothed;
+                const color = if (has_bands) bandsTint(analysis.bands[a..b]) else bandColor(smoothed);
+                fillRectInto(&builder, rect.x + x, rect.bottom() - height, step, height, color);
             }
-            const average = @as(f32, @floatFromInt(sum)) / @as(f32, @floatFromInt(@max(1, to - from)));
-            const level = @min(255, @max(average * 1.15, @as(f32, @floatFromInt(peak)) * 0.6) * scale * 0.55) / 255;
-            // Heavy smoothing along x turns per-column spikes into hills.
-            smoothed = smoothed * 0.75 + level * 0.25;
-            const height = rect.h * smoothed;
-            const color = if (has_bands) bandsTint(analysis.bands[from..to]) else bandColor(smoothed);
-            fillRectInto(&builder, rect.x + x, rect.bottom() - height, 6, height, color);
         }
 
         self.paintBeats(rect, start_beat, beat_offset);
@@ -1784,6 +1786,17 @@ pub fn fade(color: dvui.Color, alpha: u8) dvui.Color {
 /// waveform carries one amplitude byte, so loudness is the only information.
 /// Rekordbox's band colours at full saturation: kick red, mid green, high
 /// blue. The strongest band fills its channel; loudness is the column height.
+fn spanLevel(samples: []const u8, from: usize, to: usize, scale: f32) f32 {
+    var peak: u8 = 0;
+    var sum: usize = 0;
+    for (samples[from..to]) |value| {
+        peak = @max(peak, value);
+        sum += value;
+    }
+    const average = @as(f32, @floatFromInt(sum)) / @as(f32, @floatFromInt(@max(1, to - from)));
+    return @min(255, @max(average * 1.15, @as(f32, @floatFromInt(peak)) * 0.6) * scale * 0.55) / 255;
+}
+
 pub fn bandsTint(bands: []const pl.analysis.Band) dvui.Color {
     var low: f32 = 0;
     var mid: f32 = 0;
