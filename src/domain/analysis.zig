@@ -7,6 +7,13 @@
 
 const std = @import("std");
 
+/// One column of rekordbox's three-band colour waveform, 0..7 per band.
+pub const Band = struct {
+    low: u3,
+    mid: u3,
+    high: u3,
+};
+
 pub const Beat = struct {
     time_ms: u32,
     bpm: f32,
@@ -20,6 +27,9 @@ pub const Analysis = struct {
     beats: []Beat,
     /// One sample per 1/150 s of the track.
     waveform: []u8,
+    /// Three-band levels on the same 1/150 s grid. Empty when the file only
+    /// carries the mono preview.
+    bands: []Band,
     /// Loudest sample in the waveform, so a track can be coloured against its
     /// own range rather than an absolute one.
     peak: u8,
@@ -73,6 +83,7 @@ pub const Analysis = struct {
     pub fn deinit(self: *Analysis, allocator: std.mem.Allocator) void {
         allocator.free(self.beats);
         allocator.free(self.waveform);
+        if (self.bands.len > 0) allocator.free(self.bands);
         self.* = undefined;
     }
 };
@@ -81,7 +92,7 @@ pub const ParseError = error{NoBeatGrid, Malformed};
 
 pub fn parse(allocator: std.mem.Allocator, dat: []const u8, ext: []const u8) !Analysis {
     const grid = section(dat, "PQTZ") orelse return error.NoBeatGrid;
-    const preview = section(ext, "PWV3") orelse return error.Malformed;
+    const preview = entries(ext, "PWV3") orelse return error.Malformed;
 
     var beats: std.ArrayListUnmanaged(Beat) = .empty;
     errdefer beats.deinit(allocator);
@@ -105,14 +116,48 @@ pub fn parse(allocator: std.mem.Allocator, dat: []const u8, ext: []const u8) !An
     const waveform = try allocator.dupe(u8, preview);
     errdefer allocator.free(waveform);
 
+    var bands: []Band = &.{};
+    if (entries(ext, "PWV5")) |color| {
+        bands = try allocator.alloc(Band, waveform.len);
+        errdefer allocator.free(bands);
+        const sharp = @min(waveform.len, color.len / 2);
+        for (bands, 0..) |*band, i| {
+            if (i >= sharp) {
+                band.* = .{ .low = 0, .mid = 0, .high = 0 };
+                continue;
+            }
+            // Bits 15-13 red (kick), 12-10 green (mid), 9-7 blue (high),
+            // 6-2 height. Red, green and blue are the band levels.
+            const value = std.mem.readInt(u16, color[i * 2 ..][0..2], .big);
+            band.* = .{
+                .low = @intCast((value >> 13) & 0x7),
+                .mid = @intCast((value >> 10) & 0x7),
+                .high = @intCast((value >> 7) & 0x7),
+            };
+        }
+    }
+
     var peak: u8 = 0;
     for (waveform) |sample| peak = @max(peak, sample);
 
     return .{
         .beats = try beats.toOwnedSlice(allocator),
         .waveform = waveform,
+        .bands = bands,
         .peak = peak,
     };
+}
+
+/// The entry bytes of a waveform section, past its twelve-byte header.
+fn entries(file: []const u8, tag: []const u8) ?[]const u8 {
+    const body = section(file, tag) orelse return null;
+    if (body.len < 12) return null;
+    const entry_bytes = std.mem.readInt(u32, body[0..4], .big);
+    const count = std.mem.readInt(u32, body[4..8], .big);
+    if (entry_bytes == 0) return null;
+    const needed = std.math.mul(u32, entry_bytes, count) catch return null;
+    if (needed > body.len - 12) return null;
+    return body[12..][0..needed];
 }
 
 fn section(file: []const u8, tag: []const u8) ?[]const u8 {
@@ -136,6 +181,18 @@ fn writeSection(buffer: []u8, offset: usize, tag: []const u8, body: []const u8) 
     std.mem.writeInt(u32, buffer[offset + 8 ..][0..4], @intCast(12 + body.len), .big);
     @memcpy(buffer[offset + 12 ..][0..body.len], body);
     return offset + 12 + body.len;
+}
+
+fn writeWaveSection(buffer: []u8, offset: usize, tag: []const u8, entry_bytes: u32, count: u32, data: []const u8) usize {
+    const total = 24 + data.len;
+    @memcpy(buffer[offset..][0..4], tag);
+    std.mem.writeInt(u32, buffer[offset + 4 ..][0..4], 24, .big);
+    std.mem.writeInt(u32, buffer[offset + 8 ..][0..4], @intCast(total), .big);
+    std.mem.writeInt(u32, buffer[offset + 12 ..][0..4], entry_bytes, .big);
+    std.mem.writeInt(u32, buffer[offset + 16 ..][0..4], count, .big);
+    std.mem.writeInt(u32, buffer[offset + 20 ..][0..4], 0, .big);
+    @memcpy(buffer[offset + 24 ..][0..data.len], data);
+    return offset + total;
 }
 
 fn header(buffer: []u8) void {
@@ -163,7 +220,7 @@ test "reads the beat grid and the preview waveform" {
 
     var ext_buffer: [64]u8 = undefined;
     header(&ext_buffer);
-    const ext_end = writeSection(&ext_buffer, 28, "PWV3", &.{ 0, 40, 255 });
+    const ext_end = writeWaveSection(&ext_buffer, 28, "PWV3", 1, 3, &.{ 0, 40, 255 });
 
     var analysis = try parse(testing.allocator, dat_buffer[0..end], ext_buffer[0..ext_end]);
     defer analysis.deinit(testing.allocator);
@@ -173,6 +230,36 @@ test "reads the beat grid and the preview waveform" {
     try testing.expectApproxEqAbs(@as(f32, 128), analysis.bpm(), 0.001);
     try testing.expectEqualSlices(u8, &.{ 0, 40, 255 }, analysis.waveform);
     try testing.expectEqual(@as(u32, 1936), analysis.durationMs());
+}
+
+test "reads the three-band colour waveform" {
+    var dat_buffer: [128]u8 = undefined;
+    header(&dat_buffer);
+    var body: [4 + 8]u8 = undefined;
+    @memset(body[0..4], 0);
+    std.mem.writeInt(u16, body[4..6], 1, .big);
+    std.mem.writeInt(u16, body[6..8], 12800, .big);
+    std.mem.writeInt(u32, body[8..12], 1000, .big);
+    const dat_end = writeSection(&dat_buffer, 28, "PQTZ", &body);
+
+    var ext_buffer: [160]u8 = undefined;
+    header(&ext_buffer);
+    const after_wave = writeWaveSection(&ext_buffer, 28, "PWV3", 1, 2, &.{ 100, 50 });
+    var color: [4]u8 = undefined;
+    std.mem.writeInt(u16, color[0..2], (7 << 13) | (1 << 10) | (0 << 7) | (20 << 2), .big);
+    std.mem.writeInt(u16, color[2..4], (0 << 13) | (3 << 10) | (7 << 7) | (10 << 2), .big);
+    const ext_end = writeWaveSection(&ext_buffer, after_wave, "PWV5", 2, 2, &color);
+
+    var analysis = try parse(testing.allocator, dat_buffer[0..dat_end], ext_buffer[0..ext_end]);
+    defer analysis.deinit(testing.allocator);
+
+    try testing.expectEqual(@as(usize, 2), analysis.bands.len);
+    try testing.expectEqual(@as(u3, 7), analysis.bands[0].low);
+    try testing.expectEqual(@as(u3, 1), analysis.bands[0].mid);
+    try testing.expectEqual(@as(u3, 0), analysis.bands[0].high);
+    try testing.expectEqual(@as(u3, 0), analysis.bands[1].low);
+    try testing.expectEqual(@as(u3, 3), analysis.bands[1].mid);
+    try testing.expectEqual(@as(u3, 7), analysis.bands[1].high);
 }
 
 test "a file without a beat grid is rejected" {
@@ -194,7 +281,7 @@ test "the first downbeat follows the grid's bar phase" {
         .{ .time_ms = 1000, .bpm = 120, .position = 3 },
         .{ .time_ms = 1500, .bpm = 120, .position = 4 },
     };
-    var analysis = Analysis{ .beats = &beats, .waveform = &.{}, .peak = 0 };
+    var analysis = Analysis{ .beats = &beats, .waveform = &.{}, .bands = &.{}, .peak = 0 };
 
     analysis.beats[0].position = 1;
     try std.testing.expectEqual(@as(u32, 0), analysis.firstDownbeat());

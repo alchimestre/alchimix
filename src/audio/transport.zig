@@ -742,6 +742,7 @@ var test_beats: [16]analysis_mod.Beat = blk: {
 };
 
 const test_analysis = analysis_mod.Analysis{
+    .bands = &.{},
     .beats = &test_beats,
     .waveform = &test_waveform,
     .peak = 0,

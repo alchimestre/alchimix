@@ -1302,6 +1302,8 @@ pub const App = struct {
         var builder = dvui.Path.Builder.init(self.allocator);
         defer builder.deinit();
 
+        const has_bands = analysis.bands.len == analysis.waveform.len;
+
         var x: f32 = 0;
         var smoothed: f32 = 0.35;
         while (x < rect.w) : (x += 6) {
@@ -1320,7 +1322,8 @@ pub const App = struct {
             // Heavy smoothing along x turns per-column spikes into hills.
             smoothed = smoothed * 0.75 + level * 0.25;
             const height = rect.h * smoothed;
-            fillRectInto(&builder, rect.x + x, rect.bottom() - height, 6, height, bandColor(smoothed));
+            const color = if (has_bands) bandsTint(analysis.bands[from..to], smoothed) else bandColor(smoothed);
+            fillRectInto(&builder, rect.x + x, rect.bottom() - height, 6, height, color);
         }
 
         self.paintBeats(rect, start_beat, beat_offset);
@@ -1346,6 +1349,8 @@ pub const App = struct {
         var builder = dvui.Path.Builder.init(allocator);
         defer builder.deinit();
 
+        const has_bands = analysis.bands.len == analysis.waveform.len;
+
         var x: f32 = 0;
         var smoothed: f32 = 0.35;
         while (x < rect.w) : (x += 6) {
@@ -1362,7 +1367,8 @@ pub const App = struct {
             const level = @min(255, @max(average * 1.15, @as(f32, @floatFromInt(peak)) * 0.6) * scale * 0.55) / 255;
             smoothed = smoothed * 0.75 + level * 0.25;
             const height = rect.h * smoothed;
-            fillRectInto(&builder, rect.x + x, rect.bottom() - height, 6, height, bandColor(smoothed));
+            const color = if (has_bands) bandsTint(analysis.bands[from..to], smoothed) else bandColor(smoothed);
+            fillRectInto(&builder, rect.x + x, rect.bottom() - height, 6, height, color);
         }
     }
 
@@ -1776,6 +1782,26 @@ pub fn fade(color: dvui.Color, alpha: u8) dvui.Color {
 /// the colour through orange towards white.
 /// Heat map: quiet reads indigo, body red and orange, peaks yellow. The
 /// waveform carries one amplitude byte, so loudness is the only information.
+/// Rekordbox's band colours: kick red, mid green, high blue, dimmed by level.
+pub fn bandsTint(bands: []const pl.analysis.Band, level: f32) dvui.Color {
+    var low: f32 = 0;
+    var mid: f32 = 0;
+    var high: f32 = 0;
+    for (bands) |band| {
+        low += @floatFromInt(band.low);
+        mid += @floatFromInt(band.mid);
+        high += @floatFromInt(band.high);
+    }
+    const count = @as(f32, @floatFromInt(@max(1, bands.len))) * 7;
+    const lit = std.math.clamp(level, 0.12, 1) * 255;
+    return .{
+        .r = @intFromFloat(@min(1, 0.18 + low / count * 0.82) * lit),
+        .g = @intFromFloat(@min(1, 0.18 + mid / count * 0.82) * lit),
+        .b = @intFromFloat(@min(1, 0.18 + high / count * 0.82) * lit),
+        .a = 0xff,
+    };
+}
+
 pub fn bandColor(level: f32) dvui.Color {
     const t = std.math.clamp(level, 0, 1);
     if (t < 0.25) return mixColor(Palette.heat0, Palette.heat1, t / 0.25);
