@@ -1327,13 +1327,17 @@ pub const App = struct {
                 const before = if (a >= bucket) spanLevel(analysis.waveform, a - bucket, a, scale) else current;
                 const after = if (b + bucket <= analysis.waveform.len) spanLevel(analysis.waveform, b, b + bucket, scale) else current;
                 const smoothed = before * 0.25 + current * 0.5 + after * 0.25;
-                const height = rect.h * smoothed;
-                const color = if (has_bands) waveColor(wave_colour.tintBands(smoothed, analysis.bands[a..b])) else bandColor(smoothed);
                 // Cover up to the next bucket so sub-pixel scrolling cannot
                 // leave seams that read as a flickering grid.
                 const next_x = (@as(f32, @floatFromInt(a + bucket)) - start_sample) / samples_per_px;
                 const width = @min(rect.w - x, @max(1, next_x - x));
-                fillRectInto(&builder, rect.x + x, rect.bottom() - height, width, height, color);
+                if (has_bands) {
+                    const bands = bandMeans(analysis.bands, a, b, bucket);
+                    drawBand(&builder, rect, rect.x + x, width, bands);
+                } else {
+                    const height = rect.h * smoothed;
+                    fillRectInto(&builder, rect.x + x, rect.bottom() - height, width, height, bandColor(smoothed));
+                }
             }
         }
     }
@@ -1791,6 +1795,46 @@ pub fn fade(color: dvui.Color, alpha: u8) dvui.Color {
 /// the colour through orange towards white.
 /// Heat map: quiet reads indigo, body red and orange, peaks yellow. The
 /// waveform carries one amplitude byte, so loudness is the only information.
+const BandMeans = struct { low: f32, mid: f32, high: f32 };
+
+/// Symmetric 25/50/25 mean of each band across the current and neighbouring
+/// buckets, so the envelopes do not flicker while scrolling.
+fn bandMeans(bands: []const pl.analysis.Band, from: usize, to: usize, bucket: usize) BandMeans {
+    const current = meanBands(bands, from, to);
+    const before = if (from >= bucket) meanBands(bands, from - bucket, from) else current;
+    const after = if (to + bucket <= bands.len) meanBands(bands, to, to + bucket) else current;
+    return .{
+        .low = before.low * 0.25 + current.low * 0.5 + after.low * 0.25,
+        .mid = before.mid * 0.25 + current.mid * 0.5 + after.mid * 0.25,
+        .high = before.high * 0.25 + current.high * 0.5 + after.high * 0.25,
+    };
+}
+
+fn meanBands(bands: []const pl.analysis.Band, from: usize, to: usize) BandMeans {
+    var low: f32 = 0;
+    var mid: f32 = 0;
+    var high: f32 = 0;
+    for (bands[from..to]) |band| {
+        low += @floatFromInt(band.low);
+        mid += @floatFromInt(band.mid);
+        high += @floatFromInt(band.high);
+    }
+    const count = @as(f32, @floatFromInt(@max(1, to - from))) * 7;
+    return .{ .low = low / count, .mid = mid / count, .high = high / count };
+}
+
+/// One column of the three-band waveform: kick at the bottom, mids in the
+/// middle, highs at the top, each growing inside its third.
+fn drawBand(builder: *dvui.Path.Builder, rect: hit.Rect, x: f32, width: f32, bands: BandMeans) void {
+    const third = rect.h / 3;
+    const low_h = third * @sqrt(bands.low);
+    const mid_h = third * @sqrt(bands.mid);
+    const high_h = third * @sqrt(bands.high);
+    fillRectInto(builder, x, rect.bottom() - low_h, width, low_h, waveColor(wave_colour.low_color));
+    fillRectInto(builder, x, rect.bottom() - third - mid_h, width, mid_h, waveColor(wave_colour.mid_color));
+    fillRectInto(builder, x, rect.y + third - high_h, width, high_h, waveColor(wave_colour.high_color));
+}
+
 fn spanLevel(samples: []const u8, from: usize, to: usize, scale: f32) f32 {
     var peak: u8 = 0;
     var sum: usize = 0;
