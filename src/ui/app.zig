@@ -53,27 +53,10 @@ fn mixerLevel(context: *anyopaque, uid: u64) f32 {
     return mixer.level(uid);
 }
 
-/// Slider position for a tolerance: 0.5 at the left end, 5 at the centre,
-/// 20 at the right end.
-fn bpmFraction(pct: f32) f32 {
-    const value = std.math.clamp(pct, min_bpm_pct, max_bpm_pct);
-    return if (value <= default_bpm_pct)
-        0.5 * (value - min_bpm_pct) / (default_bpm_pct - min_bpm_pct)
-    else
-        0.5 + 0.5 * (value - default_bpm_pct) / (max_bpm_pct - default_bpm_pct);
+fn byBpmDesc(_: void, a: Candidate, b: Candidate) bool {
+    if (a.track.bpm_centi != b.track.bpm_centi) return a.track.bpm_centi > b.track.bpm_centi;
+    return a.rank < b.rank;
 }
-
-fn bpmPercent(fraction: f32) f32 {
-    const f = std.math.clamp(fraction, 0, 1);
-    return if (f <= 0.5)
-        min_bpm_pct + (default_bpm_pct - min_bpm_pct) * f / 0.5
-    else
-        default_bpm_pct + (max_bpm_pct - default_bpm_pct) * (f - 0.5) / 0.5;
-}
-
-const min_bpm_pct: f32 = 0.5;
-const max_bpm_pct: f32 = 20;
-const default_bpm_pct: f32 = 5;
 
 fn shortName(name: []const u8, buffer: *[32]u8) []const u8 {
     const limit: usize = 24;
@@ -162,8 +145,10 @@ pub const App = struct {
     last_point: hit.Point = .{},
 
     /// Tempo window for suggestions, as a percentage of the seed's BPM.
-    /// Tolerance around the seed BPM, in percent. The slider centres on 5.
     bpm_pct: f32 = 5,
+    bpm_text: std.ArrayList(u8) = .empty,
+    /// Suggestions ordered by BPM, highest first.
+    sort_by_bpm: bool = false,
 
     /// What the pointer is over, and what it is carrying. Filled while drawing,
     /// read on the next frame's pointer pass.
@@ -234,6 +219,7 @@ pub const App = struct {
         self.player.deinit();
         self.allocator.free(self.ranked);
         self.query.deinit(self.allocator);
+        self.bpm_text.deinit(self.allocator);
         if (self.selected_playlist) |id| {
             if (id.len > 0) self.allocator.free(id);
         }
@@ -253,6 +239,7 @@ pub const App = struct {
             .tolerance_bpm = tolerance,
         });
         self.in_range = self.ranked.len;
+        if (self.sort_by_bpm) std.mem.sort(Candidate, self.ranked, {}, byBpmDesc);
     }
 
     pub fn frame(self: *App) bool {
@@ -320,6 +307,30 @@ pub const App = struct {
 
         var spacer = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal });
         spacer.deinit();
+    }
+
+    /// Orders the suggestions by BPM. Dim and inert until there are any.
+    fn sortButton(self: *App) void {
+        const enabled = self.ranked.len > 0;
+        const active = enabled and self.sort_by_bpm;
+        var chip = dvui.box(@src(), .{ .dir = .horizontal }, .{
+            .min_size_content = .{ .w = 64, .h = 26 },
+            .margin = .{ .x = 6, .y = 2 },
+            .padding = .{ .x = 6, .y = 2 },
+            .background = true,
+            .color_fill = .{ .color = if (active) Palette.green else Palette.field },
+            .id_extra = 7110,
+        });
+        defer chip.deinit();
+
+        labelStyled(@src(), "bpm ↓", .{
+            .gravity_x = 0.5,
+            .gravity_y = 0.5,
+            .color_text = .{ .color = if (active) Palette.background else if (enabled) Palette.secondary else Palette.muted },
+            .font = metaFont(),
+            .id_extra = 7111,
+        });
+        if (enabled) self.hit_map.append(rectFrom(chip.data().contentRectScale().r), .sort_bpm);
     }
 
     /// Three fixed spans. The active one is filled, so the current width reads
@@ -695,25 +706,33 @@ pub const App = struct {
 
     /// Tempo window in percent: the list keeps tracks within this much of the
     /// selected track's BPM.
-    /// A bipolar tolerance control: the centre is the default ±5 %, moving
-    /// left narrows the window, moving right widens it.
     pub fn frameBpmWindow(self: *App) void {
-        var fraction = bpmFraction(self.bpm_pct);
+        if (self.bpm_text.items.len == 0) {
+            self.bpm_text.append(self.allocator, '5') catch {};
+        }
 
-        var label_buffer: [32]u8 = undefined;
-        const text = std.fmt.bufPrint(&label_buffer, "bpm ±{d:.1}", .{self.bpm_pct}) catch "bpm";
-        labelStyled(@src(), text, .{
+        labelStyled(@src(), "bpm ±", .{
             .color_text = .{ .color = Palette.muted },
             .font = metaFont(),
             .margin = .{ .x = 4, .y = 6 },
             .id_extra = 7100,
         });
 
-        const changed = dvui.slider(@src(), .{ .fraction = &fraction }, .{
-            .min_size_content = .{ .w = 180, .h = 24 },
-            .margin = .{ .x = 4, .y = 2 },
+        var entry = dvui.textEntry(@src(), .{
+            .text = .{ .array_list = .{ .backing = &self.bpm_text, .allocator = self.allocator } },
+        }, .{
+            .min_size_content = .{ .w = 46, .h = 26 },
+            .padding = .{ .x = 6, .y = 2 },
+            .margin = .{ .x = 2, .y = 2 },
+            .corners = square,
+            .background = true,
+            .color_fill = .{ .color = Palette.field },
+            .color_text = .{ .color = Palette.ink },
+            .font = metaFont(),
             .id_extra = 7101,
         });
+        const changed = entry.text_changed;
+        entry.deinit();
 
         var count_buffer: [24]u8 = undefined;
         const count = std.fmt.bufPrint(&count_buffer, "{d} in range", .{self.in_range}) catch "";
@@ -725,7 +744,8 @@ pub const App = struct {
         });
 
         if (!changed) return;
-        self.bpm_pct = bpmPercent(fraction);
+        const parsed = std.fmt.parseFloat(f32, std.mem.trim(u8, self.bpm_text.items, " ")) catch return;
+        self.bpm_pct = std.math.clamp(parsed, 0.5, 50);
         self.refresh() catch {};
     }
 
@@ -965,6 +985,11 @@ pub const App = struct {
                 dvui.refresh(null, @src(), null);
             },
             .clear_all => self.clearAll(),
+            .toggle_sort_bpm => {
+                self.sort_by_bpm = !self.sort_by_bpm;
+                self.refresh() catch {};
+                dvui.refresh(null, @src(), null);
+            },
             .select_playlist => |index| {
                 if (index >= self.playlists.len) return;
                 self.selectPlaylist(index);
@@ -2259,6 +2284,7 @@ fn frameSuggestFooter(app: *App) void {
     var bpm_row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal });
     defer bpm_row.deinit();
     app.frameBpmWindow();
+    app.sortButton();
 
     var filters = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal });
     defer filters.deinit();
