@@ -674,6 +674,7 @@ pub const App = struct {
                 }
                 dvui.refresh(null, @src(), null);
             },
+            .clear_all => self.clearAll(),
             .toggle_lane_play => |index| {
                 if (index >= self.grid.items.len) return;
                 if (self.transport.isPlaying(index)) {
@@ -979,6 +980,42 @@ pub const App = struct {
             .id_extra = 81,
         });
         self.hit_map.append(rectFrom(chip.data().rectScaleFromParent().r), .transport);
+    }
+
+    /// Empties the crate and returns every control to its starting value.
+    fn clearButton(self: *App) void {
+        var chip = dvui.box(@src(), .{ .dir = .horizontal }, .{
+            .margin = .{ .x = 18, .y = 4 },
+            .padding = .{ .x = 10, .y = 2 },
+            .background = true,
+            .color_fill = .{ .color = Palette.field },
+            .id_extra = 82,
+        });
+        defer chip.deinit();
+
+        labelStyled(@src(), "clear", .{
+            .color_text = .{ .color = Palette.muted },
+            .font = metaFont(),
+            .id_extra = 83,
+        });
+        self.hit_map.append(rectFrom(chip.data().rectScaleFromParent().r), .clear);
+    }
+
+    fn clearAll(self: *App) void {
+        self.player.stopAll();
+        self.transport.stopAll();
+        self.transport.beginSync();
+        self.transport.endSync();
+        self.crate.clear();
+        self.grid_dirty = true;
+        self.selected.clearRetainingCapacity();
+        self.query.clearRetainingCapacity();
+        self.master_text.clearRetainingCapacity();
+        self.master_bpm = 128;
+        self.master_locked = true;
+        self.bpm_pct = 5;
+        self.refresh() catch {};
+        dvui.refresh(null, @src(), null);
     }
 
     fn isSelected(self: *const App, index: usize) bool {
@@ -1818,6 +1855,7 @@ fn frameFooter(app: *App) void {
     spacer.deinit();
 
     app.transportToggle();
+    app.clearButton();
 
     var spacer2 = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal });
     spacer2.deinit();

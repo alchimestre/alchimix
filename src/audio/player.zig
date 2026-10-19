@@ -84,6 +84,11 @@ pub const Player = struct {
         if (self.holds(track_id)) self.stop();
     }
 
+    /// Stops whatever preview is running, wherever it was started from.
+    pub fn stopAll(self: *Player) void {
+        self.stop();
+    }
+
     /// Clears the preview once the snippet is over.
     pub fn poll(self: *Player) void {
         if (self.child == null or self.paused) return;
