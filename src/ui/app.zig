@@ -95,6 +95,9 @@ pub const App = struct {
     lane_rects: [64]hit.Rect = undefined,
     lane_drawn: [64]bool = @splat(false),
     lane_count: usize = 0,
+    /// Full row rectangles from the last frame, unclipped, for drop gaps.
+    block_rects: [256]hit.Rect = undefined,
+    block_count: usize = 0,
     lane_right: f32 = 0,
     /// First lane of the four-lane group global play/stop acts on.
     group_start: usize = 0,
@@ -771,6 +774,7 @@ pub const App = struct {
         self.lane_count = 0;
         self.lane_right = 0;
         self.lane_drawn = @splat(false);
+        self.block_count = 0;
 
         if (self.crate.len() == 0) {
             labelStyled(@src(), "Drag a track here to start the crate.", .{
@@ -867,7 +871,7 @@ pub const App = struct {
                     }
                 },
                 .motion => {
-                    if (self.drag.motion(p, 6 * self.scale_hint, self.canvas, &self.hit_map)) {
+                    if (self.drag.motion(p, 6 * self.scale_hint, self.canvas, self.block_rects[0..self.block_count])) {
                         dvui.refresh(null, @src(), null);
                     }
                     if (self.drag.pull(p)) |pull| self.applyPull(pull);
@@ -1943,6 +1947,10 @@ fn drawBlock(app: *App, index: usize, track: Track) Block {
     defer block.deinit();
 
     const rect = rectFrom(block.data().rectScaleFromParent().r);
+    if (index < app.block_rects.len) {
+        app.block_rects[index] = rect;
+        app.block_count = @max(app.block_count, index + 1);
+    }
     app.hit_map.append(rect.clipped(app.canvas), .{ .block = index });
 
     var removed = false;
