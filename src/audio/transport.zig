@@ -42,7 +42,7 @@ pub const Output = struct {
 };
 
 /// Whether a fresh lane waits for the next master bar or starts at once.
-pub const Join = enum { bar, now };
+pub const Join = enum { bar, now, next_bar };
 
 const Slot = struct {
     /// Unique identity for the mixer: a crate may hold the same track twice.
@@ -82,6 +82,9 @@ const Slot = struct {
     /// Set while the grid sync walks the crate.
     seen: bool = false,
 };
+
+/// How late a lane may start before it is moved to the next bar.
+const start_grace_ns: i128 = 20_000_000;
 
 pub const Transport = struct {
     allocator: std.mem.Allocator,
@@ -219,7 +222,14 @@ pub const Transport = struct {
                     changed = true;
                     continue;
                 },
-                .pending => {},
+                .pending => {
+                    // A rejoin can miss its bar while the decoder prefills.
+                    // Put it back on the next bar instead of joining mid-bar.
+                    if (slot.start_at_ns != 0 and now > slot.start_at_ns + start_grace_ns) {
+                        slot.start_at_ns = self.nextBarAt(now);
+                        changed = true;
+                    }
+                },
                 .started => |started| {
                     if (!slot.start_latched) {
                         if (!self.running) {
@@ -298,7 +308,7 @@ pub const Transport = struct {
         slot.beat_raw = target;
         self.snapToBar(slot);
         slot.manual = false;
-        if (was_playing) self.beginStart(slot, .bar);
+        if (was_playing) self.beginStart(slot, .next_bar);
     }
 
     /// Waveform drag: move by beats and land on the nearest beat.
@@ -338,7 +348,8 @@ pub const Transport = struct {
         self.jog = null;
         const slot = self.slotAt(index) orelse return;
         snapToBeat(slot);
-        self.beginStart(slot, self.jog_join);
+        const join: Join = if (self.jog_join == .bar) .next_bar else self.jog_join;
+        self.beginStart(slot, join);
     }
 
     /// Applies a whole EQ without restarting the decoder.
@@ -546,6 +557,7 @@ pub const Transport = struct {
         const now = self.nowNs();
         const start_at = switch (join) {
             .bar => self.barStartAt(now),
+            .next_bar => self.nextBarAt(now),
             .now => 0,
         };
         slot.playing = true;
@@ -560,6 +572,15 @@ pub const Transport = struct {
         if (!self.running) return 0;
         const phase = @mod(self.masterBeatAt(now), 4);
         const wait: f32 = if (phase > 0.25) 4 - phase else 0;
+        return now + @as(i128, @intFromFloat(@as(f64, wait) * 60 / self.bpm * 1_000_000_000));
+    }
+
+    /// The next master bar after `now`, never the current one: a lane rejoining
+    /// mid-song must not land a fraction of a beat after the other lanes.
+    fn nextBarAt(self: *Transport, now: i128) i128 {
+        if (!self.running) return 0;
+        const phase = @mod(self.masterBeatAt(now), 4);
+        const wait = 4 - phase;
         return now + @as(i128, @intFromFloat(@as(f64, wait) * 60 / self.bpm * 1_000_000_000));
     }
 
@@ -1113,7 +1134,7 @@ test "preview click while playing joins the next master bar" {
 
     const resumed = fake.playingLane(1) orelse return error.NoLane;
     try expectApprox(4.0, @floatCast(resumed.start_s));
-    try testing.expectEqual(@as(i128, 2_000_000_000), resumed.start_at_ns);
+    try testing.expect(@abs(@as(i128, 2_000_000_000) - resumed.start_at_ns) < 1_000);
 }
 
 test "preview drag release joins the next master bar" {
@@ -1140,7 +1161,57 @@ test "preview drag release joins the next master bar" {
 
     const resumed = fake.playingLane(1) orelse return error.NoLane;
     try expectApprox(2.0, @floatCast(resumed.start_s));
-    try testing.expectEqual(@as(i128, 2_000_000_000), resumed.start_at_ns);
+    try testing.expect(@abs(@as(i128, 2_000_000_000) - resumed.start_at_ns) < 1_000);
+}
+
+test "a seek just after a bar waits for the next one" {
+    var fake = FakeOutput{};
+    var clock = TestClock{};
+    var t = setup(&fake, &clock);
+    defer t.deinit();
+
+    t.beginSync();
+    t.resolve(0, laneInfo(1));
+    t.endSync();
+    t.start(0, .now);
+    fake.markStarted(1, 0);
+    t.sync();
+
+    // 0.1 of a beat after the master bar: close enough for a joint start, not
+    // for one lane rejoining the others.
+    clock.now = 50_000_000;
+    t.sync();
+    t.seek(0, 8);
+
+    const resumed = fake.playingLane(1) orelse return error.NoLane;
+    try testing.expect(@abs(@as(i128, 2_000_000_000) - resumed.start_at_ns) < 1_000);
+}
+
+test "a rejoin that misses its bar moves to the next bar" {
+    var fake = FakeOutput{};
+    var clock = TestClock{};
+    var t = setup(&fake, &clock);
+    defer t.deinit();
+
+    t.beginSync();
+    t.resolve(0, laneInfo(1));
+    t.resolve(1, laneInfo(2));
+    t.endSync();
+    t.start(0, .now);
+    t.start(1, .now);
+    fake.markStarted(1, 0);
+    fake.markStarted(2, 0);
+    t.sync();
+
+    clock.now = 500_000_000;
+    t.sync();
+    t.seek(0, 8);
+    // The restarted decoder has not prefil(d)ed by its bar.
+    clock.now = 2_050_000_000;
+    t.sync();
+
+    const resumed = fake.playingLane(1) orelse return error.NoLane;
+    try testing.expect(@abs(@as(i128, 4_000_000_000) - resumed.start_at_ns) < 1_000);
 }
 
 test "presets reach the mixer and moving a node clears them" {
