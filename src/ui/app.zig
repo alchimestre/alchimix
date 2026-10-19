@@ -314,9 +314,9 @@ pub const App = struct {
         const enabled = self.ranked.len > 0;
         const active = enabled and self.sort_by_bpm;
         var chip = dvui.box(@src(), .{ .dir = .horizontal }, .{
-            .min_size_content = .{ .w = 64, .h = 26 },
-            .margin = .{ .x = 6, .y = 2 },
-            .padding = .{ .x = 6, .y = 2 },
+            .min_size_content = .{ .w = 56, .h = 24 },
+            .margin = .{ .x = 4, .y = 2 },
+            .padding = .{ .x = 5, .y = 2 },
             .background = true,
             .color_fill = .{ .color = if (active) Palette.green else Palette.field },
             .id_extra = 7110,
@@ -753,9 +753,9 @@ pub const App = struct {
         const on = value.*;
         var widget: dvui.WidgetData = undefined;
         _ = dvui.button(@src(), glyph, .{}, .{
-            .min_size_content = .{ .w = 36, .h = 26 },
-            .margin = .{ .x = 6 },
-            .padding = .{ .x = 6, .y = 1 },
+            .min_size_content = .{ .w = 30, .h = 24 },
+            .margin = .{ .x = 3 },
+            .padding = .{ .x = 4, .y = 1 },
             .data_out = &widget,
             .id_extra = @intFromEnum(toggle) + 1,
             .corners = square,
@@ -1040,15 +1040,17 @@ pub const App = struct {
 
     fn masterBpm(self: *const App) f32 {
         if (!self.master_locked) return self.master_bpm;
+        // The library's BPM is what the rows and the ranking use; a grid tempo
+        // can disagree with it, and the field must not jump when it does.
+        if (self.crate.seedTrack()) |track| {
+            if (track.bpm > 0) return @floatCast(track.bpm);
+        }
         if (self.crate.seed) |seed| {
             if (seed < self.grid.items.len) {
                 if (self.grid.items[seed].analysis) |*analysis| {
                     if (analysis.bpm() > 0) return analysis.bpm();
                 }
             }
-        }
-        if (self.crate.seedTrack()) |track| {
-            if (track.bpm > 0) return @floatCast(track.bpm);
         }
         for (self.grid.items) |*lane| {
             if (lane.analysis) |*analysis| {
