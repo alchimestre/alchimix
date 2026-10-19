@@ -173,9 +173,9 @@ pub const App = struct {
     /// Every visible row is a real widget, so the list is capped.
     const visible_rows = 60;
     const lane_panel_width: f32 = 380;
-    /// Toolbar plus the two-row footer, measured once and fixed: reading them
-    /// back made a resize lag a frame and flicker.
-    const chrome_height: f32 = 132;
+    /// Toolbar plus footer, measured once and fixed: reading them back made a
+    /// resize lag a frame and flicker.
+    const chrome_height: f32 = 104;
 
     pub fn init(allocator: std.mem.Allocator, library: pl.library.Library, io: std.Io) !App {
         const mixer = try allocator.create(pl.mixer.Mixer);
@@ -315,6 +315,7 @@ pub const App = struct {
         const active = enabled and self.sort_by_bpm;
         var chip = dvui.box(@src(), .{ .dir = .horizontal }, .{
             .min_size_content = .{ .w = 56, .h = 24 },
+            .gravity_y = 0.5,
             .margin = .{ .x = 4, .y = 0 },
             .padding = .{ .x = 5, .y = 0 },
             .background = true,
@@ -769,6 +770,7 @@ pub const App = struct {
         var widget: dvui.WidgetData = undefined;
         _ = dvui.button(@src(), glyph, .{}, .{
             .min_size_content = .{ .w = 30, .h = 24 },
+            .gravity_y = 0.5,
             .margin = .{ .x = 3, .y = 0 },
             .padding = .{ .x = 4, .y = 0 },
             .data_out = &widget,
@@ -2307,33 +2309,8 @@ fn pointFrom(point: dvui.Point.Physical) hit.Point {
     return .{ .x = point.x, .y = point.y };
 }
 
-/// Along the bottom: the direction filters on the left, the tempo window and
-/// the colour key on the right.
-/// The strip under the suggestion column: the direction filters centred in the
-/// column's width, matching the list above.
-fn frameSuggestFooter(app: *App) void {
-    var col = dvui.box(@src(), .{ .dir = .vertical }, .{
-        .min_size_content = .{ .w = 420 },
-        .max_size_content = .{ .w = 420, .h = 100000 },
-        .expand = .vertical,
-    });
-    defer col.deinit();
-
-    {
-        var bpm_row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal });
-        defer bpm_row.deinit();
-        app.frameBpmWindow();
-        app.sortButton();
-    }
-
-    {
-        var filters = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal });
-        defer filters.deinit();
-        app.energyToggle("=", Palette.green, &app.filter_hold, .hold);
-        app.energyToggle("↑", Palette.orange, &app.filter_up, .up);
-        app.energyToggle("↓", Palette.orange, &app.filter_down, .down);
-    }
-}
+/// Along the bottom: the BPM window and direction filters on the left, the
+/// transport, span and master on the right, all on one centreline.
 
 fn frameFooter(app: *App) void {
     var bar = dvui.box(@src(), .{ .dir = .horizontal }, .{
@@ -2345,9 +2322,12 @@ fn frameFooter(app: *App) void {
     });
     defer bar.deinit();
 
-    frameSuggestFooter(app);
+    app.frameBpmWindow();
+    app.sortButton();
+    app.energyToggle("=", Palette.green, &app.filter_hold, .hold);
+    app.energyToggle("↑", Palette.orange, &app.filter_up, .up);
+    app.energyToggle("↓", Palette.orange, &app.filter_down, .down);
 
-    // Key and tempo sit past the suggestion column, not under it.
     app.notationToggle();
 
     var spacer = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal });
