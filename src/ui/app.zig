@@ -1040,17 +1040,17 @@ pub const App = struct {
 
     fn masterBpm(self: *const App) f32 {
         if (!self.master_locked) return self.master_bpm;
-        // The library's BPM is what the rows and the ranking use; a grid tempo
-        // can disagree with it, and the field must not jump when it does.
-        if (self.crate.seedTrack()) |track| {
-            if (track.bpm > 0) return @floatCast(track.bpm);
-        }
+        // The grid is the tempo the audio actually follows, so the clock must
+        // use it: a tag that disagrees would make every bar drift.
         if (self.crate.seed) |seed| {
             if (seed < self.grid.items.len) {
                 if (self.grid.items[seed].analysis) |*analysis| {
                     if (analysis.bpm() > 0) return analysis.bpm();
                 }
             }
+        }
+        if (self.crate.seedTrack()) |track| {
+            if (track.bpm > 0) return @floatCast(track.bpm);
         }
         for (self.grid.items) |*lane| {
             if (lane.analysis) |*analysis| {
