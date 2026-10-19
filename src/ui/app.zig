@@ -10,7 +10,6 @@ const std = @import("std");
 const dvui = @import("dvui");
 const pl = @import("playlister");
 const hit = @import("hit.zig");
-const wave = @import("wave.zig");
 
 const Track = pl.track.Track;
 const Transition = pl.crate.Transition;
@@ -62,9 +61,6 @@ fn presetName(preset: pl.mixer.EqPreset) []const u8 {
     };
 }
 
-pub const WaveStyle = enum { silhouette, outline_body, band_rows };
-
-pub const wave_style_labels = [_][]const u8{ "silhouette", "outline + body", "band rows" };
 
 pub const App = struct {
     allocator: std.mem.Allocator,
@@ -87,8 +83,6 @@ pub const App = struct {
     note_names: bool = false,
     /// Beats shown across a preview lane: 16, 32 or 64.
     beats_visible: u8 = 16,
-    /// How the lane waveform is drawn.
-    waveform: WaveStyle = .silhouette,
     /// Candidates the tempo window admits, so the field shows its effect even
     /// when the top of the list looks the same.
     in_range: usize = 0,
@@ -257,22 +251,6 @@ pub const App = struct {
 
         var spacer = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal });
         spacer.deinit();
-    }
-
-    /// The style menu for the lane waveform, next to the span selector.
-    fn frameWaveformSelector(self: *App) void {
-        var choice: usize = @intFromEnum(self.waveform);
-        if (dvui.dropdown(@src(), &wave_style_labels, .{ .choice = &choice }, .{}, .{
-            .min_size_content = .{ .w = 132, .h = 26 },
-            .margin = .{ .x = 8, .y = 4 },
-            .padding = .{ .x = 6, .y = 2 },
-            .background = true,
-            .color_fill = .{ .color = Palette.field },
-            .font = metaFont(),
-        })) {
-            self.waveform = @enumFromInt(choice);
-            dvui.refresh(null, @src(), null);
-        }
     }
 
     /// Three fixed spans. The active one is filled, so the current width reads
@@ -1279,6 +1257,7 @@ pub const App = struct {
         fillRect(self.allocator, rect.x, rect.y, rect.w, rect.h, Palette.field);
 
         const bpm = if (analysis.bpm() > 0) analysis.bpm() else 128;
+        const scale: f32 = 255 / @as(f32, @floatFromInt(@max(1, analysis.peak)));
         const samples_per_beat: f32 = @as(f32, pl.analysis.Analysis.samples_per_second) * 60 / bpm;
         const start_sample = start_beat * samples_per_beat;
         const samples_per_px = samples_per_beat * self.visibleBeats() / rect.w;
@@ -1286,103 +1265,28 @@ pub const App = struct {
         var builder = dvui.Path.Builder.init(self.allocator);
         defer builder.deinit();
 
-        switch (self.waveform) {
-            .silhouette => self.paintSilhouette(&builder, analysis, rect, start_sample, samples_per_px),
-            .outline_body => self.paintOutlineBody(&builder, analysis, rect, start_sample, samples_per_px),
-            .band_rows => self.paintBandRows(&builder, analysis, rect, start_sample, samples_per_px),
-        }
-
-        self.paintBeats(rect, start_beat, beat_offset);
-    }
-
-    const WaveSpan = struct { from: usize, to: usize };
-
-    fn waveSpan(analysis: *const pl.analysis.Analysis, start_sample: f32, samples_per_px: f32, x: f32, step: f32) WaveSpan {
-        const len = analysis.waveform.len;
-        if (len == 0) return .{ .from = 0, .to = 0 };
-        const from_f = @max(0, start_sample + x * samples_per_px);
-        const to_f = @max(from_f + 1, start_sample + (x + step) * samples_per_px);
-        const from: usize = @intFromFloat(@min(from_f, @as(f32, @floatFromInt(len - 1))));
-        const to: usize = @min(len, @as(usize, @intFromFloat(to_f)));
-        return .{ .from = from, .to = @max(to, @min(from + 1, len)) };
-    }
-
-    fn spanLevel(samples: []const u8, span: WaveSpan, scale: f32) f32 {
-        var peak: u8 = 0;
-        var sum: usize = 0;
-        for (samples[span.from..span.to]) |value| {
-            peak = @max(peak, value);
-            sum += value;
-        }
-        const average = @as(f32, @floatFromInt(sum)) / @as(f32, @floatFromInt(@max(1, span.to - span.from)));
-        return @min(255, @max(average * 1.15, @as(f32, @floatFromInt(peak)) * 0.6) * scale * 0.55) / 255;
-    }
-
-    fn paintSilhouette(_: *App, builder: *dvui.Path.Builder, analysis: *const pl.analysis.Analysis, rect: hit.Rect, start_sample: f32, samples_per_px: f32) void {
-        const scale: f32 = 255 / @as(f32, @floatFromInt(@max(1, analysis.peak)));
         var x: f32 = 0;
         var smoothed: f32 = 0.35;
         while (x < rect.w) : (x += 6) {
-            const span = waveSpan(analysis, start_sample, samples_per_px, x, 3);
-            if (span.to <= span.from) break;
-            const level = spanLevel(analysis.waveform, span, scale);
+            const from: usize = @intFromFloat(@max(0, start_sample + x * samples_per_px));
+            if (from >= analysis.waveform.len) break;
+            const to: usize = @min(analysis.waveform.len, @as(usize, @intFromFloat(@max(0, start_sample + (x + 3) * samples_per_px))));
+
+            var peak: u8 = 0;
+            var sum: usize = 0;
+            for (analysis.waveform[from..to]) |value| {
+                peak = @max(peak, value);
+                sum += value;
+            }
+            const average = @as(f32, @floatFromInt(sum)) / @as(f32, @floatFromInt(@max(1, to - from)));
+            const level = @min(255, @max(average * 1.15, @as(f32, @floatFromInt(peak)) * 0.6) * scale * 0.55) / 255;
             // Heavy smoothing along x turns per-column spikes into hills.
             smoothed = smoothed * 0.75 + level * 0.25;
             const height = rect.h * smoothed;
-            fillRectInto(builder, rect.x + x, rect.bottom() - height, 6, height, bandColor(smoothed));
+            fillRectInto(&builder, rect.x + x, rect.bottom() - height, 6, height, bandColor(smoothed));
         }
-    }
 
-    fn paintOutlineBody(_: *App, builder: *dvui.Path.Builder, analysis: *const pl.analysis.Analysis, rect: hit.Rect, start_sample: f32, samples_per_px: f32) void {
-        const scale: f32 = 255 / @as(f32, @floatFromInt(@max(1, analysis.peak)));
-        const body_scale = 1.15 / @as(f32, @floatFromInt(@max(1, analysis.peak)));
-        const radius: usize = @intFromFloat(@max(2, samples_per_px * 3));
-        var x: f32 = 0;
-        var smoothed: f32 = 0.35;
-        while (x < rect.w) : (x += 6) {
-            const span = waveSpan(analysis, start_sample, samples_per_px, x, 3);
-            if (span.to <= span.from) break;
-            const level = spanLevel(analysis.waveform, span, scale);
-            smoothed = smoothed * 0.75 + level * 0.25;
-            const body = @min(smoothed, wave.lowBand(analysis.waveform, span.from, span.to, radius, body_scale));
-
-            const peak_height = rect.h * smoothed;
-            const body_height = rect.h * body;
-            fillRectInto(builder, rect.x + x, rect.bottom() - body_height, 6, body_height, mixColor(Palette.field, bandColor(body), 0.55));
-            fillRectInto(builder, rect.x + x, rect.bottom() - peak_height, 6, @max(1, peak_height - body_height), bandColor(smoothed));
-        }
-    }
-
-    fn paintBandRows(_: *App, builder: *dvui.Path.Builder, analysis: *const pl.analysis.Analysis, rect: hit.Rect, start_sample: f32, samples_per_px: f32) void {
-        const peak_inv = 1.15 / @as(f32, @floatFromInt(@max(1, analysis.peak)));
-        const radius: usize = @intFromFloat(@max(2, samples_per_px * 3));
-        const colors = [_]dvui.Color{ Palette.heat1, Palette.heat2, Palette.heat4 };
-        const row_h = rect.h / 3;
-        for (0..3) |row| {
-            const top = rect.y + row_h * @as(f32, @floatFromInt(row));
-            if (row > 0) fillRectInto(builder, rect.x, top, rect.w, 1, fade(Palette.muted, 60));
-            var x: f32 = 0;
-            while (x < rect.w) : (x += 6) {
-                const span = waveSpan(analysis, start_sample, samples_per_px, x, 3);
-                if (span.to <= span.from) break;
-                const low = wave.lowBand(analysis.waveform, span.from, span.to, radius, peak_inv);
-                const mean = meanLevel(analysis.waveform, span) * peak_inv;
-                const high = @max(0, meanLevel(analysis.waveform, span) * peak_inv - low);
-                const level = switch (row) {
-                    0 => low,
-                    1 => @min(1, mean),
-                    else => @min(1, high),
-                };
-                const height = @max(1, (row_h - 4) * level);
-                fillRectInto(builder, rect.x + x, top + row_h - height - 1, 6, height, mixColor(Palette.field, colors[row], 0.35 + 0.65 * level));
-            }
-        }
-    }
-
-    fn meanLevel(samples: []const u8, span: WaveSpan) f32 {
-        var sum: usize = 0;
-        for (samples[span.from..span.to]) |value| sum += value;
-        return @as(f32, @floatFromInt(sum)) / @as(f32, @floatFromInt(@max(1, span.to - span.from)));
+        self.paintBeats(rect, start_beat, beat_offset);
     }
 
     fn paintBeats(self: *App, rect: hit.Rect, start_beat: f32, beat_offset: f32) void {
@@ -1391,7 +1295,7 @@ pub const App = struct {
         while (beat < start_beat + visible) : (beat += 1) {
             const bx = (beat - start_beat) / visible * rect.w;
             const bar = @mod(@as(i32, @intFromFloat(beat + beat_offset)), 4) == 0;
-            fillRect(self.allocator, rect.x + bx, rect.y, if (bar) 3 else 1, rect.h, fade(if (bar) Palette.ink else Palette.muted, if (bar) 110 else 50));
+            fillRect(self.allocator, rect.x + bx, rect.y, if (bar) 2 else 1, rect.h, fade(Palette.muted, if (bar) 90 else 45));
         }
     }
 
@@ -1909,7 +1813,6 @@ fn frameFooter(app: *App) void {
 
     // Key and tempo sit past the suggestion column, not under it.
     app.notationToggle();
-    app.frameWaveformSelector();
 
     var spacer = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal });
     spacer.deinit();
