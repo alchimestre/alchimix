@@ -31,7 +31,8 @@ zig build test        # domain, transport and pointer tests
 ## Preview
 
 `▶` on a row or a block plays fifteen seconds from the middle of the track, through
-`ffplay`. Pause stops the process and remembers the offset, so play resumes from
+`ffplay`. While the grid is playing, a preview waits for the next master bar and
+matches the master tempo. Pause stops the process and remembers the offset, so play resumes from
 there; a stopped process would keep the audio device open. Starting another track stops the first.
 
 Each block carries a bar along its bottom that fills as the snippet runs.
