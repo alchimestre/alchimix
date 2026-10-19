@@ -1617,10 +1617,13 @@ pub const App = struct {
         }
         if (self.transport.anyPlaying()) {
             // Spawn just before the bar: ffplay takes a moment to produce sound.
-            const bar = self.transport.nextBarTime();
+            // A bar too close for that lead is skipped, never started early.
             const lead: i128 = 200_000_000;
+            const now = self.transport.nowNs();
+            var bar = self.transport.nextBarTime();
+            if (bar != 0 and bar - lead <= now) bar = self.transport.nextBarAfter(bar);
             self.preview_pending = track;
-            self.preview_at_ns = @max(self.transport.nowNs(), bar - lead);
+            self.preview_at_ns = if (bar == 0) now else bar - lead;
             return;
         }
         self.preview_pending = null;
