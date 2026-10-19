@@ -90,6 +90,14 @@ pub const App = struct {
     /// Owning copies: the source may rebuild its playlist list after a write.
     /// The playlist currently open in the crate, for the row highlight.
     selected_playlist: ?[]const u8 = null,
+    /// Lanes inside the canvas viewport this frame; global transport uses them
+    /// once more than four tracks are loaded.
+    visible_lanes: [64]usize = undefined,
+    visible_count: usize = 0,
+    visible_top: f32 = 0,
+    visible_bottom: f32 = 0,
+    lane_right: f32 = 0,
+    group: [64]usize = undefined,
 
     query: std.ArrayList(u8) = .empty,
     found: []const Track = &.{},
@@ -431,6 +439,44 @@ pub const App = struct {
         self.hit_map.append(rectFrom(row.data().contentRectScale().r), target);
     }
 
+    fn playlistStats(self: *App) void {
+        var seconds: u64 = 0;
+        var bpm_sum: f64 = 0;
+        var bpm_count: usize = 0;
+        for (0..self.crate.len()) |index| {
+            const track = self.crate.at(index) orelse continue;
+            seconds += track.length_s;
+            if (track.bpm > 0) {
+                bpm_sum += track.bpm;
+                bpm_count += 1;
+            }
+        }
+        const average = if (bpm_count > 0) bpm_sum / @as(f64, @floatFromInt(bpm_count)) else 0;
+        const hours = seconds / 3600;
+        const minutes = (seconds % 3600) / 60;
+
+        var line: [96]u8 = undefined;
+        const extent = if (hours > 0)
+            std.fmt.bufPrint(&line, "{d} tracks · {d}h {d:0>2}m", .{ self.crate.len(), hours, minutes }) catch ""
+        else
+            std.fmt.bufPrint(&line, "{d} tracks · {d}m", .{ self.crate.len(), minutes }) catch "";
+        labelStyled(@src(), extent, .{
+            .color_text = .{ .color = Palette.secondary },
+            .font = metaFont(),
+            .margin = .{ .x = 4, .y = 3 },
+            .id_extra = 7250,
+        });
+
+        var bpm_line: [48]u8 = undefined;
+        const bpm_text = std.fmt.bufPrint(&bpm_line, "avg {d:.1} bpm", .{average}) catch "";
+        labelStyled(@src(), bpm_text, .{
+            .color_text = .{ .color = Palette.muted },
+            .font = metaFont(),
+            .margin = .{ .x = 4, .y = 1 },
+            .id_extra = 7251,
+        });
+    }
+
     fn playlistChildren(self: *App, parent: []const u8, depth: usize) void {
         for (self.playlists, 0..) |playlist, index| {
             if (!std.mem.eql(u8, playlist.parent, parent)) continue;
@@ -452,6 +498,8 @@ pub const App = struct {
             .padding = .{ .x = 8, .y = 8 },
         });
         defer panel.deinit();
+
+        self.playlistStats();
 
         {
             var head = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal });
@@ -706,6 +754,11 @@ pub const App = struct {
         defer canvas.deinit();
         self.canvas = rectFrom(canvas.data().borderRectScale().r);
 
+        self.visible_count = 0;
+        self.visible_top = 0;
+        self.visible_bottom = 0;
+        self.lane_right = 0;
+
         if (self.crate.len() == 0) {
             labelStyled(@src(), "Drag a track here to start the crate.", .{
                 .color_text = .{ .color = Palette.muted },
@@ -749,6 +802,8 @@ pub const App = struct {
 
             if (self.crate.transition(index)) |step| connector(self.allocator, index, step);
         }
+
+        self.drawGroupBrace();
 
         // Scroll room past the last block: dropping at the end should not need
         // the pointer on the very last block.
@@ -864,11 +919,18 @@ pub const App = struct {
                 dvui.refresh(null, @src(), null);
             },
             .toggle_transport => {
-                if (self.transport.anyPlaying()) {
-                    self.transport.stopAll();
+                const group = self.transportGroup();
+                var any = false;
+                for (group) |index| {
+                    if (self.transport.isPlaying(index)) {
+                        any = true;
+                        break;
+                    }
+                }
+                if (any) {
+                    self.transport.stopGroup(group);
                 } else {
-                    // A global start is one act: every lane starts together.
-                    self.transport.startAll();
+                    self.transport.startGroup(group);
                 }
                 dvui.refresh(null, @src(), null);
             },
@@ -1422,6 +1484,54 @@ pub const App = struct {
             fillRect(self.allocator, window_x + window_w - 1.5, bar_rect.y, 1.5, bar_rect.h, Palette.ink);
             self.hit_map.append(bar_rect, .{ .nav = index });
         }
+
+        self.noteVisible(index, col_rect);
+    }
+
+    fn noteVisible(self: *App, index: usize, rect: hit.Rect) void {
+        if (self.canvas.w <= 0) return;
+        if (rect.y >= self.canvas.bottom() or rect.y + rect.h <= self.canvas.y) return;
+        if (self.visible_count >= self.visible_lanes.len) return;
+        self.visible_lanes[self.visible_count] = index;
+        self.visible_count += 1;
+        if (self.visible_count == 1) self.visible_top = rect.y;
+        self.visible_bottom = rect.y + rect.h;
+        self.lane_right = @max(self.lane_right, rect.x + rect.w);
+    }
+
+    /// Draws the brace marking the group global play/stop acts on.
+    fn drawGroupBrace(self: *App) void {
+        if (self.crate.len() <= 4 or self.visible_count == 0) return;
+        const top = self.visible_top + 4;
+        const bottom = self.visible_bottom - 4;
+        if (bottom - top < 12) return;
+
+        var builder = dvui.Path.Builder.init(self.allocator);
+        defer builder.deinit();
+        const x = self.lane_right + 6;
+        const mid = (top + bottom) / 2;
+        const color: dvui.Color = .{ .r = 0xbd, .g = 0x93, .b = 0xf9, .a = 0xff };
+
+        fillRectInto(&builder, x, top, 2, mid - top - 6, color);
+        fillRectInto(&builder, x, mid + 6, 2, bottom - mid - 6, color);
+        fillRectInto(&builder, x - 5, top, 7, 2, color);
+        fillRectInto(&builder, x - 5, bottom - 2, 7, 2, color);
+        fillRectInto(&builder, x + 2, mid - 6, 3, 2, color);
+        fillRectInto(&builder, x + 4, mid - 4, 3, 2, color);
+        fillRectInto(&builder, x + 5, mid - 1, 3, 2, color);
+        fillRectInto(&builder, x + 4, mid + 1, 3, 2, color);
+        fillRectInto(&builder, x + 2, mid + 3, 3, 2, color);
+    }
+
+    fn transportGroup(self: *App) []const usize {
+        const total = self.crate.len();
+        if (total <= 4 or self.visible_count == 0) {
+            for (0..@min(total, self.group.len)) |index| self.group[index] = index;
+            return self.group[0..@min(total, self.group.len)];
+        }
+        const count = @min(self.visible_count, self.group.len);
+        @memcpy(self.group[0..count], self.visible_lanes[0..count]);
+        return self.group[0..count];
     }
 
     /// Spectrum bars under the EQ curve, with one draggable node per band.

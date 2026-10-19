@@ -287,6 +287,40 @@ pub const Transport = struct {
         if (any) self.pushMix();
     }
 
+    /// Starts just these lanes in one batch, on the same bar.
+    pub fn startGroup(self: *Transport, indices: []const usize) void {
+        const now = self.nowNs();
+        const start_at = self.barStartAt(now);
+        var any = false;
+        for (indices) |index| {
+            if (self.playingCount() >= max_lanes) break;
+            const slot = self.slotAt(index) orelse continue;
+            if (slot.playing or slot.analysis == null) continue;
+            self.poseForStart(slot);
+            slot.playing = true;
+            slot.start_latched = false;
+            slot.rejoin = false;
+            slot.start_at_ns = start_at;
+            any = true;
+        }
+        if (any) self.pushMix();
+    }
+
+    /// Stops just these lanes, leaving the rest untouched.
+    pub fn stopGroup(self: *Transport, indices: []const usize) void {
+        var any = false;
+        const now = self.nowNs();
+        for (indices) |index| {
+            const slot = self.slotAt(index) orelse continue;
+            if (!slot.playing) continue;
+            self.finishAt(slot, now);
+            any = true;
+        }
+        if (!any) return;
+        self.pushMix();
+        if (!self.anyPlaying()) self.stopClock();
+    }
+
     pub fn stop(self: *Transport, index: usize) void {
         const slot = self.slotAt(index) orelse return;
         if (self.jog == index) self.jog = null;
