@@ -1308,7 +1308,7 @@ pub const App = struct {
         // Buckets are anchored to the audio, not to the screen: a bar keeps the
         // same height as it scrolls. Smoothing looks both ways for the same
         // reason, instead of carrying state from the left edge.
-        const step: f32 = 3;
+        const step: f32 = 6;
         const bucket: usize = @max(1, @as(usize, @intFromFloat(@round(samples_per_px * step))));
         const origin_bucket: usize = if (start_sample <= 0) 0 else @as(usize, @intFromFloat(@floor(start_sample / @as(f32, @floatFromInt(bucket)))));
         const origin = origin_bucket * bucket;
@@ -1317,6 +1317,8 @@ pub const App = struct {
         // shimmered on the coloured waveform.
         self.paintBeats(rect, start_beat, beat_offset);
 
+        var line_ready = false;
+        var line_y: f32 = 0;
         var a: usize = origin;
         while (a < analysis.waveform.len) : (a += bucket) {
             const b = @min(analysis.waveform.len, a + bucket);
@@ -1326,7 +1328,7 @@ pub const App = struct {
                 const current = spanLevel(analysis.waveform, a, b, scale);
                 const before = if (a >= bucket) spanLevel(analysis.waveform, a - bucket, a, scale) else current;
                 const after = if (b + bucket <= analysis.waveform.len) spanLevel(analysis.waveform, b, b + bucket, scale) else current;
-                const smoothed = before * 0.1 + current * 0.8 + after * 0.1;
+                const smoothed = before * 0.25 + current * 0.5 + after * 0.25;
                 // Cover up to the next bucket so sub-pixel scrolling cannot
                 // leave seams that read as a flickering grid.
                 const next_x = (@as(f32, @floatFromInt(a + bucket)) - start_sample) / samples_per_px;
@@ -1334,6 +1336,20 @@ pub const App = struct {
                 const height = rect.h * smoothed;
                 const color = if (has_bands) waveColor(wave_colour.tintBands(smoothed, analysis.bands[a..b])) else bandColor(smoothed);
                 fillRectInto(&builder, rect.x + x, rect.bottom() - height, width, height, color);
+
+                if (has_bands) {
+                    const low = bandMeans(analysis.bands, a, b, bucket).low;
+                    const current_y = rect.bottom() - low * (rect.h - 2);
+                    if (line_ready) {
+                        const top = @min(line_y, current_y);
+                        const bottom = @max(line_y, current_y);
+                        fillRectInto(&builder, rect.x + x - 1, top, width + 1, @max(2, bottom - top + 2), waveColor(wave_colour.low_line));
+                    } else {
+                        fillRectInto(&builder, rect.x + x, current_y, width, 2, waveColor(wave_colour.low_line));
+                    }
+                    line_y = current_y;
+                    line_ready = true;
+                }
             }
         }
     }
