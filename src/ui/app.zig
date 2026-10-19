@@ -1324,7 +1324,7 @@ pub const App = struct {
                 const after = if (b + bucket <= analysis.waveform.len) spanLevel(analysis.waveform, b, b + bucket, scale) else current;
                 const smoothed = before * 0.25 + current * 0.5 + after * 0.25;
                 const height = rect.h * smoothed;
-                const color = if (has_bands) waveColor(wave_colour.tintBands(wave_colour.chosen_scheme, wave_colour.chosen_curve, smoothed, analysis.bands[a..b])) else bandColor(smoothed);
+                const color = if (has_bands) waveColor(wave_colour.tintBands(smoothed, analysis.bands[a..b])) else bandColor(smoothed);
                 fillRectInto(&builder, rect.x + x, rect.bottom() - height, step, height, color);
             }
         }
@@ -1370,7 +1370,7 @@ pub const App = struct {
             const level = @min(255, @max(average * 1.15, @as(f32, @floatFromInt(peak)) * 0.6) * scale * 0.55) / 255;
             smoothed = smoothed * 0.75 + level * 0.25;
             const height = rect.h * smoothed;
-            const color = if (has_bands) waveColor(wave_colour.tintBands(wave_colour.chosen_scheme, wave_colour.chosen_curve, smoothed, analysis.bands[from..to])) else bandColor(smoothed);
+            const color = if (has_bands) waveColor(wave_colour.tintBands(smoothed, analysis.bands[from..to])) else bandColor(smoothed);
             fillRectInto(&builder, rect.x + x, rect.bottom() - height, 6, height, color);
         }
     }
