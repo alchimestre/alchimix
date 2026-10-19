@@ -173,9 +173,9 @@ pub const App = struct {
     /// Every visible row is a real widget, so the list is capped.
     const visible_rows = 60;
     const lane_panel_width: f32 = 380;
-    /// Toolbar plus footer, measured once and fixed: reading them back made a
-    /// resize lag a frame and flicker.
-    const chrome_height: f32 = 104;
+    /// Toolbar plus the two-row footer, measured once and fixed: reading them
+    /// back made a resize lag a frame and flicker.
+    const chrome_height: f32 = 132;
 
     pub fn init(allocator: std.mem.Allocator, library: pl.library.Library, io: std.Io) !App {
         const mixer = try allocator.create(pl.mixer.Mixer);
@@ -315,8 +315,8 @@ pub const App = struct {
         const active = enabled and self.sort_by_bpm;
         var chip = dvui.box(@src(), .{ .dir = .horizontal }, .{
             .min_size_content = .{ .w = 56, .h = 24 },
-            .margin = .{ .x = 4, .y = 2 },
-            .padding = .{ .x = 5, .y = 2 },
+            .margin = .{ .x = 4, .y = 0 },
+            .padding = .{ .x = 5, .y = 0 },
             .background = true,
             .color_fill = .{ .color = if (active) Palette.green else Palette.field },
             .id_extra = 7110,
@@ -337,8 +337,9 @@ pub const App = struct {
     /// at a glance.
     fn frameWidthSelector(self: *App) void {
         var group = dvui.box(@src(), .{ .dir = .horizontal }, .{
-            .margin = .{ .x = 12, .y = 4 },
-            .padding = .{ .x = 2, .y = 2 },
+            .margin = .{ .x = 12, .y = 0 },
+            .padding = .{ .x = 2, .y = 0 },
+            .gravity_y = 0.5,
             .background = true,
             .color_fill = .{ .color = Palette.field },
             .id_extra = 95,
@@ -348,8 +349,8 @@ pub const App = struct {
         for (hit.widths, 0..) |beats, slot| {
             const active = self.beats_visible == beats;
             var cell = dvui.box(@src(), .{ .dir = .horizontal }, .{
-                .min_size_content = .{ .w = 34, .h = 22 },
-                .margin = .{ .x = 1, .y = 1 },
+                .min_size_content = .{ .w = 34, .h = 24 },
+                .margin = .{ .x = 1, .y = 0 },
                 .background = true,
                 .color_fill = .{ .color = if (active) Palette.green else Palette.field },
                 .id_extra = 96 + slot,
@@ -722,18 +723,20 @@ pub const App = struct {
         }
 
         labelStyled(@src(), "bpm ±", .{
+            .min_size_content = .{ .h = 24 },
+            .gravity_y = 0.5,
             .color_text = .{ .color = Palette.muted },
             .font = metaFont(),
-            .margin = .{ .x = 4, .y = 6 },
+            .margin = .{ .x = 4, .y = 0 },
             .id_extra = 7100,
         });
 
         var entry = dvui.textEntry(@src(), .{
             .text = .{ .array_list = .{ .backing = &self.bpm_text, .allocator = self.allocator } },
         }, .{
-            .min_size_content = .{ .w = 40, .h = 22 },
-            .padding = .{ .x = 5, .y = 1 },
-            .margin = .{ .x = 2, .y = 2 },
+            .min_size_content = .{ .w = 40, .h = 24 },
+            .padding = .{ .x = 5, .y = 0 },
+            .margin = .{ .x = 2, .y = 0 },
             .corners = square,
             .background = true,
             .color_fill = .{ .color = Palette.field },
@@ -747,9 +750,11 @@ pub const App = struct {
         var count_buffer: [24]u8 = undefined;
         const count = std.fmt.bufPrint(&count_buffer, "{d} in range", .{self.in_range}) catch "";
         labelStyled(@src(), count, .{
+            .min_size_content = .{ .h = 24 },
+            .gravity_y = 0.5,
             .color_text = .{ .color = Palette.muted },
             .font = metaFont(),
-            .margin = .{ .x = 6, .y = 6 },
+            .margin = .{ .x = 6, .y = 0 },
             .id_extra = 7102,
         });
 
@@ -764,8 +769,8 @@ pub const App = struct {
         var widget: dvui.WidgetData = undefined;
         _ = dvui.button(@src(), glyph, .{}, .{
             .min_size_content = .{ .w = 30, .h = 24 },
-            .margin = .{ .x = 3 },
-            .padding = .{ .x = 4, .y = 1 },
+            .margin = .{ .x = 3, .y = 0 },
+            .padding = .{ .x = 4, .y = 0 },
             .data_out = &widget,
             .id_extra = @intFromEnum(toggle) + 1,
             .corners = square,
@@ -782,8 +787,10 @@ pub const App = struct {
     /// always visible.
     fn notationToggle(self: *App) void {
         var chip = dvui.box(@src(), .{ .dir = .horizontal }, .{
-            .margin = .{ .x = 12, .y = 4 },
-            .padding = .{ .x = 8, .y = 2 },
+            .margin = .{ .x = 12, .y = 0 },
+            .padding = .{ .x = 8, .y = 0 },
+            .min_size_content = .{ .h = 24 },
+            .gravity_y = 0.5,
             .background = true,
             .color_fill = .{ .color = Palette.field },
             .id_extra = 90,
@@ -795,6 +802,7 @@ pub const App = struct {
         const text = std.fmt.bufPrint(&buffer, "key {s}", .{sample}) catch "key";
 
         labelStyled(@src(), text, .{
+            .gravity_y = 0.5,
             .color_text = .{ .color = Palette.secondary },
             .font = metaFont(),
             .id_extra = 91,
@@ -1178,9 +1186,11 @@ pub const App = struct {
     /// Master tempo at the right corner, with a lock that ties it to the seed.
     fn frameMaster(self: *App) void {
         labelStyled(@src(), "master", .{
+            .min_size_content = .{ .h = 24 },
+            .gravity_y = 0.5,
             .color_text = .{ .color = Palette.muted },
             .font = metaFont(),
-            .margin = .{ .x = 8, .y = 6 },
+            .margin = .{ .x = 8, .y = 0 },
         });
 
         if (self.master_locked) {
@@ -1199,9 +1209,9 @@ pub const App = struct {
             .backing = &self.master_text,
             .allocator = self.allocator,
         } } }, .{
-            .min_size_content = .{ .w = 40, .h = 22 },
-            .padding = .{ .x = 5, .y = 1 },
-            .margin = .{ .x = 2, .y = 2 },
+            .min_size_content = .{ .w = 40, .h = 24 },
+            .padding = .{ .x = 5, .y = 0 },
+            .margin = .{ .x = 2, .y = 0 },
             .corners = square,
             .background = true,
             .color_fill = .{ .color = Palette.field },
@@ -1220,14 +1230,17 @@ pub const App = struct {
 
         {
             var chip = dvui.box(@src(), .{ .dir = .horizontal }, .{
-                .margin = .{ .x = 3, .y = 4 },
-                .padding = .{ .x = 5, .y = 2 },
+                .margin = .{ .x = 3, .y = 0 },
+                .padding = .{ .x = 5, .y = 0 },
+                .min_size_content = .{ .h = 24 },
+                .gravity_y = 0.5,
                 .background = true,
                 .color_fill = .{ .color = Palette.field },
                 .id_extra = 72,
             });
             defer chip.deinit();
             labelStyled(@src(), if (self.master_locked) "locked" else "free", .{
+                .gravity_y = 0.5,
                 .color_text = .{ .color = if (self.master_locked) Palette.green else Palette.secondary },
                 .font = metaFont(),
                 .id_extra = 73,
@@ -1237,14 +1250,17 @@ pub const App = struct {
 
         {
             var chip = dvui.box(@src(), .{ .dir = .horizontal }, .{
-                .margin = .{ .x = 4, .y = 4 },
-                .padding = .{ .x = 8, .y = 2 },
+                .margin = .{ .x = 4, .y = 0 },
+                .padding = .{ .x = 8, .y = 0 },
+                .min_size_content = .{ .h = 24 },
+                .gravity_y = 0.5,
                 .background = true,
                 .color_fill = .{ .color = Palette.field },
                 .id_extra = 74,
             });
             defer chip.deinit();
             labelStyled(@src(), if (self.transport.keylocked()) "pitch" else "vinyl", .{
+                .gravity_y = 0.5,
                 .color_text = .{ .color = if (self.transport.keylocked()) Palette.green else Palette.secondary },
                 .font = metaFont(),
                 .id_extra = 75,
@@ -1303,8 +1319,10 @@ pub const App = struct {
 
     fn transportToggle(self: *App) void {
         var chip = dvui.box(@src(), .{ .dir = .horizontal }, .{
-            .margin = .{ .x = 8, .y = 4 },
-            .padding = .{ .x = 10, .y = 2 },
+            .margin = .{ .x = 8, .y = 0 },
+            .padding = .{ .x = 10, .y = 0 },
+            .min_size_content = .{ .h = 24 },
+            .gravity_y = 0.5,
             .background = true,
             .color_fill = .{ .color = Palette.field },
             .id_extra = 80,
@@ -1312,6 +1330,7 @@ pub const App = struct {
         defer chip.deinit();
 
         labelStyled(@src(), if (self.transport.anyPlaying()) "stop" else "play", .{
+            .gravity_y = 0.5,
             .color_text = .{ .color = if (self.transport.anyPlaying()) Palette.green else Palette.secondary },
             .font = metaFont(),
             .id_extra = 81,
@@ -1322,8 +1341,10 @@ pub const App = struct {
     /// Empties the crate and returns every control to its starting value.
     fn clearButton(self: *App) void {
         var chip = dvui.box(@src(), .{ .dir = .horizontal }, .{
-            .margin = .{ .x = 18, .y = 4 },
-            .padding = .{ .x = 10, .y = 2 },
+            .margin = .{ .x = 18, .y = 0 },
+            .padding = .{ .x = 10, .y = 0 },
+            .min_size_content = .{ .h = 24 },
+            .gravity_y = 0.5,
             .background = true,
             .color_fill = .{ .color = Palette.field },
             .id_extra = 82,
@@ -1331,6 +1352,7 @@ pub const App = struct {
         defer chip.deinit();
 
         labelStyled(@src(), "clear", .{
+            .gravity_y = 0.5,
             .color_text = .{ .color = Palette.muted },
             .font = metaFont(),
             .id_extra = 83,
@@ -2297,16 +2319,20 @@ fn frameSuggestFooter(app: *App) void {
     });
     defer col.deinit();
 
-    var bpm_row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal });
-    defer bpm_row.deinit();
-    app.frameBpmWindow();
-    app.sortButton();
+    {
+        var bpm_row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal });
+        defer bpm_row.deinit();
+        app.frameBpmWindow();
+        app.sortButton();
+    }
 
-    var filters = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal });
-    defer filters.deinit();
-    app.energyToggle("=", Palette.green, &app.filter_hold, .hold);
-    app.energyToggle("↑", Palette.orange, &app.filter_up, .up);
-    app.energyToggle("↓", Palette.orange, &app.filter_down, .down);
+    {
+        var filters = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal });
+        defer filters.deinit();
+        app.energyToggle("=", Palette.green, &app.filter_hold, .hold);
+        app.energyToggle("↑", Palette.orange, &app.filter_up, .up);
+        app.energyToggle("↓", Palette.orange, &app.filter_down, .down);
+    }
 }
 
 fn frameFooter(app: *App) void {
