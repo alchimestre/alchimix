@@ -63,13 +63,6 @@ fn shortName(name: []const u8, buffer: *[32]u8) []const u8 {
     return buffer[0 .. cut + 3];
 }
 
-fn containsId(ids: []const u64, id: u64) bool {
-    for (ids) |value| {
-        if (value == id) return true;
-    }
-    return false;
-}
-
 fn presetName(preset: pl.mixer.EqPreset) []const u8 {
     return switch (preset) {
         .lpf => "LPF",
@@ -95,11 +88,8 @@ pub const App = struct {
     open_folders: [64][]const u8 = undefined,
     open_count: usize = 0,
     /// Owning copies: the source may rebuild its playlist list after a write.
+    /// The playlist currently open in the crate, for the row highlight.
     selected_playlist: ?[]const u8 = null,
-    /// False for intelligent playlists: their rules are not evaluated.
-    playlist_filter_active: bool = false,
-    playlist_filter: []const u64 = &.{},
-    filtered_found: []const Track = &.{},
 
     query: std.ArrayList(u8) = .empty,
     found: []const Track = &.{},
@@ -211,24 +201,12 @@ pub const App = struct {
         if (self.selected_playlist) |id| {
             if (id.len > 0) self.allocator.free(id);
         }
-        if (self.playlist_filter.len > 0) self.allocator.free(self.playlist_filter);
-        if (self.filtered_found.len > 0) self.allocator.free(self.filtered_found);
         self.crate.deinit();
     }
 
     /// Re-run the search, then rank what could follow the selected track.
     pub fn refresh(self: *App) !void {
-        if (self.filtered_found.len > 0) self.allocator.free(self.filtered_found);
-        self.filtered_found = &.{};
         self.found = self.library.search(self.query.items) catch &.{};
-        if (self.selected_playlist != null and self.playlist_filter_active) {
-            var keep: std.ArrayListUnmanaged(Track) = .empty;
-            for (self.found) |track| {
-                if (containsId(self.playlist_filter, track.id)) keep.append(self.allocator, track) catch {};
-            }
-            self.filtered_found = keep.toOwnedSlice(self.allocator) catch &.{};
-            self.found = self.filtered_found;
-        }
 
         self.allocator.free(self.ranked);
         self.ranked = &.{};
@@ -360,39 +338,40 @@ pub const App = struct {
         dvui.refresh(null, @src(), null);
     }
 
-    fn clearPlaylist(self: *App) void {
-        if (self.selected_playlist) |id| {
-            if (id.len > 0) self.allocator.free(id);
-        }
-        self.selected_playlist = null;
-        self.playlist_filter_active = false;
-        if (self.playlist_filter.len > 0) self.allocator.free(self.playlist_filter);
-        self.playlist_filter = &.{};
-        self.refresh() catch {};
-        dvui.refresh(null, @src(), null);
-    }
-
+    /// Opens a playlist in the crate, in playlist order, ready to edit.
     fn selectPlaylist(self: *App, index: usize) void {
         const playlist = self.playlists[index];
         if (playlist.kind == .folder) {
             self.toggleFolder(playlist.id);
             return;
         }
-        if (self.selected_playlist) |id| {
-            if (std.mem.eql(u8, id, playlist.id)) {
-                self.clearPlaylist();
-                return;
+        if (playlist.kind == .smart) return;
+
+        const ids = self.library.playlistTracks(self.allocator, playlist.id) catch return;
+        defer if (ids.len > 0) self.allocator.free(ids);
+
+        self.player.stopAll();
+        self.transport.stopAll();
+        self.transport.beginSync();
+        self.transport.endSync();
+        self.crate.clear();
+        self.selected.clearRetainingCapacity();
+        self.query.clearRetainingCapacity();
+
+        const all = self.library.all() catch &.{};
+        for (ids) |id| {
+            for (all) |track| {
+                if (track.id != id) continue;
+                _ = self.crate.append(track) catch break;
+                break;
             }
-            if (id.len > 0) self.allocator.free(id);
         }
 
+        self.grid_dirty = true;
+        if (self.selected_playlist) |old| {
+            if (old.len > 0) self.allocator.free(old);
+        }
         self.selected_playlist = self.allocator.dupe(u8, playlist.id) catch null;
-        self.playlist_filter_active = playlist.kind == .list;
-        if (self.playlist_filter.len > 0) self.allocator.free(self.playlist_filter);
-        self.playlist_filter = if (self.playlist_filter_active)
-            self.library.playlistTracks(self.allocator, playlist.id) catch &.{}
-        else
-            &.{};
         self.refresh() catch {};
         dvui.refresh(null, @src(), null);
     }
@@ -455,6 +434,7 @@ pub const App = struct {
     fn playlistChildren(self: *App, parent: []const u8, depth: usize) void {
         for (self.playlists, 0..) |playlist, index| {
             if (!std.mem.eql(u8, playlist.parent, parent)) continue;
+            if (playlist.kind == .smart) continue;
             self.playlistRow(playlist, index, depth);
             if (playlist.kind == .folder and self.folderOpen(playlist.id)) {
                 self.playlistChildren(playlist.id, depth + 1);
@@ -1239,11 +1219,6 @@ pub const App = struct {
             if (id.len > 0) self.allocator.free(id);
         }
         self.selected_playlist = null;
-        self.playlist_filter_active = false;
-        if (self.playlist_filter.len > 0) self.allocator.free(self.playlist_filter);
-        self.playlist_filter = &.{};
-        if (self.filtered_found.len > 0) self.allocator.free(self.filtered_found);
-        self.filtered_found = &.{};
         self.open_count = 0;
         self.selected.clearRetainingCapacity();
         self.query.clearRetainingCapacity();
