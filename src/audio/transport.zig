@@ -76,6 +76,9 @@ const Slot = struct {
     muted: bool = false,
     /// Post-EQ lane gain, in dB.
     trim_db: f32 = 0,
+    /// True when this start rejoins other lanes mid-song, so a missed bar must
+    /// be retried rather than joined late.
+    rejoin: bool = false,
     /// Set for a retune, so the mixer restarts this decoder even when the
     /// folded position and tempo round to the same values.
     restart: bool = false,
@@ -84,7 +87,7 @@ const Slot = struct {
 };
 
 /// How late a lane may start before it is moved to the next bar.
-const start_grace_ns: i128 = 20_000_000;
+const start_grace_ns: i128 = 100_000_000;
 
 pub const Transport = struct {
     allocator: std.mem.Allocator,
@@ -222,10 +225,13 @@ pub const Transport = struct {
                     changed = true;
                     continue;
                 },
+                .busy => {},
                 .pending => {
                     // A rejoin can miss its bar while the decoder prefills.
                     // Put it back on the next bar instead of joining mid-bar.
-                    if (slot.start_at_ns != 0 and now > slot.start_at_ns + start_grace_ns) {
+                    // A joint start keeps its bar: its lanes start together,
+                    // so they stay in sync with each other.
+                    if (slot.rejoin and !slot.start_latched and slot.start_at_ns != 0 and now > slot.start_at_ns + start_grace_ns) {
                         slot.start_at_ns = self.nextBarAt(now);
                         changed = true;
                     }
@@ -274,6 +280,7 @@ pub const Transport = struct {
             self.poseForStart(slot);
             slot.playing = true;
             slot.start_latched = false;
+            slot.rejoin = false;
             slot.start_at_ns = start_at;
             any = true;
         }
@@ -562,6 +569,7 @@ pub const Transport = struct {
         };
         slot.playing = true;
         slot.start_latched = false;
+        slot.rejoin = join == .next_bar;
         slot.start_at_ns = start_at;
         self.pushMix();
     }
@@ -1206,12 +1214,65 @@ test "a rejoin that misses its bar moves to the next bar" {
     clock.now = 500_000_000;
     t.sync();
     t.seek(0, 8);
-    // The restarted decoder has not prefil(d)ed by its bar.
-    clock.now = 2_050_000_000;
+    // The restarted decoder has not prefilled by its bar.
+    clock.now = 2_150_000_000;
     t.sync();
 
     const resumed = fake.playingLane(1) orelse return error.NoLane;
     try testing.expect(@abs(@as(i128, 4_000_000_000) - resumed.start_at_ns) < 1_000);
+}
+
+test "a busy probe does not move a rejoin" {
+    var fake = FakeOutput{};
+    var clock = TestClock{};
+    var t = setup(&fake, &clock);
+    defer t.deinit();
+
+    t.beginSync();
+    t.resolve(0, laneInfo(1));
+    t.resolve(1, laneInfo(2));
+    t.endSync();
+    t.start(0, .now);
+    t.start(1, .now);
+    fake.markStarted(1, 0);
+    fake.markStarted(2, 0);
+    t.sync();
+
+    clock.now = 500_000_000;
+    t.sync();
+    t.seek(0, 8);
+
+    const probe = fake.find(1) orelse return error.NoLane;
+    probe.state = .busy;
+    clock.now = 2_050_000_000;
+    t.sync();
+
+    const resumed = fake.playingLane(1) orelse return error.NoLane;
+    try testing.expect(@abs(@as(i128, 2_000_000_000) - resumed.start_at_ns) < 1_000);
+}
+
+test "a joint start keeps its bar while the decoder prefills" {
+    var fake = FakeOutput{};
+    var clock = TestClock{};
+    var t = setup(&fake, &clock);
+    defer t.deinit();
+
+    t.beginSync();
+    t.resolve(0, laneInfo(1));
+    t.resolve(1, laneInfo(2));
+    t.endSync();
+    t.start(0, .now);
+    fake.markStarted(1, 0);
+    t.sync();
+
+    clock.now = 500_000_000;
+    t.sync();
+    t.start(1, .bar);
+    clock.now = 2_050_000_000;
+    t.sync();
+
+    const resumed = fake.playingLane(2) orelse return error.NoLane;
+    try testing.expect(@abs(@as(i128, 2_000_000_000) - resumed.start_at_ns) < 1_000);
 }
 
 test "presets reach the mixer and moving a node clears them" {
