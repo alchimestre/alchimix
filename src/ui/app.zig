@@ -442,12 +442,18 @@ pub const App = struct {
         }
         if (count == 0) return;
 
-        var name_buffer: [128]u8 = undefined;
-        const name = if (self.crate.seedTrack()) |seed|
-            std.fmt.bufPrint(&name_buffer, "Crate · {s}", .{seed.title}) catch "Crate"
-        else
-            "Crate";
-        self.library.createPlaylist(name, ids[0..count]) catch return;
+        // A crate opened from a playlist writes back into it; only a crate
+        // with no playlist of its own creates one.
+        if (self.selected_playlist) |playlist_id| {
+            self.library.replacePlaylistTracks(playlist_id, ids[0..count]) catch return;
+        } else {
+            var name_buffer: [128]u8 = undefined;
+            const name = if (self.crate.seedTrack()) |seed|
+                std.fmt.bufPrint(&name_buffer, "Crate · {s}", .{seed.title}) catch "Crate"
+            else
+                "Crate";
+            self.library.createPlaylist(name, ids[0..count]) catch return;
+        }
         self.playlists = self.library.playlists() catch &.{};
         dvui.refresh(null, @src(), null);
     }
@@ -554,12 +560,16 @@ pub const App = struct {
             var head = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal });
             defer head.deinit();
             labelStyled(@src(), "playlists", .{
-                .expand = .horizontal,
                 .color_text = .{ .color = Palette.purple },
                 .font = headingFont(),
                 .margin = .{ .x = 4, .y = 2 },
                 .id_extra = 7200,
             });
+
+            // The title must not expand, or it pushes the save chip out of the
+            // column entirely.
+            var gap = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal });
+            gap.deinit();
 
             var save = dvui.box(@src(), .{ .dir = .horizontal }, .{
                 .min_size_content = .{ .w = 74, .h = 20 },

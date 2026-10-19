@@ -205,6 +205,20 @@ pub const Source = struct {
         try self.reloadPlaylists();
     }
 
+    fn replacePlaylistTracksFn(ctx: *anyopaque, playlist_id: []const u8, track_ids: []const u64) anyerror!void {
+        const self = ctxOf(ctx);
+        try self.exec("delete from djmdSongPlaylist where PlaylistID = '{s}'", .{playlist_id});
+        for (track_ids, 1..) |track_id, number| {
+            try self.appendEntry(playlist_id, track_id, number);
+        }
+        const usn = try self.queryInt("select coalesce(max(rb_local_usn), 0) + 1 from djmdPlaylist");
+        try self.exec(
+            "update djmdPlaylist set rb_local_usn = {d}, updated_at = {s} where ID = '{s}'",
+            .{ usn, nowSql(), playlist_id },
+        );
+        try self.reloadPlaylists();
+    }
+
     fn appendEntry(self: *Source, playlist_id: []const u8, track_id: u64, number: u64) !void {
         const a = self.arena.allocator();
         const entry_id = try makeUuid(a, track_id *% 1_000_003 +% number);
@@ -294,6 +308,7 @@ pub const Source = struct {
         .playlists = playlistsFn,
         .playlistTracks = playlistTracksFn,
         .createPlaylist = createPlaylistFn,
+        .replacePlaylistTracks = replacePlaylistTracksFn,
         .name = nameFn,
         .deinit = deinitFn,
     };

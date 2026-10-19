@@ -36,6 +36,8 @@ pub const Library = struct {
         playlistTracks: *const fn (ctx: *anyopaque, allocator: std.mem.Allocator, playlist_id: []const u8) anyerror![]const u64,
         /// Writes a new playlist with the given tracks, in order.
         createPlaylist: *const fn (ctx: *anyopaque, name: []const u8, track_ids: []const u64) anyerror!void,
+        /// Replaces an existing playlist's tracks, in order.
+        replacePlaylistTracks: *const fn (ctx: *anyopaque, playlist_id: []const u8, track_ids: []const u64) anyerror!void,
         /// Shown in the UI so the active source is never a guess.
         name: *const fn (ctx: *anyopaque) []const u8,
         deinit: *const fn (ctx: *anyopaque) void,
@@ -63,6 +65,10 @@ pub const Library = struct {
 
     pub fn createPlaylist(self: Library, playlist_name: []const u8, track_ids: []const u64) !void {
         return self.vtable.createPlaylist(self.ctx, playlist_name, track_ids);
+    }
+
+    pub fn replacePlaylistTracks(self: Library, playlist_id: []const u8, track_ids: []const u64) !void {
+        return self.vtable.replacePlaylistTracks(self.ctx, playlist_id, track_ids);
     }
 
     pub fn name(self: Library) []const u8 {
