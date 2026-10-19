@@ -85,7 +85,16 @@ pub const Target = union(enum) {
     lane_play: usize,
     /// Silences one grid lane without stopping it.
     lane_mute: usize,
+    /// A waveform span choice, in beats.
+    width: u8,
 };
+
+/// The spans the waveform can show, in beats.
+pub const widths = [_]u8{ 16, 32, 64 };
+
+pub fn isWidth(value: u8) bool {
+    return std.mem.indexOfScalar(u8, &widths, value) != null;
+}
 
 /// Screen rectangles for one frame, with what each one means.
 pub const HitMap = struct {
@@ -218,6 +227,8 @@ pub const Drag = struct {
         toggle_pitch,
         toggle_lane_play: usize,
         toggle_lane_mute: usize,
+        /// A press on the width selector: show this many beats per lane.
+        set_width: u8,
         /// A press on a lane's scrub bar: jump the window to that point.
         seek_nav: usize,
         /// A press on a band node: the drag moves it in frequency and gain.
@@ -242,6 +253,7 @@ pub const Drag = struct {
             .pitch_lock => .toggle_pitch,
             .lane_play => |index| .{ .toggle_lane_play = index },
             .lane_mute => |index| .{ .toggle_lane_mute = index },
+            .width => |beats| .{ .set_width = beats },
             .block => |index| blk: {
                 if (shift) break :blk .{ .toggle_block = index };
                 self.pressed = target;
@@ -312,7 +324,7 @@ pub const Drag = struct {
         return switch (target) {
             .block => |from| .{ .move_block = .{ .from = from, .gap = to } },
             .row => |track| .{ .drop_track = .{ .gap = to, .track = track } },
-            .toggle, .notation, .lane, .nav, .eq_node, .eq_plot, .eq_preset, .transport, .master_lock, .pitch_lock, .lane_play, .lane_mute => .none,
+            .toggle, .notation, .lane, .nav, .eq_node, .eq_plot, .eq_preset, .transport, .master_lock, .pitch_lock, .lane_play, .lane_mute, .width => .none,
         };
     }
 
@@ -503,6 +515,29 @@ test "the notation toggle fires on the press and carries nothing" {
     }
     try std.testing.expect(!drag.motion(.{ .x = 90, .y = 60 }, 6, viewport, &map));
     try std.testing.expect(isNone(drag.release()));
+}
+
+test "a width press reports the span and carries nothing" {
+    var map = HitMap.init(std.testing.allocator);
+    defer map.deinit();
+    map.append(.{ .x = 0, .y = 0, .w = 30, .h = 20 }, .{ .width = 32 });
+
+    var drag = Drag{};
+    const hit = map.hit(.{ .x = 10, .y = 10 }).?;
+    switch (drag.press(hit, .{ .x = 10, .y = 10 }, false)) {
+        .set_width => |beats| try std.testing.expectEqual(@as(u8, 32), beats),
+        else => return error.WrongAction,
+    }
+    try std.testing.expect(!drag.motion(.{ .x = 90, .y = 60 }, 6, viewport, &map));
+    try std.testing.expect(isNone(drag.release()));
+}
+
+test "only the offered spans are widths" {
+    try std.testing.expect(isWidth(16));
+    try std.testing.expect(isWidth(32));
+    try std.testing.expect(isWidth(64));
+    try std.testing.expect(!isWidth(0));
+    try std.testing.expect(!isWidth(48));
 }
 
 test "a toggle flips on the press and carries nothing" {
