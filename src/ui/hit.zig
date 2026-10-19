@@ -87,8 +87,6 @@ pub const Target = union(enum) {
     playlist_toggle: usize,
     /// Writes the current crate as a new playlist.
     save_playlist,
-    /// Adds one track to the selected playlist.
-    playlist_add: u64,
     /// Freezes the master tempo to the seed's BPM, or frees it.
     master_lock,
     /// Keeps the pitch while the master tempo changes.
@@ -256,7 +254,6 @@ pub const Drag = struct {
         select_playlist: usize,
         toggle_playlist: usize,
         save_playlist,
-        add_to_playlist: u64,
         toggle_master_lock,
         toggle_pitch,
         toggle_lane_play: usize,
@@ -289,7 +286,6 @@ pub const Drag = struct {
             .playlist => |index| .{ .select_playlist = index },
             .playlist_toggle => |index| .{ .toggle_playlist = index },
             .save_playlist => .save_playlist,
-            .playlist_add => |track_id| .{ .add_to_playlist = track_id },
             .master_lock => .toggle_master_lock,
             .pitch_lock => .toggle_pitch,
             .lane_play => |index| .{ .toggle_lane_play = index },
@@ -348,7 +344,7 @@ pub const Drag = struct {
     pub fn motion(self: *Drag, p: Point, threshold: f32, canvas: Rect, hit_map: *const HitMap) bool {
         const pressed = self.pressed orelse return false;
         switch (pressed) {
-            .lane, .nav, .eq_node, .eq_plot, .eq_preset, .trim, .clear, .playlist, .playlist_toggle, .save_playlist, .playlist_add => return false,
+            .lane, .nav, .eq_node, .eq_plot, .eq_preset, .trim, .clear, .playlist, .playlist_toggle, .save_playlist => return false,
             else => {},
         }
         if (self.carrying == null) {
@@ -369,7 +365,7 @@ pub const Drag = struct {
         return switch (target) {
             .block => |from| .{ .move_block = .{ .from = from, .gap = to } },
             .row => |track| .{ .drop_track = .{ .gap = to, .track = track } },
-            .toggle, .notation, .lane, .nav, .eq_node, .eq_plot, .eq_preset, .trim, .transport, .clear, .playlist, .playlist_toggle, .save_playlist, .playlist_add, .master_lock, .pitch_lock, .lane_play, .lane_mute, .width => .none,
+            .toggle, .notation, .lane, .nav, .eq_node, .eq_plot, .eq_preset, .trim, .transport, .clear, .playlist, .playlist_toggle, .save_playlist, .master_lock, .pitch_lock, .lane_play, .lane_mute, .width => .none,
         };
     }
 

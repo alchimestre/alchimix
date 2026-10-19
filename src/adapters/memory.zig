@@ -68,10 +68,6 @@ pub const Source = struct {
         return error.Unsupported;
     }
 
-    fn addToPlaylistFn(_: *anyopaque, _: []const u8, _: u64) anyerror!void {
-        return error.Unsupported;
-    }
-
     fn nameFn(_: *anyopaque) []const u8 {
         return "memory";
     }
@@ -90,7 +86,6 @@ pub const Source = struct {
         .playlists = playlistsFn,
         .playlistTracks = playlistTracksFn,
         .createPlaylist = createPlaylistFn,
-        .addToPlaylist = addToPlaylistFn,
         .name = nameFn,
         .deinit = deinitFn,
     };

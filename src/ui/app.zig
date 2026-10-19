@@ -397,15 +397,6 @@ pub const App = struct {
         dvui.refresh(null, @src(), null);
     }
 
-    fn addToPlaylist(self: *App, track_id: u64) void {
-        const playlist_id = self.selected_playlist orelse return;
-        self.library.addToPlaylist(playlist_id, track_id) catch return;
-        if (self.playlist_filter.len > 0) self.allocator.free(self.playlist_filter);
-        self.playlist_filter = self.library.playlistTracks(self.allocator, playlist_id) catch &.{};
-        self.refresh() catch {};
-        dvui.refresh(null, @src(), null);
-    }
-
     fn saveCratePlaylist(self: *App) void {
         var ids: [256]u64 = undefined;
         const count = @min(self.crate.len(), ids.len);
@@ -603,23 +594,7 @@ pub const App = struct {
             text = std.fmt.bufPrint(&text_buffer, "Next to {s}", .{clippedTitle(heading.?.title, &title_buffer)}) catch "Next to";
         }
 
-        if (self.selected_playlist) |selected| {
-            if (self.playlistName(selected)) |name| {
-                var name_buffer: [32]u8 = undefined;
-                var line: [160]u8 = undefined;
-                const full = std.fmt.bufPrint(&line, "{s} · add to {s}", .{ text, shortName(name, &name_buffer) }) catch text;
-                labelStyled(@src(), full, headingOptions());
-                return;
-            }
-        }
         labelStyled(@src(), text, headingOptions());
-    }
-
-    fn playlistName(self: *const App, id: []const u8) ?[]const u8 {
-        for (self.playlists) |playlist| {
-            if (std.mem.eql(u8, playlist.id, id)) return playlist.name;
-        }
-        return null;
     }
 
     fn headingOptions() dvui.Options {
@@ -927,7 +902,6 @@ pub const App = struct {
                 self.toggleFolder(self.playlists[index].id);
             },
             .save_playlist => self.saveCratePlaylist(),
-            .add_to_playlist => |track_id| self.addToPlaylist(track_id),
             .toggle_lane_play => |index| {
                 if (index >= self.grid.items.len) return;
                 if (self.transport.isPlaying(index)) {
@@ -1752,7 +1726,6 @@ fn pickRow(app: *App, row_index: usize, track: Track, step: ?Transition) void {
     defer outer.deinit();
 
     const title_color = if (step) |known| stepColor(known) else Palette.ink;
-    var add_rect: ?hit.Rect = null;
 
     {
         var row = dvui.box(@src(), .{ .dir = .horizontal }, .{
@@ -1795,28 +1768,7 @@ fn pickRow(app: *App, row_index: usize, track: Track, step: ?Transition) void {
                 .id_extra = row_index * 16 + 5,
             });
         }
-
-        if (app.selected_playlist != null) {
-            var add = dvui.box(@src(), .{ .dir = .horizontal }, .{
-                .min_size_content = .{ .w = 34, .h = 20 },
-                .margin = .{ .x = 4, .y = 0 },
-                .background = true,
-                .color_fill = .{ .color = Palette.field },
-                .id_extra = row_index * 16 + 10,
-            });
-            defer add.deinit();
-            labelStyled(@src(), "add", .{
-                .gravity_x = 0.5,
-                .gravity_y = 0.5,
-                .color_text = .{ .color = Palette.green },
-                .font = metaFont(),
-                .id_extra = row_index * 16 + 11,
-            });
-            add_rect = rectFrom(add.data().contentRectScale().r);
-        }
     }
-
-    if (add_rect) |rect| app.hit_map.append(rect, .{ .playlist_add = track.id });
 
     // The row carries a track; the play button on its left keeps its clicks.
     const row_rect = rectFrom(outer.data().contentRectScale().r)
