@@ -1310,6 +1310,25 @@ test "a joint start keeps its bar while the decoder prefills" {
     try testing.expect(@abs(@as(i128, 2_000_000_000) - resumed.start_at_ns) < 1_000);
 }
 
+test "a group start starts only the given lanes" {
+    var fake = FakeOutput{};
+    var clock = TestClock{};
+    var t = setup(&fake, &clock);
+    defer t.deinit();
+
+    t.beginSync();
+    for (0..6) |index| t.resolve(index, laneInfo(index + 1));
+    t.endSync();
+
+    t.startGroup(&.{ 1, 3, 4, 5 });
+    try testing.expect(!t.isPlaying(0));
+    try testing.expect(t.isPlaying(1));
+    try testing.expect(!t.isPlaying(2));
+    try testing.expect(t.isPlaying(3));
+    try testing.expect(t.isPlaying(4));
+    try testing.expect(t.isPlaying(5));
+}
+
 test "presets reach the mixer and moving a node clears them" {
     var fake = FakeOutput{};
     var clock = TestClock{};
