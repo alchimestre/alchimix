@@ -1338,8 +1338,12 @@ pub const App = struct {
                 fillRectInto(&builder, rect.x + x, rect.bottom() - height, width, height, color);
 
                 if (has_bands) {
-                    const low = bandMeans(analysis.bands, a, b, bucket).low;
-                    const current_y = rect.bottom() - low * (rect.h - 2);
+                    // Same vertical scale as the bar: the line rides the top of
+                    // the low band's share of that bar, so it stays low.
+                    const bands = bandMeans(analysis.bands, a, b, bucket);
+                    const total = bands.low + bands.mid + bands.high;
+                    const share = if (total > 0.001) bands.low / total else 0;
+                    const current_y = rect.bottom() - height * share;
                     if (line_ready) {
                         const top = @min(line_y, current_y);
                         const bottom = @max(line_y, current_y);
