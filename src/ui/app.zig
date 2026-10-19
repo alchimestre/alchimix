@@ -85,8 +85,8 @@ pub const App = struct {
     /// Beats shown across a preview lane: 16, 32 or 64.
     beats_visible: u8 = 16,
     /// Waveform colour scheme and intensity curve, chosen live.
-    wave_scheme: wave_colour.Scheme = .band_rgb,
-    wave_curve: wave_colour.Curve = .linear,
+    wave_scheme: wave_colour.Scheme = .band_rgb_level,
+    wave_curve: wave_colour.Curve = .sqrt,
     /// Candidates the tempo window admits, so the field shows its effect even
     /// when the top of the list looks the same.
     in_range: usize = 0,
