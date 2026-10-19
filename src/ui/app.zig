@@ -1308,7 +1308,7 @@ pub const App = struct {
         // Buckets are anchored to the audio, not to the screen: a bar keeps the
         // same height as it scrolls. Smoothing looks both ways for the same
         // reason, instead of carrying state from the left edge.
-        const step: f32 = 6;
+        const step: f32 = 3;
         const bucket: usize = @max(1, @as(usize, @intFromFloat(@round(samples_per_px * step))));
         const origin_bucket: usize = if (start_sample <= 0) 0 else @as(usize, @intFromFloat(@floor(start_sample / @as(f32, @floatFromInt(bucket)))));
         const origin = origin_bucket * bucket;
@@ -1326,18 +1326,14 @@ pub const App = struct {
                 const current = spanLevel(analysis.waveform, a, b, scale);
                 const before = if (a >= bucket) spanLevel(analysis.waveform, a - bucket, a, scale) else current;
                 const after = if (b + bucket <= analysis.waveform.len) spanLevel(analysis.waveform, b, b + bucket, scale) else current;
-                const smoothed = before * 0.25 + current * 0.5 + after * 0.25;
+                const smoothed = before * 0.1 + current * 0.8 + after * 0.1;
                 // Cover up to the next bucket so sub-pixel scrolling cannot
                 // leave seams that read as a flickering grid.
                 const next_x = (@as(f32, @floatFromInt(a + bucket)) - start_sample) / samples_per_px;
                 const width = @min(rect.w - x, @max(1, next_x - x));
-                if (has_bands) {
-                    const bands = bandMeans(analysis.bands, a, b, bucket);
-                    drawBand(&builder, rect, rect.x + x, width, bands, smoothed);
-                } else {
-                    const height = rect.h * smoothed;
-                    fillRectInto(&builder, rect.x + x, rect.bottom() - height, width, height, bandColor(smoothed));
-                }
+                const height = rect.h * smoothed;
+                const color = if (has_bands) waveColor(wave_colour.tintBands(smoothed, analysis.bands[a..b])) else bandColor(smoothed);
+                fillRectInto(&builder, rect.x + x, rect.bottom() - height, width, height, color);
             }
         }
     }
@@ -1821,24 +1817,6 @@ fn meanBands(bands: []const pl.analysis.Band, from: usize, to: usize) BandMeans 
     }
     const count = @as(f32, @floatFromInt(@max(1, to - from))) * 7;
     return .{ .low = low / count, .mid = mid / count, .high = high / count };
-}
-
-/// One column of the three-band waveform: the overall level is split into
-/// stacked segments, lows at the bottom, mids above them, highs on top.
-fn drawBand(builder: *dvui.Path.Builder, rect: hit.Rect, x: f32, width: f32, bands: BandMeans, level: f32) void {
-    const sum = bands.low + bands.mid + bands.high;
-    if (sum <= 0.001) return;
-    const height = rect.h * @sqrt(std.math.clamp(level, 0, 1));
-    const low_h = height * bands.low / sum;
-    const mid_h = height * bands.mid / sum;
-    const high_h = height * bands.high / sum;
-
-    var bottom = rect.bottom();
-    fillRectInto(builder, x, bottom - low_h, width, low_h, waveColor(wave_colour.low_color));
-    bottom -= low_h;
-    fillRectInto(builder, x, bottom - mid_h, width, mid_h, waveColor(wave_colour.mid_color));
-    bottom -= mid_h;
-    fillRectInto(builder, x, bottom - high_h, width, high_h, waveColor(wave_colour.high_color));
 }
 
 fn spanLevel(samples: []const u8, from: usize, to: usize, scale: f32) f32 {

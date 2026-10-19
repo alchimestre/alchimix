@@ -7,10 +7,6 @@ const pl = @import("playlister");
 
 pub const Color = struct { r: u8, g: u8, b: u8, a: u8 = 0xff };
 
-/// Pioneer's three-band colours: blue low, amber mid, white high.
-pub const low_color = Color{ .r = 0x2e, .g = 0x6b, .b = 0xff };
-pub const mid_color = Color{ .r = 0xff, .g = 0xa1, .b = 0x1a };
-pub const high_color = Color{ .r = 0xf2, .g = 0xf2, .b = 0xf2 };
 
 /// Mean band levels over a span, at the waveform's brightness.
 pub fn tintBands(level: f32, bands: []const pl.analysis.Band) Color {
@@ -27,13 +23,14 @@ pub fn tintBands(level: f32, bands: []const pl.analysis.Band) Color {
     mid /= count;
     high /= count;
 
-    const total = low + mid + high;
-    if (total < 0.001) return .{ .r = 0, .g = 0, .b = 0, .a = 0 };
+    const strongest = @max(@max(low, mid), high);
+    if (strongest < 0.001) return .{ .r = 0, .g = 0, .b = 0, .a = 0 };
     const strength = 0.25 + 0.75 * @sqrt(std.math.clamp(level, 0, 1));
+    const gain = 255 * strength / strongest;
     return .{
-        .r = @intFromFloat((low * @as(f32, low_color.r) + mid * @as(f32, mid_color.r) + high * @as(f32, high_color.r)) / total * strength),
-        .g = @intFromFloat((low * @as(f32, low_color.g) + mid * @as(f32, mid_color.g) + high * @as(f32, high_color.g)) / total * strength),
-        .b = @intFromFloat((low * @as(f32, low_color.b) + mid * @as(f32, mid_color.b) + high * @as(f32, high_color.b)) / total * strength),
+        .r = @intFromFloat(low * gain),
+        .g = @intFromFloat(mid * gain),
+        .b = @intFromFloat(high * gain),
         .a = 0xff,
     };
 }
@@ -63,16 +60,19 @@ fn mix(from: Color, to: Color, amount: f32) Color {
     };
 }
 
-test "a single band takes its own colour" {
+test "each band owns its RGB channel" {
     const testing = std.testing;
     const kick = [_]pl.analysis.Band{.{ .low = 7, .mid = 0, .high = 0 }};
-    try testing.expectEqual(low_color, tintBands(1, &kick));
+    const red = tintBands(1, &kick);
+    try testing.expect(red.r == 255 and red.g == 0 and red.b == 0);
 
     const mids = [_]pl.analysis.Band{.{ .low = 0, .mid = 7, .high = 0 }};
-    try testing.expectEqual(mid_color, tintBands(1, &mids));
+    const green = tintBands(1, &mids);
+    try testing.expect(green.g == 255 and green.r == 0 and green.b == 0);
 
     const highs = [_]pl.analysis.Band{.{ .low = 0, .mid = 0, .high = 7 }};
-    try testing.expectEqual(high_color, tintBands(1, &highs));
+    const blue = tintBands(1, &highs);
+    try testing.expect(blue.b == 255 and blue.r == 0 and blue.g == 0);
 }
 
 test "quiet columns stay visible but dimmer" {
