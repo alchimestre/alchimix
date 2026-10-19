@@ -52,6 +52,7 @@ pub const Source = struct {
     io: std.Io,
     items: std.ArrayListUnmanaged(Track) = .empty,
     hits: std.ArrayListUnmanaged(Track) = .empty,
+    playlists: std.ArrayListUnmanaged(library.Playlist) = .empty,
 
     pub fn open(allocator: std.mem.Allocator, options: Options) !Source {
         var arena = std.heap.ArenaAllocator.init(allocator);
@@ -64,7 +65,7 @@ pub const Source = struct {
 
         const path_z = try a.dupeSentinel(u8, path, 0);
         var db: ?*c.sqlite3 = null;
-        if (c.sqlite3_open_v2(path_z.ptr, &db, c.SQLITE_OPEN_READONLY, null) != c.SQLITE_OK) {
+        if (c.sqlite3_open_v2(path_z.ptr, &db, c.SQLITE_OPEN_READWRITE, null) != c.SQLITE_OK) {
             if (db) |d| _ = c.sqlite3_close(d);
             return Error.OpenFailed;
         }
@@ -86,6 +87,7 @@ pub const Source = struct {
         };
         errdefer self.arena.deinit();
         try self.reload();
+        try self.reloadPlaylists();
         return self;
     }
 
@@ -124,6 +126,124 @@ pub const Source = struct {
             t.deriveBpm();
             try self.items.append(a, t);
         }
+    }
+
+    fn reloadPlaylists(self: *Source) !void {
+        const a = self.arena.allocator();
+        self.playlists.clearRetainingCapacity();
+
+        var stmt: ?*c.sqlite3_stmt = null;
+        const sql =
+            \\select ID, Name, ParentID, Attribute
+            \\from djmdPlaylist
+            \\where rb_local_deleted = 0
+            \\order by Seq
+        ;
+        if (c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null) != c.SQLITE_OK) return Error.QueryFailed;
+        defer _ = c.sqlite3_finalize(stmt);
+        const s = stmt.?;
+        while (true) {
+            const rc = c.sqlite3_step(s);
+            if (rc == c.SQLITE_DONE) break;
+            if (rc != c.SQLITE_ROW) return Error.QueryFailed;
+            try self.playlists.append(a, .{
+                .id = try a.dupe(u8, column(s, 0)),
+                .name = try a.dupe(u8, column(s, 1)),
+                .parent = try a.dupe(u8, column(s, 2)),
+                .folder = c.sqlite3_column_int(s, 3) != 0,
+            });
+        }
+    }
+
+    fn playlistsFn(ctx: *anyopaque) anyerror![]const library.Playlist {
+        return ctxOf(ctx).playlists.items;
+    }
+
+    fn playlistTracksFn(ctx: *anyopaque, allocator: std.mem.Allocator, playlist_id: []const u8) anyerror![]const u64 {
+        const self = ctxOf(ctx);
+        var out: std.ArrayListUnmanaged(u64) = .empty;
+        errdefer out.deinit(allocator);
+
+        const sql = "select ContentID from djmdSongPlaylist where PlaylistID = ?1 and rb_local_deleted = 0 order by TrackNo";
+        var stmt: ?*c.sqlite3_stmt = null;
+        if (c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null) != c.SQLITE_OK) return Error.QueryFailed;
+        defer _ = c.sqlite3_finalize(stmt);
+        const s = stmt.?;
+        _ = c.sqlite3_bind_text(s, 1, playlist_id.ptr, @intCast(playlist_id.len), null);
+        while (true) {
+            const rc = c.sqlite3_step(s);
+            if (rc == c.SQLITE_DONE) break;
+            if (rc != c.SQLITE_ROW) return Error.QueryFailed;
+            try out.append(allocator, @intCast(c.sqlite3_column_int64(s, 0)));
+        }
+        return out.toOwnedSlice(allocator);
+    }
+
+    fn createPlaylistFn(ctx: *anyopaque, playlist_name: []const u8, track_ids: []const u64) anyerror!void {
+        const self = ctxOf(ctx);
+        const a = self.arena.allocator();
+        const next_id = try self.queryInt("select coalesce(max(cast(ID as integer)), 0) + 1 from djmdPlaylist");
+        const next_seq = try self.queryInt("select coalesce(max(Seq), 0) + 1 from djmdPlaylist");
+        const next_usn = try self.queryInt("select coalesce(max(rb_local_usn), 0) + 1 from djmdPlaylist");
+        const uuid = try makeUuid(a, next_id);
+        const escaped = try escapeQuotes(a, playlist_name);
+        try self.exec(
+            "insert into djmdPlaylist (ID, Seq, Name, ParentID, Attribute, UUID, rb_local_usn, created_at, updated_at) " ++
+                "values ({d}, {d}, '{s}', 'root', 0, '{s}', {d}, {s}, {s})",
+            .{ next_id, next_seq, escaped, uuid, next_usn, nowSql(), nowSql() },
+        );
+        const playlist_id = try std.fmt.allocPrint(a, "{d}", .{next_id});
+        for (track_ids, 1..) |track_id, number| {
+            try self.appendEntry(playlist_id, track_id, number);
+        }
+        try self.reloadPlaylists();
+    }
+
+    fn addToPlaylistFn(ctx: *anyopaque, playlist_id: []const u8, track_id: u64) anyerror!void {
+        const self = ctxOf(ctx);
+        const count_sql = try std.fmt.allocPrintSentinel(
+            self.arena.allocator(),
+            "select count(*) from djmdSongPlaylist where PlaylistID = '{s}' and ContentID = {d} and rb_local_deleted = 0",
+            .{ try escapeQuotes(self.arena.allocator(), playlist_id), track_id },
+            0,
+        );
+        if (try self.queryInt(count_sql) != 0) return;
+        const next_no = try self.queryIntFmt(
+            "select coalesce(max(TrackNo), 0) + 1 from djmdSongPlaylist where PlaylistID = '{s}'",
+            .{try escapeQuotes(self.arena.allocator(), playlist_id)},
+        );
+        try self.appendEntry(playlist_id, track_id, next_no);
+    }
+
+    fn appendEntry(self: *Source, playlist_id: []const u8, track_id: u64, number: u64) !void {
+        const a = self.arena.allocator();
+        const entry_id = try makeUuid(a, track_id *% 1_000_003 +% number);
+        const uuid = try makeUuid(a, track_id *% 2_000_003 +% number);
+        const usn = try self.queryInt("select coalesce(max(rb_local_usn), 0) + 1 from djmdSongPlaylist");
+        try self.exec(
+            "insert into djmdSongPlaylist (ID, PlaylistID, ContentID, TrackNo, UUID, rb_local_usn, created_at, updated_at) " ++
+                "values ('{s}', '{s}', {d}, {d}, '{s}', {d}, {s}, {s})",
+            .{ entry_id, playlist_id, track_id, number, uuid, usn, nowSql(), nowSql() },
+        );
+    }
+
+    fn queryInt(self: *Source, sql: [:0]const u8) !u64 {
+        var stmt: ?*c.sqlite3_stmt = null;
+        if (c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null) != c.SQLITE_OK) return Error.QueryFailed;
+        defer _ = c.sqlite3_finalize(stmt);
+        const s = stmt.?;
+        if (c.sqlite3_step(s) != c.SQLITE_ROW) return Error.QueryFailed;
+        return @intCast(c.sqlite3_column_int64(s, 0));
+    }
+
+    fn queryIntFmt(self: *Source, comptime fmt: []const u8, args: anytype) !u64 {
+        const sql = try std.fmt.allocPrintSentinel(self.arena.allocator(), fmt, args, 0);
+        return self.queryInt(sql);
+    }
+
+    fn exec(self: *Source, comptime fmt: []const u8, args: anytype) !void {
+        const sql = try std.fmt.allocPrintSentinel(self.arena.allocator(), fmt, args, 0);
+        if (c.sqlite3_exec(self.db, sql.ptr, null, null, null) != c.SQLITE_OK) return Error.QueryFailed;
     }
 
     fn ctxOf(ctx: *anyopaque) *Source {
@@ -181,10 +301,34 @@ pub const Source = struct {
         .all = allFn,
         .search = searchFn,
         .analysis = analysisFn,
+        .playlists = playlistsFn,
+        .playlistTracks = playlistTracksFn,
+        .createPlaylist = createPlaylistFn,
+        .addToPlaylist = addToPlaylistFn,
         .name = nameFn,
         .deinit = deinitFn,
     };
 };
+
+fn escapeQuotes(allocator: std.mem.Allocator, text: []const u8) ![]const u8 {
+    return std.mem.replaceOwned(u8, allocator, text, "'", "''");
+}
+
+fn makeUuid(allocator: std.mem.Allocator, seed: u64) ![]const u8 {
+    var bytes: [16]u8 = undefined;
+    var prng = std.Random.DefaultPrng.init(seed);
+    prng.random().bytes(&bytes);
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    return std.fmt.allocPrint(allocator, "{x:0>2}{x:0>2}{x:0>2}{x:0>2}-{x:0>2}{x:0>2}-{x:0>2}{x:0>2}-{x:0>2}{x:0>2}-{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}", .{
+        bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+        bytes[8], bytes[9], bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15],
+    });
+}
+
+fn nowSql() []const u8 {
+    return "strftime('%Y-%m-%d %H:%M:%f +00:00', 'now')";
+}
 
 fn column(stmt: *c.sqlite3_stmt, index: c_int) []const u8 {
     const p = c.sqlite3_column_text(stmt, index);

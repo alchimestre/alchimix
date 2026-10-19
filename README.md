@@ -44,7 +44,11 @@ bell, high shelf); HPF, BPF and LPF presets load a shape, and clicking the activ
 preset clears the EQ. A trim slider at the far right doubles as a level meter;
 `M` under a lane's play button mutes it while the clock keeps running. The footer
 sets the waveform span (16, 32 or 64 beats), next to the master BPM. The
-waveform is tinted by rekordbox's three bands: kick red, mid green, high blue. Changes apply without restarting the decoder.
+waveform is tinted by rekordbox's three bands: kick red, mid green, high blue.
+
+The right column lists rekordbox playlists and folders. Picking a playlist
+narrows suggestions to its tracks, `+` on a suggestion adds it to that playlist,
+and `save crate` writes the current crate as a new playlist. Changes apply without restarting the decoder.
 
 ## Editing a crate
 

@@ -53,6 +53,13 @@ fn mixerLevel(context: *anyopaque, uid: u64) f32 {
     return mixer.level(uid);
 }
 
+fn containsId(ids: []const u64, id: u64) bool {
+    for (ids) |value| {
+        if (value == id) return true;
+    }
+    return false;
+}
+
 fn presetName(preset: pl.mixer.EqPreset) []const u8 {
     return switch (preset) {
         .lpf => "LPF",
@@ -71,6 +78,16 @@ pub const App = struct {
     mixer: *pl.mixer.Mixer,
     transport: pl.transport.Transport,
     crate: pl.crate.Crate,
+
+    /// Playlists and folders from the source. Strings live in the source.
+    playlists: []const pl.library.Playlist = &.{},
+    /// Folders whose children are shown; ids are borrowed from `playlists`.
+    open_folders: [64][]const u8 = undefined,
+    open_count: usize = 0,
+    /// Owning copies: the source may rebuild its playlist list after a write.
+    selected_playlist: ?[]const u8 = null,
+    playlist_filter: []const u64 = &.{},
+    filtered_found: []const Track = &.{},
 
     query: std.ArrayList(u8) = .empty,
     found: []const Track = &.{},
@@ -139,7 +156,7 @@ pub const App = struct {
     pub fn init(allocator: std.mem.Allocator, library: pl.library.Library, io: std.Io) !App {
         const mixer = try allocator.create(pl.mixer.Mixer);
         mixer.* = pl.mixer.Mixer.init(allocator, io);
-        return .{
+        var app: App = .{
             .allocator = allocator,
             .io = io,
             .library = library,
@@ -160,6 +177,8 @@ pub const App = struct {
             .crate = pl.crate.Crate.init(allocator),
             .hit_map = hit.HitMap.init(allocator),
         };
+        app.playlists = library.playlists() catch &.{};
+        return app;
     }
 
     pub fn deinit(self: *App) void {
@@ -177,12 +196,27 @@ pub const App = struct {
         self.bpm_text.deinit(self.allocator);
         self.allocator.free(self.ranked);
         self.query.deinit(self.allocator);
+        if (self.selected_playlist) |id| {
+            if (id.len > 0) self.allocator.free(id);
+        }
+        if (self.playlist_filter.len > 0) self.allocator.free(self.playlist_filter);
+        if (self.filtered_found.len > 0) self.allocator.free(self.filtered_found);
         self.crate.deinit();
     }
 
     /// Re-run the search, then rank what could follow the selected track.
     pub fn refresh(self: *App) !void {
+        if (self.filtered_found.len > 0) self.allocator.free(self.filtered_found);
+        self.filtered_found = &.{};
         self.found = self.library.search(self.query.items) catch &.{};
+        if (self.selected_playlist != null) {
+            var keep: std.ArrayListUnmanaged(Track) = .empty;
+            for (self.found) |track| {
+                if (containsId(self.playlist_filter, track.id)) keep.append(self.allocator, track) catch {};
+            }
+            self.filtered_found = keep.toOwnedSlice(self.allocator) catch &.{};
+            self.found = self.filtered_found;
+        }
 
         self.allocator.free(self.ranked);
         self.ranked = &.{};
@@ -291,6 +325,157 @@ pub const App = struct {
         }
     }
 
+    fn folderOpen(self: *const App, id: []const u8) bool {
+        for (self.open_folders[0..self.open_count]) |open| {
+            if (std.mem.eql(u8, open, id)) return true;
+        }
+        return false;
+    }
+
+    fn toggleFolder(self: *App, id: []const u8) void {
+        if (self.folderOpen(id)) {
+            var index: usize = 0;
+            while (index < self.open_count) : (index += 1) {
+                if (!std.mem.eql(u8, self.open_folders[index], id)) continue;
+                self.open_folders[index] = self.open_folders[self.open_count - 1];
+                self.open_count -= 1;
+                break;
+            }
+        } else if (self.open_count < self.open_folders.len) {
+            self.open_folders[self.open_count] = id;
+            self.open_count += 1;
+        }
+        dvui.refresh(null, @src(), null);
+    }
+
+    fn selectPlaylist(self: *App, index: usize) void {
+        const playlist = self.playlists[index];
+        if (playlist.folder) {
+            self.toggleFolder(playlist.id);
+            return;
+        }
+
+        if (self.selected_playlist) |old| {
+            if (old.len > 0) self.allocator.free(old);
+        }
+        self.selected_playlist = self.allocator.dupe(u8, playlist.id) catch null;
+
+        if (self.playlist_filter.len > 0) self.allocator.free(self.playlist_filter);
+        self.playlist_filter = self.library.playlistTracks(self.allocator, playlist.id) catch &.{};
+        self.refresh() catch {};
+        dvui.refresh(null, @src(), null);
+    }
+
+    fn addToPlaylist(self: *App, track_id: u64) void {
+        const playlist_id = self.selected_playlist orelse return;
+        self.library.addToPlaylist(playlist_id, track_id) catch return;
+        if (self.playlist_filter.len > 0) self.allocator.free(self.playlist_filter);
+        self.playlist_filter = self.library.playlistTracks(self.allocator, playlist_id) catch &.{};
+        self.refresh() catch {};
+        dvui.refresh(null, @src(), null);
+    }
+
+    fn saveCratePlaylist(self: *App) void {
+        var ids: [256]u64 = undefined;
+        const count = @min(self.crate.len(), ids.len);
+        for (0..count) |index| {
+            const track = self.crate.at(index) orelse continue;
+            ids[index] = track.id;
+        }
+        if (count == 0) return;
+
+        var name_buffer: [128]u8 = undefined;
+        const name = if (self.crate.seedTrack()) |seed|
+            std.fmt.bufPrint(&name_buffer, "Crate · {s}", .{seed.title}) catch "Crate"
+        else
+            "Crate";
+        self.library.createPlaylist(name, ids[0..count]) catch return;
+        self.playlists = self.library.playlists() catch &.{};
+        dvui.refresh(null, @src(), null);
+    }
+
+    fn playlistRow(self: *App, playlist: pl.library.Playlist, index: usize, depth: usize) void {
+        const selected = if (self.selected_playlist) |id| std.mem.eql(u8, id, playlist.id) else false;
+        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{
+            .expand = .horizontal,
+            .min_size_content = .{ .h = 24 },
+            .padding = .{ .x = 4 + 12 * @as(f32, @floatFromInt(depth)), .y = 2 },
+            .margin = .{ .y = 1 },
+            .background = selected,
+            .color_fill = .{ .color = Palette.selection },
+            .color_fill_hover = .{ .color = Palette.hover },
+            .id_extra = 7000 + index,
+        });
+        defer row.deinit();
+
+        const glyph = if (playlist.folder) (if (self.folderOpen(playlist.id)) "▾ " else "▸ ") else "";
+        var text: [160]u8 = undefined;
+        const label = std.fmt.bufPrint(&text, "{s}{s}", .{ glyph, playlist.name }) catch playlist.name;
+        labelStyled(@src(), label, .{
+            .expand = .horizontal,
+            .color_text = .{ .color = if (playlist.folder) Palette.purple else Palette.ink },
+            .font = if (playlist.folder) headingFont() else bodyFont(),
+            .id_extra = 7100 + index,
+        });
+
+        const target: hit.Target = if (playlist.folder)
+            .{ .playlist_toggle = index }
+        else
+            .{ .playlist = index };
+        self.hit_map.append(rectFrom(row.data().contentRectScale().r), target);
+    }
+
+    fn playlistChildren(self: *App, parent: []const u8, depth: usize) void {
+        for (self.playlists, 0..) |playlist, index| {
+            if (!std.mem.eql(u8, playlist.parent, parent)) continue;
+            self.playlistRow(playlist, index, depth);
+            if (playlist.folder and self.folderOpen(playlist.id)) {
+                self.playlistChildren(playlist.id, depth + 1);
+            }
+        }
+    }
+
+    fn framePlaylists(self: *App) void {
+        var panel = dvui.box(@src(), .{ .dir = .vertical }, .{
+            .min_size_content = .{ .w = 230 },
+            .max_size_content = .{ .w = 230, .h = 100000 },
+            .expand = .vertical,
+            .background = true,
+            .color_fill = .{ .color = Palette.panel },
+            .padding = .{ .x = 10, .y = 8 },
+        });
+        defer panel.deinit();
+
+        var head = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal });
+        defer head.deinit();
+        labelStyled(@src(), "playlists", .{
+            .expand = .horizontal,
+            .color_text = .{ .color = Palette.purple },
+            .font = headingFont(),
+            .margin = .{ .x = 4, .y = 2 },
+            .id_extra = 7200,
+        });
+
+        var save = dvui.box(@src(), .{ .dir = .horizontal }, .{
+            .min_size_content = .{ .w = 74, .h = 20 },
+            .margin = .{ .x = 2, .y = 2 },
+            .background = true,
+            .color_fill = .{ .color = Palette.field },
+            .id_extra = 7201,
+        });
+        defer save.deinit();
+        labelStyled(@src(), "save crate", .{
+            .gravity_x = 0.5,
+            .gravity_y = 0.5,
+            .color_text = .{ .color = Palette.muted },
+            .font = metaFont(),
+            .id_extra = 7202,
+        });
+        self.hit_map.append(rectFrom(save.data().contentRectScale().r), .save_playlist);
+
+        self.playlistChildren("root", 0);
+    }
+
     fn frameBody(self: *App) void {
         // A minimum of zero lets the body shrink to the window; measuring the
         // strips instead made every resize lag a frame.
@@ -303,6 +488,7 @@ pub const App = struct {
 
         self.framePicker();
         self.frameCanvas();
+        self.framePlaylists();
     }
 
     fn framePicker(self: *App) void {
@@ -676,6 +862,16 @@ pub const App = struct {
                 dvui.refresh(null, @src(), null);
             },
             .clear_all => self.clearAll(),
+            .select_playlist => |index| {
+                if (index >= self.playlists.len) return;
+                self.selectPlaylist(index);
+            },
+            .toggle_playlist => |index| {
+                if (index >= self.playlists.len) return;
+                self.toggleFolder(self.playlists[index].id);
+            },
+            .save_playlist => self.saveCratePlaylist(),
+            .add_to_playlist => |track_id| self.addToPlaylist(track_id),
             .toggle_lane_play => |index| {
                 if (index >= self.grid.items.len) return;
                 if (self.transport.isPlaying(index)) {
@@ -1009,6 +1205,15 @@ pub const App = struct {
         self.transport.endSync();
         self.crate.clear();
         self.grid_dirty = true;
+        if (self.selected_playlist) |id| {
+            if (id.len > 0) self.allocator.free(id);
+        }
+        self.selected_playlist = null;
+        if (self.playlist_filter.len > 0) self.allocator.free(self.playlist_filter);
+        self.playlist_filter = &.{};
+        if (self.filtered_found.len > 0) self.allocator.free(self.filtered_found);
+        self.filtered_found = &.{};
+        self.open_count = 0;
         self.selected.clearRetainingCapacity();
         self.query.clearRetainingCapacity();
         self.master_text.clearRetainingCapacity();
@@ -1490,6 +1695,7 @@ fn pickRow(app: *App, row_index: usize, track: Track, step: ?Transition) void {
     defer outer.deinit();
 
     const title_color = if (step) |known| stepColor(known) else Palette.ink;
+    var add_rect: ?hit.Rect = null;
 
     {
         var row = dvui.box(@src(), .{ .dir = .horizontal }, .{
@@ -1530,7 +1736,27 @@ fn pickRow(app: *App, row_index: usize, track: Track, step: ?Transition) void {
             .font = metaFont(),
             .id_extra = row_index * 16 + 5,
         });
+
+        if (app.selected_playlist != null) {
+            var add = dvui.box(@src(), .{ .dir = .horizontal }, .{
+                .min_size_content = .{ .w = 22, .h = 20 },
+                .margin = .{ .x = 4, .y = 0 },
+                .background = true,
+                .color_fill = .{ .color = Palette.field },
+                .id_extra = row_index * 16 + 10,
+            });
+            defer add.deinit();
+            labelStyled(@src(), "+", .{
+                .gravity_x = 0.5,
+                .gravity_y = 0.5,
+                .color_text = .{ .color = Palette.green },
+                .id_extra = row_index * 16 + 11,
+            });
+            add_rect = rectFrom(add.data().contentRectScale().r);
+        }
     }
+
+    if (add_rect) |rect| app.hit_map.append(rect, .{ .playlist_add = track.id });
 
     // The row carries a track; the play button on its left keeps its clicks.
     const row_rect = rectFrom(outer.data().contentRectScale().r)

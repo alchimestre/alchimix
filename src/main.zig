@@ -23,7 +23,42 @@ pub fn main(init: std.process.Init) !void {
     if (std.mem.eql(u8, command, "waveform-demo")) {
         return runWaveformDemo(init);
     }
+    if (std.mem.eql(u8, command, "playlists")) {
+        return showPlaylists(init);
+    }
+    if (std.mem.eql(u8, command, "playlist-save")) {
+        return savePlaylist(init, args.next() orelse "", &args);
+    }
     usage();
+}
+
+fn showPlaylists(init: std.process.Init) !void {
+    var collection: ?pl.rekordbox.Source = null;
+    var demo: pl.memory.Source = undefined;
+    const library = try openLibrary(init, &collection, &demo);
+    defer library.deinit();
+    for (try library.playlists()) |playlist| {
+        const kind = if (playlist.folder) "folder" else "list";
+        std.debug.print("{s}\t{s}\t{s}\n", .{ playlist.id, kind, playlist.name });
+    }
+}
+
+fn savePlaylist(init: std.process.Init, name: []const u8, args: *std.process.Args.Iterator) !void {
+    var ids: [256]u64 = undefined;
+    var count: usize = 0;
+    while (args.next()) |text| {
+        if (count >= ids.len) break;
+        ids[count] = std.fmt.parseInt(u64, text, 10) catch continue;
+        count += 1;
+    }
+    if (count == 0) return error.NoTracks;
+
+    var collection: ?pl.rekordbox.Source = null;
+    var demo: pl.memory.Source = undefined;
+    const library = try openLibrary(init, &collection, &demo);
+    defer library.deinit();
+    try library.createPlaylist(name, ids[0..count]);
+    std.debug.print("saved {d} tracks to {s}\n", .{ count, name });
 }
 
 fn openCanvas(init: std.process.Init) !void {
@@ -48,6 +83,8 @@ fn usage() void {
         \\  library            report what the collection holds
         \\  suggest <text>     rank what could follow the first match
         \\  mix <out> <s> <files...>  render the mixer to raw f32le, no window
+        \\  playlists          list rekordbox playlists and folders
+        \\  playlist-save <name> <ids...>  create a playlist from track ids
         \\  waveform-demo      compare four lane waveform renderings
         \\
     , .{});

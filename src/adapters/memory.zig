@@ -56,6 +56,22 @@ pub const Source = struct {
         return self.hits.items;
     }
 
+    fn playlistsFn(_: *anyopaque) anyerror![]const library.Playlist {
+        return &.{};
+    }
+
+    fn playlistTracksFn(_: *anyopaque, allocator: std.mem.Allocator, _: []const u8) anyerror![]const u64 {
+        return allocator.alloc(u64, 0);
+    }
+
+    fn createPlaylistFn(_: *anyopaque, _: []const u8, _: []const u64) anyerror!void {
+        return error.Unsupported;
+    }
+
+    fn addToPlaylistFn(_: *anyopaque, _: []const u8, _: u64) anyerror!void {
+        return error.Unsupported;
+    }
+
     fn nameFn(_: *anyopaque) []const u8 {
         return "memory";
     }
@@ -71,6 +87,10 @@ pub const Source = struct {
         .all = allFn,
         .search = searchFn,
         .analysis = analysisFn,
+        .playlists = playlistsFn,
+        .playlistTracks = playlistTracksFn,
+        .createPlaylist = createPlaylistFn,
+        .addToPlaylist = addToPlaylistFn,
         .name = nameFn,
         .deinit = deinitFn,
     };
