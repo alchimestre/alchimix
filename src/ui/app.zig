@@ -92,12 +92,12 @@ pub const App = struct {
     selected_playlist: ?[]const u8 = null,
     /// Lanes inside the canvas viewport this frame; global transport uses them
     /// once more than four tracks are loaded.
-    visible_lanes: [64]usize = undefined,
-    visible_count: usize = 0,
-    visible_top: f32 = 0,
-    visible_bottom: f32 = 0,
+    lane_rects: [64]hit.Rect = undefined,
+    lane_count: usize = 0,
     lane_right: f32 = 0,
-    group: [64]usize = undefined,
+    /// First lane of the four-lane group global play/stop acts on.
+    group_start: usize = 0,
+    group: [4]usize = undefined,
 
     query: std.ArrayList(u8) = .empty,
     found: []const Track = &.{},
@@ -376,6 +376,7 @@ pub const App = struct {
         }
 
         self.grid_dirty = true;
+        self.group_start = 0;
         if (self.selected_playlist) |old| {
             if (old.len > 0) self.allocator.free(old);
         }
@@ -754,9 +755,7 @@ pub const App = struct {
         defer canvas.deinit();
         self.canvas = rectFrom(canvas.data().borderRectScale().r);
 
-        self.visible_count = 0;
-        self.visible_top = 0;
-        self.visible_bottom = 0;
+        self.lane_count = 0;
         self.lane_right = 0;
 
         if (self.crate.len() == 0) {
@@ -1281,6 +1280,7 @@ pub const App = struct {
             if (id.len > 0) self.allocator.free(id);
         }
         self.selected_playlist = null;
+        self.group_start = 0;
         self.open_count = 0;
         self.selected.clearRetainingCapacity();
         self.query.clearRetainingCapacity();
@@ -1315,6 +1315,16 @@ pub const App = struct {
                 if (self.transport.isPlaying(slot)) self.transport.jogPause(slot, .bar);
                 self.transport.dragBar(slot, delta);
                 dvui.refresh(null, @src(), null);
+            },
+            .group => {
+                if (self.crate.len() <= 4 or self.lane_count == 0) return;
+                for (0..self.lane_count) |index| {
+                    const rect = self.lane_rects[index];
+                    if (pull.p.y < rect.y or pull.p.y >= rect.y + rect.h) continue;
+                    self.group_start = @min(index, self.crate.len() - 4);
+                    dvui.refresh(null, @src(), null);
+                    return;
+                }
             },
             .eq_node => |at| {
                 if (at.lane >= self.grid.items.len) return;
@@ -1485,53 +1495,68 @@ pub const App = struct {
             self.hit_map.append(bar_rect, .{ .nav = index });
         }
 
-        self.noteVisible(index, col_rect);
+        self.noteLane(index, col_rect);
     }
 
-    fn noteVisible(self: *App, index: usize, rect: hit.Rect) void {
-        if (self.canvas.w <= 0) return;
-        if (rect.y >= self.canvas.bottom() or rect.y + rect.h <= self.canvas.y) return;
-        if (self.visible_count >= self.visible_lanes.len) return;
-        self.visible_lanes[self.visible_count] = index;
-        self.visible_count += 1;
-        if (self.visible_count == 1) self.visible_top = rect.y;
-        self.visible_bottom = rect.y + rect.h;
+    fn noteLane(self: *App, index: usize, rect: hit.Rect) void {
+        if (index >= self.lane_rects.len) return;
+        self.lane_rects[index] = rect;
+        self.lane_count = @max(self.lane_count, index + 1);
         self.lane_right = @max(self.lane_right, rect.x + rect.w);
     }
 
     /// Draws the brace marking the group global play/stop acts on.
+    fn groupStart(self: *const App) usize {
+        const total = self.crate.len();
+        if (total <= 4) return 0;
+        return @min(self.group_start, total - 4);
+    }
+
     fn drawGroupBrace(self: *App) void {
-        if (self.crate.len() <= 4 or self.visible_count == 0) return;
-        const top = self.visible_top + 4;
-        const bottom = self.visible_bottom - 4;
+        const total = self.crate.len();
+        if (total <= 4) return;
+        const start = self.groupStart();
+        if (start + 3 >= self.lane_count) return;
+
+        const top = self.lane_rects[start].y + 3;
+        const bottom = self.lane_rects[start + 3].y + self.lane_rects[start + 3].h - 3;
         if (bottom - top < 12) return;
 
         var builder = dvui.Path.Builder.init(self.allocator);
         defer builder.deinit();
-        const x = self.lane_right + 6;
+        // Clear of the trim bar, and thick enough to grab.
+        const x = self.lane_right + 56;
         const mid = (top + bottom) / 2;
+        const thickness: f32 = 7;
         const color: dvui.Color = .{ .r = 0xbd, .g = 0x93, .b = 0xf9, .a = 0xff };
 
-        fillRectInto(&builder, x, top, 2, mid - top - 6, color);
-        fillRectInto(&builder, x, mid + 6, 2, bottom - mid - 6, color);
-        fillRectInto(&builder, x - 5, top, 7, 2, color);
-        fillRectInto(&builder, x - 5, bottom - 2, 7, 2, color);
-        fillRectInto(&builder, x + 2, mid - 6, 3, 2, color);
-        fillRectInto(&builder, x + 4, mid - 4, 3, 2, color);
-        fillRectInto(&builder, x + 5, mid - 1, 3, 2, color);
-        fillRectInto(&builder, x + 4, mid + 1, 3, 2, color);
-        fillRectInto(&builder, x + 2, mid + 3, 3, 2, color);
+        fillRectInto(&builder, x, top, thickness, mid - top - 8, color);
+        fillRectInto(&builder, x, mid + 8, thickness, bottom - mid - 8, color);
+        fillRectInto(&builder, x - 8, top, 8 + thickness, thickness, color);
+        fillRectInto(&builder, x - 8, bottom - thickness, 8 + thickness, thickness, color);
+        fillRectInto(&builder, x + thickness, mid - 8, 4, thickness, color);
+        fillRectInto(&builder, x + thickness + 3, mid - 5, 4, thickness, color);
+        fillRectInto(&builder, x + thickness + 5, mid - thickness / 2, 5, thickness, color);
+        fillRectInto(&builder, x + thickness + 3, mid + 2, 4, thickness, color);
+        fillRectInto(&builder, x + thickness, mid + 5, 4, thickness, color);
+
+        self.hit_map.append(.{
+            .x = x - 14,
+            .y = top,
+            .w = 36,
+            .h = bottom - top,
+        }, .group);
     }
 
     fn transportGroup(self: *App) []const usize {
         const total = self.crate.len();
-        if (total <= 4 or self.visible_count == 0) {
+        if (total <= 4) {
             for (0..@min(total, self.group.len)) |index| self.group[index] = index;
             return self.group[0..@min(total, self.group.len)];
         }
-        const count = @min(self.visible_count, self.group.len);
-        @memcpy(self.group[0..count], self.visible_lanes[0..count]);
-        return self.group[0..count];
+        const start = self.groupStart();
+        for (0..4) |offset| self.group[offset] = start + offset;
+        return self.group[0..4];
     }
 
     /// Spectrum bars under the EQ curve, with one draggable node per band.
