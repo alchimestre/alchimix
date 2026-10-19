@@ -62,9 +62,9 @@ fn presetName(preset: pl.mixer.EqPreset) []const u8 {
     };
 }
 
-pub const WaveStyle = enum { silhouette, outline_body, band_rows, beat_blocks };
+pub const WaveStyle = enum { silhouette, outline_body, band_rows };
 
-pub const wave_style_labels = [_][]const u8{ "silhouette", "outline + body", "band rows", "beat blocks" };
+pub const wave_style_labels = [_][]const u8{ "silhouette", "outline + body", "band rows" };
 
 pub const App = struct {
     allocator: std.mem.Allocator,
@@ -1088,7 +1088,7 @@ pub const App = struct {
                 const full_rect = rectFrom(wave_box.data().contentRectScale().r).clipped(col_rect);
                 // The expanding box can report the whole row before the fixed
                 // EQ panel is placed; keep the drawing out from under it.
-                const eq_reserved = (46 + 124 + 28 + 8) * self.scale_hint;
+                const eq_reserved = (46 + 124 + 18 + 8) * self.scale_hint;
                 const wave_rect = hit.Rect{
                     .x = full_rect.x,
                     .y = full_rect.y,
@@ -1154,7 +1154,7 @@ pub const App = struct {
 
             {
                 var trim = dvui.box(@src(), .{ .dir = .vertical }, .{
-                    .min_size_content = .{ .w = 28, .h = 0 },
+                    .min_size_content = .{ .w = 18, .h = 0 },
                     .expand = .vertical,
                     .margin = .{ .x = 4, .y = 0 },
                     .id_extra = 9600 + index,
@@ -1261,8 +1261,10 @@ pub const App = struct {
 
         const fy = 0.5 - self.transport.trim(index) / (2 * pl.mixer.trim_max_db);
         const knob_y = rect.y + fy * rect.h;
-        fillRect(self.allocator, rect.x, knob_y - 1.5, rect.w, 3, Palette.ink);
-        self.hit_map.append(rect, .{ .trim = index });
+        // The handle is what the pointer aims at, so it is wider than the track.
+        fillRect(self.allocator, rect.x - 2, knob_y - 3.5, rect.w + 4, 7, Palette.ink);
+        const grab = hit.Rect{ .x = rect.x - 2, .y = rect.y, .w = rect.w + 4, .h = rect.h };
+        self.hit_map.append(grab, .{ .trim = index });
     }
 
     /// Beat count of the lane's track, from its grid.
@@ -1288,7 +1290,6 @@ pub const App = struct {
             .silhouette => self.paintSilhouette(&builder, analysis, rect, start_sample, samples_per_px),
             .outline_body => self.paintOutlineBody(&builder, analysis, rect, start_sample, samples_per_px),
             .band_rows => self.paintBandRows(&builder, analysis, rect, start_sample, samples_per_px),
-            .beat_blocks => self.paintBeatBlocks(&builder, analysis, rect, start_beat, samples_per_beat),
         }
 
         self.paintBeats(rect, start_beat, beat_offset);
@@ -1375,23 +1376,6 @@ pub const App = struct {
                 const height = @max(1, (row_h - 4) * level);
                 fillRectInto(builder, rect.x + x, top + row_h - height - 1, 6, height, mixColor(Palette.field, colors[row], 0.35 + 0.65 * level));
             }
-        }
-    }
-
-    fn paintBeatBlocks(self: *App, builder: *dvui.Path.Builder, analysis: *const pl.analysis.Analysis, rect: hit.Rect, start_beat: f32, samples_per_beat: f32) void {
-        const visible = self.visibleBeats();
-        const block_w = rect.w / visible;
-        var beat: f32 = @ceil(start_beat);
-        while (beat < start_beat + visible) : (beat += 1) {
-            const bx = (beat - start_beat) / visible * rect.w;
-            const from: usize = @intFromFloat(@max(0, beat * samples_per_beat));
-            const to: usize = @min(analysis.waveform.len, @as(usize, @intFromFloat(@max(0, (beat + 1) * samples_per_beat))));
-            if (to <= from) continue;
-            var sum: usize = 0;
-            for (analysis.waveform[from..to]) |value| sum += value;
-            const level = @as(f32, @floatFromInt(sum)) / @as(f32, @floatFromInt(to - from)) / 255;
-            const height = @max(1, (rect.h - 4) * level);
-            fillRectInto(builder, rect.x + bx + 1, rect.bottom() - height - 2, @max(1, block_w - 2), height, bandColor(level));
         }
     }
 
@@ -1893,22 +1877,22 @@ fn pointFrom(point: dvui.Point.Physical) hit.Point {
 /// The strip under the suggestion column: the direction filters centred in the
 /// column's width, matching the list above.
 fn frameSuggestFooter(app: *App) void {
-    var col = dvui.box(@src(), .{ .dir = .horizontal }, .{
+    var col = dvui.box(@src(), .{ .dir = .vertical }, .{
         .min_size_content = .{ .w = 420 },
         .max_size_content = .{ .w = 420, .h = 100000 },
         .expand = .vertical,
     });
     defer col.deinit();
 
-    var left = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal });
-    left.deinit();
+    var bpm_row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal });
+    defer bpm_row.deinit();
+    app.frameBpmWindow();
 
+    var filters = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal });
+    defer filters.deinit();
     app.energyToggle("=", Palette.green, &app.filter_hold, .hold);
     app.energyToggle("↑", Palette.orange, &app.filter_up, .up);
     app.energyToggle("↓", Palette.orange, &app.filter_down, .down);
-
-    var right = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal });
-    right.deinit();
 }
 
 fn frameFooter(app: *App) void {
@@ -1926,8 +1910,6 @@ fn frameFooter(app: *App) void {
     // Key and tempo sit past the suggestion column, not under it.
     app.notationToggle();
     app.frameWaveformSelector();
-    app.frameWidthSelector();
-    app.frameBpmWindow();
 
     var spacer = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal });
     spacer.deinit();
@@ -1937,6 +1919,7 @@ fn frameFooter(app: *App) void {
     var spacer2 = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal });
     spacer2.deinit();
 
+    app.frameWidthSelector();
     app.frameMaster();
 }
 
