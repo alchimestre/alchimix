@@ -205,22 +205,6 @@ pub const Source = struct {
         try self.reloadPlaylists();
     }
 
-    fn addToPlaylistFn(ctx: *anyopaque, playlist_id: []const u8, track_id: u64) anyerror!void {
-        const self = ctxOf(ctx);
-        const count_sql = try std.fmt.allocPrintSentinel(
-            self.arena.allocator(),
-            "select count(*) from djmdSongPlaylist where PlaylistID = '{s}' and ContentID = {d} and rb_local_deleted = 0",
-            .{ try escapeQuotes(self.arena.allocator(), playlist_id), track_id },
-            0,
-        );
-        if (try self.queryInt(count_sql) != 0) return;
-        const next_no = try self.queryIntFmt(
-            "select coalesce(max(TrackNo), 0) + 1 from djmdSongPlaylist where PlaylistID = '{s}'",
-            .{try escapeQuotes(self.arena.allocator(), playlist_id)},
-        );
-        try self.appendEntry(playlist_id, track_id, next_no);
-    }
-
     fn appendEntry(self: *Source, playlist_id: []const u8, track_id: u64, number: u64) !void {
         const a = self.arena.allocator();
         const entry_id = try makeUuid(a, track_id *% 1_000_003 +% number);
@@ -310,7 +294,6 @@ pub const Source = struct {
         .playlists = playlistsFn,
         .playlistTracks = playlistTracksFn,
         .createPlaylist = createPlaylistFn,
-        .addToPlaylist = addToPlaylistFn,
         .name = nameFn,
         .deinit = deinitFn,
     };
