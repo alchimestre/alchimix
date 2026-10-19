@@ -94,6 +94,8 @@ const prefill_frames = sample_rate / 10;
 pub const LaneState = union(enum) {
     /// No decoder exists for this track: it never started.
     missing,
+    /// The state could not be read without blocking the pump; not a verdict.
+    busy,
     /// The decoder is buffering or waiting for its start time.
     pending,
     /// Audio-clock time the lane first produced samples.
@@ -460,7 +462,7 @@ pub const Mixer = struct {
     /// Reports what a lane's decoder is doing. Lock-free callers get `pending`
     /// rather than a wrong answer.
     pub fn laneState(self: *Mixer, uid: u64) LaneState {
-        if (!self.mutex.tryLock()) return .pending;
+        if (!self.mutex.tryLock()) return .busy;
         defer self.mutex.unlock(self.io);
 
         for (&self.slots) |*slot| {

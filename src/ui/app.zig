@@ -680,7 +680,7 @@ pub const App = struct {
                 if (self.transport.isPlaying(index)) {
                     self.transport.stop(index);
                 } else {
-                    self.transport.start(index, .bar);
+                    self.transport.start(index, .next_bar);
                 }
                 dvui.refresh(null, @src(), null);
             },
