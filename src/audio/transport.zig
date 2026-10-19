@@ -622,6 +622,14 @@ pub const Transport = struct {
         return self.nextBarAt(self.nowNs());
     }
 
+    /// The first master bar strictly after `time_ns`; zero when stopped.
+    pub fn nextBarAfter(self: *Transport, time_ns: i128) i128 {
+        if (!self.running) return 0;
+        const phase = @mod(self.masterBeatAt(time_ns), 4);
+        const wait = 4 - phase;
+        return time_ns + @as(i128, @intFromFloat(@as(f64, wait) * 60 / self.bpm * 1_000_000_000));
+    }
+
     /// The next master bar after `now`, never the current one: a lane rejoining
     /// mid-song must not land a fraction of a beat after the other lanes.
     fn nextBarAt(self: *Transport, now: i128) i128 {
@@ -1332,6 +1340,29 @@ test "a group start starts only the given lanes" {
     try testing.expect(t.isPlaying(3));
     try testing.expect(t.isPlaying(4));
     try testing.expect(t.isPlaying(5));
+}
+
+test "the bar after a time skips the coming bar" {
+    var fake = FakeOutput{};
+    var clock = TestClock{};
+    var t = setup(&fake, &clock);
+    defer t.deinit();
+
+    t.beginSync();
+    t.resolve(0, laneInfo(1));
+    t.endSync();
+    t.start(0, .now);
+    fake.markStarted(1, 0);
+    t.sync();
+
+    clock.now = 500_000_000;
+    t.sync();
+    const mid = t.nextBarAfter(clock.now);
+    try testing.expect(@abs(@as(i128, 2_000_000_000) - mid) < 1_000);
+
+    // Exactly on a bar, the next one is a full bar away.
+    const on_bar = t.nextBarAfter(2_000_000_000);
+    try testing.expect(@abs(@as(i128, 4_000_000_000) - on_bar) < 1_000);
 }
 
 test "presets reach the mixer and moving a node clears them" {
