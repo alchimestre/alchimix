@@ -590,18 +590,36 @@ pub const App = struct {
 
     fn framePickerHeading(self: *App) void {
         const heading = self.crate.seedTrack();
+        var text_buffer: [128]u8 = undefined;
+        var text: []const u8 = "";
         if (self.mode() != .suggest or heading == null) {
-            const text = switch (self.mode()) {
+            text = switch (self.mode()) {
                 .search => "Search results",
                 .browse => "Pick a seed",
                 .suggest => "",
             };
-            labelStyled(@src(), text, headingOptions());
-            return;
+        } else {
+            var title_buffer: [34]u8 = undefined;
+            text = std.fmt.bufPrint(&text_buffer, "Next to {s}", .{clippedTitle(heading.?.title, &title_buffer)}) catch "Next to";
         }
 
-        var buffer: [34]u8 = undefined;
-        labelFmt(@src(), "Next to {s}", .{clippedTitle(heading.?.title, &buffer)}, headingOptions());
+        if (self.selected_playlist) |selected| {
+            if (self.playlistName(selected)) |name| {
+                var name_buffer: [32]u8 = undefined;
+                var line: [160]u8 = undefined;
+                const full = std.fmt.bufPrint(&line, "{s} · add to {s}", .{ text, shortName(name, &name_buffer) }) catch text;
+                labelStyled(@src(), full, headingOptions());
+                return;
+            }
+        }
+        labelStyled(@src(), text, headingOptions());
+    }
+
+    fn playlistName(self: *const App, id: []const u8) ?[]const u8 {
+        for (self.playlists) |playlist| {
+            if (std.mem.eql(u8, playlist.id, id)) return playlist.name;
+        }
+        return null;
     }
 
     fn headingOptions() dvui.Options {
@@ -1780,17 +1798,18 @@ fn pickRow(app: *App, row_index: usize, track: Track, step: ?Transition) void {
 
         if (app.selected_playlist != null) {
             var add = dvui.box(@src(), .{ .dir = .horizontal }, .{
-                .min_size_content = .{ .w = 22, .h = 20 },
+                .min_size_content = .{ .w = 34, .h = 20 },
                 .margin = .{ .x = 4, .y = 0 },
                 .background = true,
                 .color_fill = .{ .color = Palette.field },
                 .id_extra = row_index * 16 + 10,
             });
             defer add.deinit();
-            labelStyled(@src(), "+", .{
+            labelStyled(@src(), "add", .{
                 .gravity_x = 0.5,
                 .gravity_y = 0.5,
                 .color_text = .{ .color = Palette.green },
+                .font = metaFont(),
                 .id_extra = row_index * 16 + 11,
             });
             add_rect = rectFrom(add.data().contentRectScale().r);
