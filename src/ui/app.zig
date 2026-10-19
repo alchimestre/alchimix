@@ -240,6 +240,26 @@ pub const App = struct {
         });
         self.in_range = self.ranked.len;
         if (self.sort_by_bpm) std.mem.sort(Candidate, self.ranked, {}, byBpmDesc);
+
+        // A track already in the crate is not a suggestion.
+        if (self.ranked.len > 0 and self.crate.len() > 0) {
+            var kept: std.ArrayListUnmanaged(Candidate) = .empty;
+            for (self.ranked) |candidate| {
+                if (self.inCrate(candidate.track.id)) continue;
+                kept.append(self.allocator, candidate) catch break;
+            }
+            self.allocator.free(self.ranked);
+            self.ranked = kept.toOwnedSlice(self.allocator) catch &.{};
+            self.in_range = self.ranked.len;
+        }
+    }
+
+    fn inCrate(self: *const App, id: u64) bool {
+        for (0..self.crate.len()) |index| {
+            const track = self.crate.at(index) orelse continue;
+            if (track.id == id) return true;
+        }
+        return false;
     }
 
     pub fn frame(self: *App) bool {
@@ -998,8 +1018,10 @@ pub const App = struct {
                 // Stop is global; play starts only the braced four lanes.
                 if (self.transport.anyPlaying()) {
                     self.transport.stopAll();
-                } else {
-                    self.transport.startGroup(self.transportGroup());
+                } else if (!self.transport.startGroup(self.transportGroup())) {
+                    // The brace may sit on tracks that cannot start; never
+                    // leave the transport button dead.
+                    self.transport.startAll();
                 }
                 dvui.refresh(null, @src(), null);
             },
@@ -1619,8 +1641,9 @@ pub const App = struct {
 
         var builder = dvui.Path.Builder.init(self.allocator);
         defer builder.deinit();
-        // Clear of the trim bar, and thick enough to grab.
-        const x = self.lane_right + 90;
+        // Clear of the trim bar, and thick enough to grab. The clamp keeps it
+        // inside the canvas instead of under the playlist column.
+        const x = @min(self.lane_right + 90, self.canvas.x + self.canvas.w - 70);
         const mid = (top + bottom) / 2;
         const thickness: f32 = 11;
         const color: dvui.Color = .{ .r = 0xbd, .g = 0x93, .b = 0xf9, .a = 0xff };

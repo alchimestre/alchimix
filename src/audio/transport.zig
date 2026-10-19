@@ -287,8 +287,9 @@ pub const Transport = struct {
         if (any) self.pushMix();
     }
 
-    /// Starts just these lanes in one batch, on the same bar.
-    pub fn startGroup(self: *Transport, indices: []const usize) void {
+    /// Starts just these lanes in one batch, on the same bar. Returns whether
+    /// any lane could start.
+    pub fn startGroup(self: *Transport, indices: []const usize) bool {
         const now = self.nowNs();
         const start_at = self.barStartAt(now);
         var any = false;
@@ -304,6 +305,7 @@ pub const Transport = struct {
             any = true;
         }
         if (any) self.pushMix();
+        return any;
     }
 
     /// Stops just these lanes, leaving the rest untouched.
@@ -1333,7 +1335,7 @@ test "a group start starts only the given lanes" {
     for (0..6) |index| t.resolve(index, laneInfo(index + 1));
     t.endSync();
 
-    t.startGroup(&.{ 1, 3, 4, 5 });
+    _ = t.startGroup(&.{ 1, 3, 4, 5 });
     try testing.expect(!t.isPlaying(0));
     try testing.expect(t.isPlaying(1));
     try testing.expect(!t.isPlaying(2));
