@@ -122,7 +122,7 @@ pub const App = struct {
     /// Key display: wheel numbers by default, note names on request.
     note_names: bool = false,
     /// Beats shown across a preview lane: 16, 32 or 64.
-    beats_visible: u8 = 16,
+    beats_visible: u8 = 32,
     /// Candidates the tempo window admits, so the field shows its effect even
     /// when the top of the list looks the same.
     in_range: usize = 0,
@@ -348,9 +348,8 @@ pub const App = struct {
         for (hit.widths, 0..) |beats, slot| {
             const active = self.beats_visible == beats;
             var cell = dvui.box(@src(), .{ .dir = .horizontal }, .{
-                .min_size_content = .{ .w = 30, .h = 20 },
-                .margin = .{ .x = 2, .y = 1 },
-                .padding = .{ .x = 6, .y = 1 },
+                .min_size_content = .{ .w = 34, .h = 22 },
+                .margin = .{ .x = 1, .y = 1 },
                 .background = true,
                 .color_fill = .{ .color = if (active) Palette.green else Palette.field },
                 .id_extra = 96 + slot,
@@ -360,6 +359,7 @@ pub const App = struct {
             var buffer: [4]u8 = undefined;
             const text = std.fmt.bufPrint(&buffer, "{d}", .{beats}) catch "";
             labelStyled(@src(), text, .{
+                .expand = .both,
                 .color_text = .{ .color = if (active) Palette.background else Palette.secondary },
                 .font = metaFont(),
                 .gravity_x = 0.5,
@@ -731,8 +731,8 @@ pub const App = struct {
         var entry = dvui.textEntry(@src(), .{
             .text = .{ .array_list = .{ .backing = &self.bpm_text, .allocator = self.allocator } },
         }, .{
-            .min_size_content = .{ .w = 46, .h = 26 },
-            .padding = .{ .x = 6, .y = 2 },
+            .min_size_content = .{ .w = 40, .h = 22 },
+            .padding = .{ .x = 5, .y = 1 },
             .margin = .{ .x = 2, .y = 2 },
             .corners = square,
             .background = true,
@@ -1199,9 +1199,10 @@ pub const App = struct {
             .backing = &self.master_text,
             .allocator = self.allocator,
         } } }, .{
-            .min_size_content = .{ .w = 46, .h = 26 },
-            .padding = .{ .x = 6, .y = 2 },
+            .min_size_content = .{ .w = 40, .h = 22 },
+            .padding = .{ .x = 5, .y = 1 },
             .margin = .{ .x = 2, .y = 2 },
+            .corners = square,
             .background = true,
             .color_fill = .{ .color = Palette.field },
             .color_text = .{ .color = Palette.ink },
