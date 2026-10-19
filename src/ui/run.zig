@@ -4,6 +4,7 @@ const std = @import("std");
 const dvui = @import("dvui");
 const SDLBackend = @import("sdl-backend");
 const App = @import("app.zig").App;
+const Demo = @import("demo.zig").Demo;
 
 const font_family = "caskaydia";
 const font_file = "CaskaydiaCoveNerdFont-Regular.ttf";
@@ -56,6 +57,44 @@ pub fn run(init: std.process.Init, app: *App) !void {
         const wait_micros = win.waitTime(frame_end);
         const timeout = if (app.player.animating() or app.animating()) @min(wait_micros, 33_000) else wait_micros;
         interrupted = try backend.waitEventTimeout(timeout);
+    }
+}
+
+/// Four waveform typologies on synthetic data. No crate, no interaction.
+pub fn runWaveformDemo(init: std.process.Init) !void {
+    var demo = try Demo.init(init.gpa);
+    defer demo.deinit(init.gpa);
+
+    var backend = try SDLBackend.initWindow(.{
+        .io = init.io,
+        .environ_map = init.environ_map,
+        .size = .{ .w = 1000, .h = 700 },
+        .min_size = .{ .w = 760, .h = 620 },
+        .vsync = true,
+        .title = "playlister waveform demo",
+    });
+    defer backend.deinit();
+
+    const theme = switch (backend.preferredColorScheme() orelse .dark) {
+        .light => dvui.Theme.builtin.adwaita_light,
+        .dark => dvui.Theme.builtin.adwaita_dark,
+    };
+
+    var window_open = true;
+    var win = try dvui.Window.init(@src(), init.gpa, backend.backend(), .{
+        .theme = theme,
+        .open_flag = &window_open,
+    });
+    defer win.deinit();
+
+    var interrupted = false;
+    while (window_open) {
+        const frame_start = win.beginWait(interrupted);
+        try win.begin(frame_start);
+        try backend.addAllEvents(&win);
+        demo.frame(init.gpa);
+        const frame_end = try win.end(.{});
+        interrupted = try backend.waitEventTimeout(win.waitTime(frame_end));
     }
 }
 
