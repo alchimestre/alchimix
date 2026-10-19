@@ -724,7 +724,6 @@ pub const App = struct {
         }
 
         labelStyled(@src(), "bpm ±", .{
-            .min_size_content = .{ .h = 24 },
             .gravity_y = 0.5,
             .color_text = .{ .color = Palette.muted },
             .font = metaFont(),
@@ -735,9 +734,10 @@ pub const App = struct {
         var entry = dvui.textEntry(@src(), .{
             .text = .{ .array_list = .{ .backing = &self.bpm_text, .allocator = self.allocator } },
         }, .{
-            .min_size_content = .{ .w = 40, .h = 24 },
-            .padding = .{ .x = 5, .y = 0 },
+            .min_size_content = .{ .w = 40, .h = 18 },
+            .padding = .{ .x = 5, .y = 3 },
             .margin = .{ .x = 2, .y = 0 },
+            .gravity_y = 0.5,
             .corners = square,
             .background = true,
             .color_fill = .{ .color = Palette.field },
@@ -751,7 +751,6 @@ pub const App = struct {
         var count_buffer: [24]u8 = undefined;
         const count = std.fmt.bufPrint(&count_buffer, "{d} in range", .{self.in_range}) catch "";
         labelStyled(@src(), count, .{
-            .min_size_content = .{ .h = 24 },
             .gravity_y = 0.5,
             .color_text = .{ .color = Palette.muted },
             .font = metaFont(),
@@ -1188,7 +1187,6 @@ pub const App = struct {
     /// Master tempo at the right corner, with a lock that ties it to the seed.
     fn frameMaster(self: *App) void {
         labelStyled(@src(), "master", .{
-            .min_size_content = .{ .h = 24 },
             .gravity_y = 0.5,
             .color_text = .{ .color = Palette.muted },
             .font = metaFont(),
@@ -1211,9 +1209,10 @@ pub const App = struct {
             .backing = &self.master_text,
             .allocator = self.allocator,
         } } }, .{
-            .min_size_content = .{ .w = 40, .h = 24 },
-            .padding = .{ .x = 5, .y = 0 },
+            .min_size_content = .{ .w = 40, .h = 18 },
+            .padding = .{ .x = 5, .y = 3 },
             .margin = .{ .x = 2, .y = 0 },
+            .gravity_y = 0.5,
             .corners = square,
             .background = true,
             .color_fill = .{ .color = Palette.field },
