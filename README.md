@@ -43,8 +43,8 @@ bar. Each lane ends in a live spectrum with three draggable EQ nodes (low shelf,
 bell, high shelf); HPF, BPF and LPF presets load a shape, and clicking the active
 preset clears the EQ. A trim slider at the far right doubles as a level meter;
 `M` under a lane's play button mutes it while the clock keeps running. The footer
-sets the waveform span (16, 32 or 64 beats) and its style: silhouette, outline +
-body, band rows, or beat blocks. Changes apply without restarting the decoder.
+sets the waveform span (16, 32 or 64 beats), next to the master BPM, and the
+waveform style: silhouette, outline + body, or band rows. Changes apply without restarting the decoder.
 
 ## Editing a crate
 
