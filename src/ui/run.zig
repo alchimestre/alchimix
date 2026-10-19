@@ -5,7 +5,6 @@ const dvui = @import("dvui");
 const SDLBackend = @import("sdl-backend");
 const App = @import("app.zig").App;
 const Demo = @import("demo.zig").Demo;
-const ColourDemo = @import("colour_demo.zig").Demo;
 
 const font_family = "caskaydia";
 const font_file = "CaskaydiaCoveNerdFont-Regular.ttf";
@@ -128,41 +127,4 @@ fn loadNerdFont(init: std.process.Init) bool {
         return false;
     };
     return true;
-}
-
-pub fn runColourDemo(init: std.process.Init) !void {
-    var demo = try ColourDemo.init(init.gpa);
-    defer demo.deinit(init.gpa);
-
-    var backend = try SDLBackend.initWindow(.{
-        .io = init.io,
-        .environ_map = init.environ_map,
-        .size = .{ .w = 1020, .h = 780 },
-        .min_size = .{ .w = 760, .h = 640 },
-        .vsync = true,
-        .title = "playlister waveform colours",
-    });
-    defer backend.deinit();
-
-    const theme = switch (backend.preferredColorScheme() orelse .dark) {
-        .light => dvui.Theme.builtin.adwaita_light,
-        .dark => dvui.Theme.builtin.adwaita_dark,
-    };
-
-    var window_open = true;
-    var win = try dvui.Window.init(@src(), init.gpa, backend.backend(), .{
-        .theme = theme,
-        .open_flag = &window_open,
-    });
-    defer win.deinit();
-
-    var interrupted = false;
-    while (window_open) {
-        const frame_start = win.beginWait(interrupted);
-        try win.begin(frame_start);
-        try backend.addAllEvents(&win);
-        demo.frame(init.gpa);
-        const frame_end = try win.end(.{});
-        interrupted = try backend.waitEventTimeout(win.waitTime(frame_end));
-    }
 }
