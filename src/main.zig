@@ -38,7 +38,11 @@ fn showPlaylists(init: std.process.Init) !void {
     const library = try openLibrary(init, &collection, &demo);
     defer library.deinit();
     for (try library.playlists()) |playlist| {
-        const kind = if (playlist.folder) "folder" else "list";
+        const kind = switch (playlist.kind) {
+            .folder => "folder",
+            .smart => "smart",
+            .list => "list",
+        };
         std.debug.print("{s}\t{s}\t{s}\n", .{ playlist.id, kind, playlist.name });
     }
 }

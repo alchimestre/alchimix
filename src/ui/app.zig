@@ -96,6 +96,8 @@ pub const App = struct {
     open_count: usize = 0,
     /// Owning copies: the source may rebuild its playlist list after a write.
     selected_playlist: ?[]const u8 = null,
+    /// False for intelligent playlists: their rules are not evaluated.
+    playlist_filter_active: bool = false,
     playlist_filter: []const u64 = &.{},
     filtered_found: []const Track = &.{},
 
@@ -219,7 +221,7 @@ pub const App = struct {
         if (self.filtered_found.len > 0) self.allocator.free(self.filtered_found);
         self.filtered_found = &.{};
         self.found = self.library.search(self.query.items) catch &.{};
-        if (self.selected_playlist != null) {
+        if (self.selected_playlist != null and self.playlist_filter_active) {
             var keep: std.ArrayListUnmanaged(Track) = .empty;
             for (self.found) |track| {
                 if (containsId(self.playlist_filter, track.id)) keep.append(self.allocator, track) catch {};
@@ -358,20 +360,39 @@ pub const App = struct {
         dvui.refresh(null, @src(), null);
     }
 
+    fn clearPlaylist(self: *App) void {
+        if (self.selected_playlist) |id| {
+            if (id.len > 0) self.allocator.free(id);
+        }
+        self.selected_playlist = null;
+        self.playlist_filter_active = false;
+        if (self.playlist_filter.len > 0) self.allocator.free(self.playlist_filter);
+        self.playlist_filter = &.{};
+        self.refresh() catch {};
+        dvui.refresh(null, @src(), null);
+    }
+
     fn selectPlaylist(self: *App, index: usize) void {
         const playlist = self.playlists[index];
-        if (playlist.folder) {
+        if (playlist.kind == .folder) {
             self.toggleFolder(playlist.id);
             return;
         }
-
-        if (self.selected_playlist) |old| {
-            if (old.len > 0) self.allocator.free(old);
+        if (self.selected_playlist) |id| {
+            if (std.mem.eql(u8, id, playlist.id)) {
+                self.clearPlaylist();
+                return;
+            }
+            if (id.len > 0) self.allocator.free(id);
         }
-        self.selected_playlist = self.allocator.dupe(u8, playlist.id) catch null;
 
+        self.selected_playlist = self.allocator.dupe(u8, playlist.id) catch null;
+        self.playlist_filter_active = playlist.kind == .list;
         if (self.playlist_filter.len > 0) self.allocator.free(self.playlist_filter);
-        self.playlist_filter = self.library.playlistTracks(self.allocator, playlist.id) catch &.{};
+        self.playlist_filter = if (self.playlist_filter_active)
+            self.library.playlistTracks(self.allocator, playlist.id) catch &.{}
+        else
+            &.{};
         self.refresh() catch {};
         dvui.refresh(null, @src(), null);
     }
@@ -418,18 +439,22 @@ pub const App = struct {
         });
         defer row.deinit();
 
-        const glyph = if (playlist.folder) (if (self.folderOpen(playlist.id)) "▾ " else "▸ ") else "";
+        const glyph = switch (playlist.kind) {
+            .folder => if (self.folderOpen(playlist.id)) "▾ " else "▸ ",
+            .smart => "◆ ",
+            .list => "",
+        };
         var name_buffer: [32]u8 = undefined;
         var text: [40]u8 = undefined;
         const label = std.fmt.bufPrint(&text, "{s}{s}", .{ glyph, shortName(playlist.name, &name_buffer) }) catch playlist.name;
         labelStyled(@src(), label, .{
             .expand = .horizontal,
-            .color_text = .{ .color = if (playlist.folder) Palette.purple else Palette.ink },
-            .font = if (playlist.folder) headingFont() else bodyFont(),
+            .color_text = .{ .color = if (playlist.kind == .folder) Palette.purple else Palette.ink },
+            .font = if (playlist.kind == .folder) headingFont() else bodyFont(),
             .id_extra = 7100 + index,
         });
 
-        const target: hit.Target = if (playlist.folder)
+        const target: hit.Target = if (playlist.kind == .folder)
             .{ .playlist_toggle = index }
         else
             .{ .playlist = index };
@@ -440,7 +465,7 @@ pub const App = struct {
         for (self.playlists, 0..) |playlist, index| {
             if (!std.mem.eql(u8, playlist.parent, parent)) continue;
             self.playlistRow(playlist, index, depth);
-            if (playlist.folder and self.folderOpen(playlist.id)) {
+            if (playlist.kind == .folder and self.folderOpen(playlist.id)) {
                 self.playlistChildren(playlist.id, depth + 1);
             }
         }
@@ -1222,6 +1247,7 @@ pub const App = struct {
             if (id.len > 0) self.allocator.free(id);
         }
         self.selected_playlist = null;
+        self.playlist_filter_active = false;
         if (self.playlist_filter.len > 0) self.allocator.free(self.playlist_filter);
         self.playlist_filter = &.{};
         if (self.filtered_found.len > 0) self.allocator.free(self.filtered_found);

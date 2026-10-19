@@ -5,12 +5,15 @@ const std = @import("std");
 const Track = @import("../domain/track.zig").Track;
 const Analysis = @import("../domain/analysis.zig").Analysis;
 
-/// One rekordbox playlist or folder. Strings live as long as the source.
+pub const PlaylistKind = enum { list, smart, folder };
+
+/// One rekordbox playlist, intelligent playlist or folder. Strings live as
+/// long as the source.
 pub const Playlist = struct {
     id: []const u8,
     name: []const u8,
     parent: []const u8,
-    folder: bool,
+    kind: PlaylistKind,
 };
 
 pub const Library = struct {
