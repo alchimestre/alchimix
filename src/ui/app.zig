@@ -53,6 +53,16 @@ fn mixerLevel(context: *anyopaque, uid: u64) f32 {
     return mixer.level(uid);
 }
 
+fn shortName(name: []const u8, buffer: *[32]u8) []const u8 {
+    const limit: usize = 24;
+    if (name.len <= limit) return name;
+    var cut: usize = limit;
+    while (cut > 0 and (name[cut] & 0xC0) == 0x80) cut -= 1;
+    @memcpy(buffer[0..cut], name[0..cut]);
+    @memcpy(buffer[cut..][0..3], "…");
+    return buffer[0 .. cut + 3];
+}
+
 fn containsId(ids: []const u64, id: u64) bool {
     for (ids) |value| {
         if (value == id) return true;
@@ -409,8 +419,9 @@ pub const App = struct {
         defer row.deinit();
 
         const glyph = if (playlist.folder) (if (self.folderOpen(playlist.id)) "▾ " else "▸ ") else "";
-        var text: [160]u8 = undefined;
-        const label = std.fmt.bufPrint(&text, "{s}{s}", .{ glyph, playlist.name }) catch playlist.name;
+        var name_buffer: [32]u8 = undefined;
+        var text: [40]u8 = undefined;
+        const label = std.fmt.bufPrint(&text, "{s}{s}", .{ glyph, shortName(playlist.name, &name_buffer) }) catch playlist.name;
         labelStyled(@src(), label, .{
             .expand = .horizontal,
             .color_text = .{ .color = if (playlist.folder) Palette.purple else Palette.ink },
@@ -437,41 +448,43 @@ pub const App = struct {
 
     fn framePlaylists(self: *App) void {
         var panel = dvui.box(@src(), .{ .dir = .vertical }, .{
-            .min_size_content = .{ .w = 230 },
-            .max_size_content = .{ .w = 230, .h = 100000 },
+            .min_size_content = .{ .w = 210 },
+            .max_size_content = .{ .w = 210, .h = 100000 },
             .expand = .vertical,
             .background = true,
             .color_fill = .{ .color = Palette.panel },
-            .padding = .{ .x = 10, .y = 8 },
+            .padding = .{ .x = 8, .y = 8 },
         });
         defer panel.deinit();
 
-        var head = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal });
-        defer head.deinit();
-        labelStyled(@src(), "playlists", .{
-            .expand = .horizontal,
-            .color_text = .{ .color = Palette.purple },
-            .font = headingFont(),
-            .margin = .{ .x = 4, .y = 2 },
-            .id_extra = 7200,
-        });
+        {
+            var head = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal });
+            defer head.deinit();
+            labelStyled(@src(), "playlists", .{
+                .expand = .horizontal,
+                .color_text = .{ .color = Palette.purple },
+                .font = headingFont(),
+                .margin = .{ .x = 4, .y = 2 },
+                .id_extra = 7200,
+            });
 
-        var save = dvui.box(@src(), .{ .dir = .horizontal }, .{
-            .min_size_content = .{ .w = 74, .h = 20 },
-            .margin = .{ .x = 2, .y = 2 },
-            .background = true,
-            .color_fill = .{ .color = Palette.field },
-            .id_extra = 7201,
-        });
-        defer save.deinit();
-        labelStyled(@src(), "save crate", .{
-            .gravity_x = 0.5,
-            .gravity_y = 0.5,
-            .color_text = .{ .color = Palette.muted },
-            .font = metaFont(),
-            .id_extra = 7202,
-        });
-        self.hit_map.append(rectFrom(save.data().contentRectScale().r), .save_playlist);
+            var save = dvui.box(@src(), .{ .dir = .horizontal }, .{
+                .min_size_content = .{ .w = 74, .h = 20 },
+                .margin = .{ .x = 2, .y = 2 },
+                .background = true,
+                .color_fill = .{ .color = Palette.field },
+                .id_extra = 7201,
+            });
+            defer save.deinit();
+            labelStyled(@src(), "save crate", .{
+                .gravity_x = 0.5,
+                .gravity_y = 0.5,
+                .color_text = .{ .color = Palette.muted },
+                .font = metaFont(),
+                .id_extra = 7202,
+            });
+            self.hit_map.append(rectFrom(save.data().contentRectScale().r), .save_playlist);
+        }
 
         self.playlistChildren("root", 0);
     }
@@ -1713,29 +1726,31 @@ fn pickRow(app: *App, row_index: usize, track: Track, step: ?Transition) void {
             .id_extra = row_index * 16 + 6,
         });
 
-        var text = dvui.box(@src(), .{ .dir = .vertical }, .{
-            .expand = .horizontal,
-            .id_extra = row_index * 16 + 2,
-        });
-        defer text.deinit();
-        labelStyled(@src(), track.title, .{
-            .expand = .horizontal,
-            .color_text = .{ .color = title_color },
-            .id_extra = row_index * 16 + 3,
-        });
-        var artist_buffer: [128]u8 = undefined;
-        labelStyled(@src(), artistLine(track, &artist_buffer), .{
-            .expand = .horizontal,
-            .color_text = .{ .color = Palette.secondary },
-            .font = metaFont(),
-            .id_extra = row_index * 16 + 4,
-        });
+        {
+            var text = dvui.box(@src(), .{ .dir = .vertical }, .{
+                .expand = .horizontal,
+                .id_extra = row_index * 16 + 2,
+            });
+            defer text.deinit();
+            labelStyled(@src(), track.title, .{
+                .expand = .horizontal,
+                .color_text = .{ .color = title_color },
+                .id_extra = row_index * 16 + 3,
+            });
+            var artist_buffer: [128]u8 = undefined;
+            labelStyled(@src(), artistLine(track, &artist_buffer), .{
+                .expand = .horizontal,
+                .color_text = .{ .color = Palette.secondary },
+                .font = metaFont(),
+                .id_extra = row_index * 16 + 4,
+            });
 
-        labelStyled(@src(), meta, .{
-            .color_text = .{ .color = Palette.secondary },
-            .font = metaFont(),
-            .id_extra = row_index * 16 + 5,
-        });
+            labelStyled(@src(), meta, .{
+                .color_text = .{ .color = Palette.secondary },
+                .font = metaFont(),
+                .id_extra = row_index * 16 + 5,
+            });
+        }
 
         if (app.selected_playlist != null) {
             var add = dvui.box(@src(), .{ .dir = .horizontal }, .{
