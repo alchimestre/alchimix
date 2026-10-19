@@ -53,6 +53,28 @@ fn mixerLevel(context: *anyopaque, uid: u64) f32 {
     return mixer.level(uid);
 }
 
+/// Slider position for a tolerance: 0.5 at the left end, 5 at the centre,
+/// 20 at the right end.
+fn bpmFraction(pct: f32) f32 {
+    const value = std.math.clamp(pct, min_bpm_pct, max_bpm_pct);
+    return if (value <= default_bpm_pct)
+        0.5 * (value - min_bpm_pct) / (default_bpm_pct - min_bpm_pct)
+    else
+        0.5 + 0.5 * (value - default_bpm_pct) / (max_bpm_pct - default_bpm_pct);
+}
+
+fn bpmPercent(fraction: f32) f32 {
+    const f = std.math.clamp(fraction, 0, 1);
+    return if (f <= 0.5)
+        min_bpm_pct + (default_bpm_pct - min_bpm_pct) * f / 0.5
+    else
+        default_bpm_pct + (max_bpm_pct - default_bpm_pct) * (f - 0.5) / 0.5;
+}
+
+const min_bpm_pct: f32 = 0.5;
+const max_bpm_pct: f32 = 20;
+const default_bpm_pct: f32 = 5;
+
 fn shortName(name: []const u8, buffer: *[32]u8) []const u8 {
     const limit: usize = 24;
     if (name.len <= limit) return name;
@@ -140,8 +162,8 @@ pub const App = struct {
     last_point: hit.Point = .{},
 
     /// Tempo window for suggestions, as a percentage of the seed's BPM.
+    /// Tolerance around the seed BPM, in percent. The slider centres on 5.
     bpm_pct: f32 = 5,
-    bpm_text: std.ArrayList(u8) = .empty,
 
     /// What the pointer is over, and what it is carrying. Filled while drawing,
     /// read on the next frame's pointer pass.
@@ -210,7 +232,6 @@ pub const App = struct {
         self.master_text.deinit(self.allocator);
         self.hit_map.deinit();
         self.player.deinit();
-        self.bpm_text.deinit(self.allocator);
         self.allocator.free(self.ranked);
         self.query.deinit(self.allocator);
         if (self.selected_playlist) |id| {
@@ -674,31 +695,25 @@ pub const App = struct {
 
     /// Tempo window in percent: the list keeps tracks within this much of the
     /// selected track's BPM.
+    /// A bipolar tolerance control: the centre is the default ±5 %, moving
+    /// left narrows the window, moving right widens it.
     pub fn frameBpmWindow(self: *App) void {
-        if (self.bpm_text.items.len == 0) {
-            self.bpm_text.append(self.allocator, '5') catch {};
-        }
+        var fraction = bpmFraction(self.bpm_pct);
 
-        labelStyled(@src(), "bpm ±", .{
+        var label_buffer: [32]u8 = undefined;
+        const text = std.fmt.bufPrint(&label_buffer, "bpm ±{d:.1}", .{self.bpm_pct}) catch "bpm";
+        labelStyled(@src(), text, .{
             .color_text = .{ .color = Palette.muted },
             .font = metaFont(),
             .margin = .{ .x = 4, .y = 6 },
+            .id_extra = 7100,
         });
 
-        var entry = dvui.textEntry(@src(), .{
-            .text = .{ .array_list = .{ .backing = &self.bpm_text, .allocator = self.allocator } },
-        }, .{
-            .min_size_content = .{ .w = 46, .h = 26 },
-            .padding = .{ .x = 6, .y = 2 },
-            .margin = .{ .x = 2, .y = 2 },
-            .corners = square,
-            .background = true,
-            .color_fill = .{ .color = Palette.field },
-            .color_text = .{ .color = Palette.ink },
-            .font = metaFont(),
+        const changed = dvui.slider(@src(), .{ .fraction = &fraction }, .{
+            .min_size_content = .{ .w = 180, .h = 24 },
+            .margin = .{ .x = 4, .y = 2 },
+            .id_extra = 7101,
         });
-        const changed = entry.text_changed;
-        entry.deinit();
 
         var count_buffer: [24]u8 = undefined;
         const count = std.fmt.bufPrint(&count_buffer, "{d} in range", .{self.in_range}) catch "";
@@ -706,11 +721,11 @@ pub const App = struct {
             .color_text = .{ .color = Palette.muted },
             .font = metaFont(),
             .margin = .{ .x = 6, .y = 6 },
+            .id_extra = 7102,
         });
 
         if (!changed) return;
-        const parsed = std.fmt.parseFloat(f32, std.mem.trim(u8, self.bpm_text.items, " ")) catch return;
-        self.bpm_pct = std.math.clamp(parsed, 0.5, 50);
+        self.bpm_pct = bpmPercent(fraction);
         self.refresh() catch {};
     }
 
