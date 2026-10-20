@@ -59,9 +59,10 @@ const Slot = struct {
     beat: f32 = 0,
     /// Unrounded pose, so sub-beat drags are not lost to snapping.
     beat_raw: f32 = 0,
-    /// The waveform was dragged by hand, so starts keep the jogged beat.
-    manual: bool = false,
     playing: bool = false,
+    /// Waiting for the first lane's audio to start the clock: with no bar to
+    /// join, starting now would land this lane off the other lanes' grid.
+    awaiting_clock: bool = false,
     /// True once the mixer's reported start time is known; audio time zero is
     /// a valid start, so this cannot be a sentinel.
     start_latched: bool = false,
@@ -219,6 +220,22 @@ pub const Transport = struct {
         var changed = false;
         for (self.slots.items) |*slot| {
             if (!slot.playing) continue;
+            if (slot.awaiting_clock) {
+                // The clock now exists, so join the first bar after it. A lane
+                // that was waiting behind the only other one starts as the
+                // anchor instead, or it would wait forever.
+                if (self.running) {
+                    slot.awaiting_clock = false;
+                    slot.start_at_ns = self.nextBarAt(now);
+                    slot.rejoin = true;
+                    changed = true;
+                } else if (!self.otherPlaying(slot)) {
+                    slot.awaiting_clock = false;
+                    slot.start_at_ns = 0;
+                    changed = true;
+                }
+                continue;
+            }
             switch (self.output.laneState(self.output.context, slot.uid)) {
                 .missing, .ended => {
                     self.finishAt(slot, now);
@@ -261,7 +278,7 @@ pub const Transport = struct {
 
     pub fn start(self: *Transport, index: usize, join: Join) void {
         const slot = self.slotAt(index) orelse return;
-        self.beginStart(slot, join);
+        self.beginStart(slot, join, false);
     }
 
     /// Starts every playable lane in one mixer batch, so the joint gate makes
@@ -350,17 +367,16 @@ pub const Transport = struct {
         slot.start_latched = false;
         slot.beat_raw = target;
         self.snapToBar(slot);
-        slot.manual = false;
-        if (was_playing) self.beginStart(slot, .next_bar);
+        if (was_playing) self.beginStart(slot, .next_bar, false);
     }
 
-    /// Waveform drag: move by beats and land on the nearest beat.
+    /// Waveform drag: move by beats and land on the nearest beat. A start
+    /// snaps back to a bar, so a scrub never leaves a lane between bars.
     pub fn dragBeats(self: *Transport, index: usize, delta: f32) void {
         const slot = self.slotAt(index) orelse return;
         if (slot.playing) return;
         slot.beat_raw = std.math.clamp(slot.beat_raw + delta, 0, slot.total_beats);
         snapToBeat(slot);
-        slot.manual = true;
     }
 
     /// Navigator drag: move by beats and land on the nearest bar.
@@ -369,7 +385,6 @@ pub const Transport = struct {
         if (slot.playing) return;
         slot.beat_raw = std.math.clamp(slot.beat_raw + delta, 0, slot.total_beats);
         self.snapToBar(slot);
-        slot.manual = false;
     }
 
     pub fn jogPause(self: *Transport, index: usize, join: Join) void {
@@ -392,7 +407,7 @@ pub const Transport = struct {
         const slot = self.slotAt(index) orelse return;
         snapToBeat(slot);
         const join: Join = if (self.jog_join == .bar) .next_bar else self.jog_join;
-        self.beginStart(slot, join);
+        self.beginStart(slot, join, true);
     }
 
     /// Applies a whole EQ without restarting the decoder.
@@ -593,12 +608,15 @@ pub const Transport = struct {
         return null;
     }
 
-    fn beginStart(self: *Transport, slot: *Slot, join: Join) void {
+    fn beginStart(self: *Transport, slot: *Slot, join: Join, keep_beat: bool) void {
         if (slot.playing or slot.analysis == null) return;
         if (self.playingCount() >= max_lanes) return;
-        self.poseForStart(slot);
+        if (!keep_beat) self.poseForStart(slot);
         const now = self.nowNs();
-        const start_at = switch (join) {
+        // With lanes already waiting for their audio, there is no bar to join
+        // yet; starting now would set this lane's grid at its own click time.
+        slot.awaiting_clock = join != .now and !self.running and self.otherPlaying(slot);
+        const start_at = if (slot.awaiting_clock) 0 else switch (join) {
             .bar => self.barStartAt(now),
             .next_bar => self.nextBarAt(now),
             .now => 0,
@@ -641,20 +659,29 @@ pub const Transport = struct {
         return now + @as(i128, @intFromFloat(@as(f64, wait) * 60 / self.bpm * 1_000_000_000));
     }
 
+    /// A start lands on a bar: two lanes whose bars sit at different beats are
+    /// up to three beats apart for the whole song, whatever the clock does.
     fn poseForStart(self: *Transport, slot: *Slot) void {
-        _ = self;
-        if (slot.manual) return;
+        self.snapToBar(slot);
         if (slot.beat < slot.first_downbeat) {
             slot.beat = slot.first_downbeat;
             slot.beat_raw = slot.beat;
         }
     }
 
+    fn otherPlaying(self: *const Transport, slot: *const Slot) bool {
+        for (self.slots.items) |*other| {
+            if (other == slot) continue;
+            if (other.playing) return true;
+        }
+        return false;
+    }
+
     fn finishAt(self: *Transport, slot: *Slot, now: i128) void {
         self.foldAt(slot, now);
         self.snapToBar(slot);
-        slot.manual = false;
         slot.playing = false;
+        slot.awaiting_clock = false;
         slot.start_latched = false;
     }
 
@@ -723,7 +750,8 @@ pub const Transport = struct {
         var count: usize = 0;
         var key: u64 = 1469598103934665603;
         for (self.slots.items) |*slot| {
-            if (!slot.playing) continue;
+            // A lane waiting for the clock has no start time to give the mixer.
+            if (!slot.playing or slot.awaiting_clock) continue;
             if (count >= specs.len) break;
             const lane = self.spec(slot);
             specs[count] = lane;
@@ -1059,6 +1087,54 @@ test "late join waits for the next bar and starts pending" {
     clock.now = 2_500_000_000;
     t.sync();
     try expectApprox(1, t.beat(1));
+}
+
+test "a scrubbed lane still starts on a bar" {
+    var fake = FakeOutput{};
+    var clock = TestClock{};
+    var t = setup(&fake, &clock);
+    defer t.deinit();
+
+    t.beginSync();
+    t.resolve(0, laneInfo(1));
+    t.endSync();
+
+    t.seek(0, 8);
+    t.dragBeats(0, 1.4);
+    try expectApprox(9, t.beat(0));
+
+    t.start(0, .next_bar);
+    const lane = fake.playingLane(1) orelse return error.NoLane;
+    // Beat 9 snaps back to the bar at beat 8, one second into the file.
+    try expectApprox(4.0, @floatCast(lane.start_s));
+}
+
+test "a lane asked for a bar before the clock waits for it" {
+    var fake = FakeOutput{};
+    var clock = TestClock{};
+    var t = setup(&fake, &clock);
+    defer t.deinit();
+
+    t.beginSync();
+    t.resolve(0, laneInfo(1));
+    t.resolve(1, laneInfo(2));
+    t.endSync();
+
+    // The first lane starts at once: there is nothing to sync against yet.
+    t.start(0, .next_bar);
+    clock.now = 50_000_000;
+    t.start(1, .next_bar);
+    try testing.expectEqual(@as(usize, 1), fake.count);
+
+    // The first lane becomes audible at 300 ms; the second must not start at
+    // its own click time but on the bar the clock now defines.
+    fake.markStarted(1, 300_000_000);
+    clock.now = 350_000_000;
+    t.sync();
+
+    const joining = fake.playingLane(2) orelse return error.NoLane;
+    // Beat 0.1 of the clock: 3.9 beats until the bar, at 120 BPM.
+    try testing.expect(@abs(joining.start_at_ns - 2_300_000_000) < 1_000_000);
 }
 
 test "stopping a pending cold start cannot be restarted by late audio" {
