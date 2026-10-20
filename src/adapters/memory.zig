@@ -53,6 +53,7 @@ pub const Source = struct {
         for (self.items.items) |t| {
             if (t.matches(needle)) try self.hits.append(self.arena.allocator(), t);
         }
+        std.mem.sort(Track, self.hits.items, needle, Track.searchLessThan);
         return self.hits.items;
     }
 
@@ -114,6 +115,19 @@ test "search filters by title and artist and reuses its buffer" {
 
     const none = try lib.search("zzz");
     try std.testing.expectEqual(@as(usize, 0), none.len);
+}
+
+test "search puts an exact title before a longer match" {
+    var src = Source.init(std.testing.allocator);
+    const lib = src.port();
+    defer lib.deinit();
+
+    try src.add(1, "Folk & Roots", "Various", 12000, "Am");
+    try src.add(2, "Roots", "Shkoon", 12000, "Am");
+
+    const hits = try lib.search("Roots");
+    try std.testing.expectEqual(@as(usize, 2), hits.len);
+    try std.testing.expectEqualStrings("Roots", hits[0].title);
 }
 
 test "an unreadable key leaves the track usable" {

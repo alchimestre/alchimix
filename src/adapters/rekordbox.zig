@@ -286,6 +286,7 @@ pub const Source = struct {
         for (self.items.items) |t| {
             if (t.matches(needle)) try self.hits.append(self.backing, t);
         }
+        std.mem.sort(Track, self.hits.items, needle, Track.searchLessThan);
         return self.hits.items;
     }
 
