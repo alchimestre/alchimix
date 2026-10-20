@@ -55,7 +55,8 @@ fn mixerLevel(context: *anyopaque, uid: u64) f32 {
 
 fn byBpmDesc(_: void, a: Candidate, b: Candidate) bool {
     if (a.track.bpm_centi != b.track.bpm_centi) return a.track.bpm_centi > b.track.bpm_centi;
-    return a.rank < b.rank;
+    if (a.rank != b.rank) return a.rank < b.rank;
+    return a.total < b.total;
 }
 
 fn shortName(name: []const u8, buffer: *[32]u8) []const u8 {
@@ -226,17 +227,33 @@ pub const App = struct {
         self.crate.deinit();
     }
 
-    /// Re-run the search, then rank what could follow the selected track.
+    /// Re-run the search, then rank what could follow the selection, or the
+    /// seed when nothing is selected.
     pub fn refresh(self: *App) !void {
         self.found = self.library.search(self.query.items) catch &.{};
 
         self.allocator.free(self.ranked);
         self.ranked = &.{};
 
-        const seed = self.crate.seedTrack() orelse return;
-        const tolerance = seed.bpm * self.bpm_pct / 100;
-        self.ranked = try pl.suggest.rank(self.allocator, seed.*, self.found, .{
-            .tolerance_bpm = tolerance,
+        var seeds: [3]Track = undefined;
+        var count: usize = 0;
+        for (self.selected.items) |index| {
+            const track = self.crate.at(index) orelse continue;
+            seeds[count] = track.*;
+            count += 1;
+            if (count == seeds.len) break;
+        }
+        if (count == 0) {
+            if (self.crate.seedTrack()) |seed| {
+                seeds[0] = seed.*;
+                count = 1;
+            }
+        }
+        if (count == 0) return;
+
+        const tolerance_percent: f64 = @floatCast(self.bpm_pct);
+        self.ranked = try pl.suggest.rankFor(self.allocator, seeds[0..count], self.found, .{
+            .tolerance_percent = tolerance_percent,
         });
         self.in_range = self.ranked.len;
         if (self.sort_by_bpm) std.mem.sort(Candidate, self.ranked, {}, byBpmDesc);
@@ -301,6 +318,7 @@ pub const App = struct {
         if (self.pending_select) |index| {
             self.pending_select = null;
             self.crate.setSeed(index);
+            self.selected.clearRetainingCapacity();
             self.query.clearRetainingCapacity();
             self.refresh() catch {};
             dvui.refresh(null, @src(), null);
@@ -684,23 +702,33 @@ pub const App = struct {
 
     fn mode(self: *App) Mode {
         if (self.query.items.len > 0) return .search;
-        if (self.crate.seedTrack() != null) return .suggest;
+        if (self.crate.seedTrack() != null or self.selected.items.len > 0) return .suggest;
         return .browse;
     }
 
     fn framePickerHeading(self: *App) void {
-        const heading = self.crate.seedTrack();
         var text_buffer: [128]u8 = undefined;
         var text: []const u8 = "";
-        if (self.mode() != .suggest or heading == null) {
+        if (self.mode() != .suggest) {
             text = switch (self.mode()) {
                 .search => "Search results",
                 .browse => "Pick a seed",
                 .suggest => "",
             };
-        } else {
+        } else if (self.selected.items.len > 0) {
+            if (self.selected.items.len == 1) {
+                if (self.crate.at(self.selected.items[0])) |track| {
+                    var title_buffer: [34]u8 = undefined;
+                    text = std.fmt.bufPrint(&text_buffer, "Next to {s}", .{clippedTitle(track.title, &title_buffer)}) catch "Next to";
+                } else {
+                    text = "Next to";
+                }
+            } else {
+                text = std.fmt.bufPrint(&text_buffer, "Next to {d} tracks", .{self.selected.items.len}) catch "Next to";
+            }
+        } else if (self.crate.seedTrack()) |seed| {
             var title_buffer: [34]u8 = undefined;
-            text = std.fmt.bufPrint(&text_buffer, "Next to {s}", .{clippedTitle(heading.?.title, &title_buffer)}) catch "Next to";
+            text = std.fmt.bufPrint(&text_buffer, "Next to {s}", .{clippedTitle(seed.title, &title_buffer)}) catch "Next to";
         }
 
         labelStyled(@src(), text, headingOptions());
@@ -736,8 +764,8 @@ pub const App = struct {
         if (typed) self.refresh() catch {};
     }
 
-    /// Tempo window in percent: the list keeps tracks within this much of the
-    /// selected track's BPM.
+    /// Tempo window in percent: the list keeps tracks within this much of each
+    /// seed's BPM.
     pub fn frameBpmWindow(self: *App) void {
         if (self.bpm_text.items.len == 0) {
             self.bpm_text.append(self.allocator, '5') catch {};
@@ -1057,6 +1085,7 @@ pub const App = struct {
             .select_block => |index| self.pending_select = index,
             .toggle_block => |index| {
                 self.toggleSelected(index);
+                self.refresh() catch {};
                 dvui.refresh(null, @src(), null);
             },
             .drop_track => |drop| {
