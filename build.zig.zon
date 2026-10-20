@@ -1,5 +1,5 @@
 .{
-    .name = .playlister,
+    .name = .alchimix,
     .version = "0.0.1",
     .dependencies = .{
         .dvui = .{
@@ -9,5 +9,5 @@
     },
     .minimum_zig_version = "0.17.0",
     .paths = .{""},
-    .fingerprint = 0xadc23092b65d2feb,
+    .fingerprint = 0xfe97d1bf81f93716,
 }

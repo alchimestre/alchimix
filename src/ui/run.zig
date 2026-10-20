@@ -16,7 +16,7 @@ pub fn run(init: std.process.Init, app: *App) !void {
         .size = .{ .w = 1180, .h = 720 },
         .min_size = .{ .w = 720, .h = 460 },
         .vsync = true,
-        .title = "playlister",
+        .title = "alchimix",
     });
     defer backend.deinit();
 
@@ -71,7 +71,7 @@ pub fn runWaveformDemo(init: std.process.Init) !void {
         .size = .{ .w = 1000, .h = 700 },
         .min_size = .{ .w = 760, .h = 620 },
         .vsync = true,
-        .title = "playlister waveform demo",
+        .title = "alchimix waveform demo",
     });
     defer backend.deinit();
 

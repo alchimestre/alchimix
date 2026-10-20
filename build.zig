@@ -28,7 +28,7 @@ pub fn build(b: *std.Build) void {
     sdl_translate.addIncludePath(.{ .cwd_relative = b.pathJoin(&.{ sdl_prefix, "include" }) });
     const sdlc = sdl_translate.createModule();
 
-    const core = b.addModule("playlister", .{
+    const core = b.addModule("alchimix", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
         .optimize = optimize,
@@ -46,12 +46,12 @@ pub fn build(b: *std.Build) void {
     core.link_libc = true;
 
     const exe = b.addExecutable(.{
-        .name = "playlister",
+        .name = "alchimix",
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/main.zig"),
             .target = target,
             .optimize = optimize,
-            .imports = &.{.{ .name = "playlister", .module = core }},
+            .imports = &.{.{ .name = "alchimix", .module = core }},
         }),
     });
     linkUi(b, exe.root_module, target, optimize);
@@ -60,7 +60,7 @@ pub fn build(b: *std.Build) void {
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
     run_cmd.addPassthruArgs();
-    b.step("run", "Run playlister").dependOn(&run_cmd.step);
+    b.step("run", "Run alchimix").dependOn(&run_cmd.step);
 
     const tests = b.addTest(.{ .root_module = core });
 
@@ -69,7 +69,7 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/tests.zig"),
         .target = target,
         .optimize = optimize,
-        .imports = &.{.{ .name = "playlister", .module = core }},
+        .imports = &.{.{ .name = "alchimix", .module = core }},
     }) });
 
     const test_step = b.step("test", "Run tests");

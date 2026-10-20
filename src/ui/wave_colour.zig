@@ -3,7 +3,7 @@
 //! readable.
 
 const std = @import("std");
-const pl = @import("playlister");
+const pl = @import("alchimix");
 
 pub const Color = struct { r: u8, g: u8, b: u8, a: u8 = 0xff };
 
