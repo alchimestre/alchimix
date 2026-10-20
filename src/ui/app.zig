@@ -8,7 +8,7 @@
 
 const std = @import("std");
 const dvui = @import("dvui");
-const pl = @import("playlister");
+const pl = @import("alchimix");
 const hit = @import("hit.zig");
 const wave_colour = @import("wave_colour.zig");
 
@@ -319,7 +319,7 @@ pub const App = struct {
         });
         defer bar.deinit();
 
-        labelStyled(@src(), "playlister", .{
+        labelStyled(@src(), "alchimix", .{
             .font = titleFont(),
             .color_text = .{ .color = Palette.purple },
             .margin = .{ .x = 4 },

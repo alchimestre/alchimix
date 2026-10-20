@@ -1,4 +1,4 @@
-# playlister
+# alchimix
 
 A block-style playlist builder for a rekordbox collection. Pick a seed track, see
 what can follow it by Camelot key and tempo, and place tracks left or right of a
@@ -15,7 +15,7 @@ SDL3, dvui, FreeType and the rest come in as packages; `zig-pkg/` is ignored by 
 ## Run
 
 ```sh
-zig build && ./zig-out/bin/playlister
+zig build && ./zig-out/bin/alchimix
 ```
 
 ```sh
@@ -24,9 +24,9 @@ zig build test        # domain, transport and pointer tests
 
 | Command | What it prints |
 |---|---|
-| `playlister` | the block canvas |
-| `playlister library` | track count and how many carry a key |
-| `playlister suggest <text>` | what could follow the first match, ranked |
+| `alchimix` | the block canvas |
+| `alchimix library` | track count and how many carry a key |
+| `alchimix suggest <text>` | what could follow the first match, ranked |
 
 ## Preview
 
@@ -62,7 +62,7 @@ block selects it, and the suggestions follow that selection. `×` removes a bloc
 
 `~/Library/Pioneer/rekordbox/master.db`, opened read-only. Nothing is written back.
 
-The database key comes from `PLAYLISTER_REKORDBOX_KEY` when set, otherwise from the
+The database key comes from `ALCHIMIX_REKORDBOX_KEY` when set, otherwise from the
 cache pyrekordbox keeps at `~/Library/Application Support/pyrekordbox/rb.cache`.
 Without either, the app opens with three demo tracks.
 

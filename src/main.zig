@@ -1,5 +1,5 @@
 const std = @import("std");
-const pl = @import("playlister");
+const pl = @import("alchimix");
 const runApp = @import("ui/run.zig").run;
 const runWaveformDemo = @import("ui/run.zig").runWaveformDemo;
 const App = @import("ui/app.zig").App;
@@ -81,7 +81,7 @@ fn openCanvas(init: std.process.Init) !void {
 
 fn usage() void {
     std.debug.print(
-        \\usage: playlister [command]
+        \\usage: alchimix [command]
         \\
         \\  (no command)       open the block canvas
         \\  library            report what the collection holds
@@ -125,7 +125,7 @@ fn openLibrary(
 }
 
 fn resolveKey(init: std.process.Init, home: []const u8) ![]const u8 {
-    if (init.environ_map.get("PLAYLISTER_REKORDBOX_KEY")) |k| {
+    if (init.environ_map.get("ALCHIMIX_REKORDBOX_KEY")) |k| {
         return init.gpa.dupe(u8, std.mem.trim(u8, k, " \t\r\n"));
     }
     const cache = try pl.rekordbox.cachedKeyPath(init.gpa, home);

@@ -5,7 +5,7 @@
 //! under `zig build test` without a window.
 
 const std = @import("std");
-const pl = @import("playlister");
+const pl = @import("alchimix");
 
 const Track = pl.track.Track;
 
