@@ -24,8 +24,8 @@ pub const Library = struct {
         /// Every track, in source order. Slice is owned by the source and lives
         /// until `deinit`.
         all: *const fn (ctx: *anyopaque) anyerror![]const Track,
-        /// Tracks whose title or artist contains `needle`. An empty needle
-        /// returns `all`.
+        /// Tracks whose title, artist, genre or tags match `needle`, best
+        /// match first. An empty needle returns `all`.
         search: *const fn (ctx: *anyopaque, needle: []const u8) anyerror![]const Track,
         /// The beat grid and preview waveform for one track. The caller owns
         /// the result and must `deinit` it with the same allocator.
