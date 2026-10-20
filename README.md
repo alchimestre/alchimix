@@ -39,10 +39,11 @@ Each block carries a bar along its bottom that fills as the snippet runs.
 
 Lane playback uses one mixer clock. The playhead waits for decoded audio; up to
 eight lanes can play together. Drag the waveform to jog, or the overview to seek
-by bars; releasing a jog lands on the nearest beat. Stop snaps the position to a
-bar. Each lane ends in a live spectrum with three draggable EQ nodes (low shelf,
-bell, high shelf); HPF, BPF and LPF presets load a shape, and clicking the active
-preset clears the EQ. A trim slider at the far right doubles as a level meter;
+by bars; releasing a jog lands on the nearest beat. Every other start lands on a
+bar, so two lanes never sit half a bar apart. Each lane ends in a live spectrum
+with three draggable EQ nodes (low shelf, bell, high shelf); HPF, BPF and LPF
+presets load a shape, and clicking the active preset clears the EQ. A trim slider
+at the far right doubles as a level meter;
 `M` under a lane's play button mutes it while the clock keeps running. The footer
 sets the waveform span (16, 32 or 64 beats), next to the master BPM. The
 waveform is tinted by rekordbox's three bands: kick red, mid green, high blue.
