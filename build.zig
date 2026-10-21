@@ -64,13 +64,17 @@ pub fn build(b: *std.Build) void {
 
     const tests = b.addTest(.{ .root_module = core });
 
-    // The pointer rules carry their own tests and no dvui, so they run here too.
-    const hit_tests = b.addTest(.{ .root_module = b.createModule(.{
+    // The pointer rules and the drift field carry their own tests. The drift
+    // works on dvui's geometry types, so this module imports dvui as well; no
+    // window is opened, and the backend is never referenced.
+    const ui_tests = b.createModule(.{
         .root_source_file = b.path("src/tests.zig"),
         .target = target,
         .optimize = optimize,
         .imports = &.{.{ .name = "alchimix", .module = core }},
-    }) });
+    });
+    linkUi(b, ui_tests, target, optimize);
+    const hit_tests = b.addTest(.{ .root_module = ui_tests });
 
     const test_step = b.step("test", "Run tests");
     test_step.dependOn(&b.addRunArtifact(tests).step);

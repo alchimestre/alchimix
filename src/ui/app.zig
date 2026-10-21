@@ -9,7 +9,9 @@
 const std = @import("std");
 const dvui = @import("dvui");
 const pl = @import("alchimix");
+const dmt = @import("dmt.zig");
 const hit = @import("hit.zig");
+const lsd = @import("lsd.zig");
 const wave_colour = @import("wave_colour.zig");
 
 const Track = pl.track.Track;
@@ -78,6 +80,18 @@ fn presetName(preset: pl.mixer.EqPreset) []const u8 {
     };
 }
 
+/// What the frame is drawn through. Both modes can run at once; DMT then folds
+/// the frame LSD has already drifted.
+pub const Effect = struct {
+    lsd: bool = false,
+    dmt: bool = false,
+
+    pub fn any(self: Effect) bool {
+        return self.lsd or self.dmt;
+    }
+};
+
+pub const EffectMode = enum { lsd, dmt };
 
 pub const App = struct {
     allocator: std.mem.Allocator,
@@ -144,6 +158,19 @@ pub const App = struct {
 
     /// Where the last press landed, for controls that act on absolute position.
     last_point: hit.Point = .{},
+
+    /// Which effects the frame is drawn through. The copy lives in
+    /// `effect_target`; the chips' rects are the patches every effect leaves
+    /// alone.
+    effect: Effect = .{},
+    effect_target: ?dvui.Texture.Target = null,
+    /// LSD's output while DMT folds it. Only allocated when both run.
+    lsd_target: ?dvui.Texture.Target = null,
+    /// Effect seconds: wall seconds scaled by tempo, shared by both modes.
+    effect_time: f64 = 0,
+    effect_last_ns: i128 = 0,
+    stills: [2]dvui.Rect.Physical = .{ .{}, .{} },
+    still_count: usize = 0,
 
     /// Tempo window for suggestions, as a percentage of the seed's BPM.
     bpm_pct: f32 = 5,
@@ -280,6 +307,10 @@ pub const App = struct {
     }
 
     pub fn frame(self: *App) bool {
+        // The whole frame has to exist before it can be warped, so while the
+        // mode runs it is drawn into an offscreen copy and blitted back.
+        const previous = self.capture();
+
         var root = dvui.box(@src(), .{ .dir = .vertical }, .{
             .expand = .both,
             .background = true,
@@ -294,6 +325,7 @@ pub const App = struct {
         self.player.poll();
         self.transport.setTempo(self.masterBpm());
         self.transport.sync();
+        self.advanceEffects();
 
         if (self.preview_pending) |track| {
             if (self.transport.nowNs() >= self.preview_at_ns) {
@@ -324,11 +356,130 @@ pub const App = struct {
             dvui.refresh(null, @src(), null);
         }
 
+        self.paint(previous);
         return true;
     }
 
+    /// Offscreen copy for this frame, or null when the mode is off. The target
+    /// outlives the frame so the mode does not allocate one per frame.
+    fn capture(self: *App) ?dvui.RenderTarget {
+        if (!self.effect.any()) return null;
+
+        const rect = dvui.currentWindow().rect_pixels;
+        const width: u32 = @intFromFloat(@max(1, @floor(rect.w)));
+        const height: u32 = @intFromFloat(@max(1, @floor(rect.h)));
+
+        if (self.effect_target) |target| {
+            if (target.width != width or target.height != height) {
+                target.destroyLater();
+                self.effect_target = null;
+            }
+        }
+        if (self.effect_target == null) {
+            // A backend without drawable textures leaves the mode off rather
+            // than failing the frame.
+            self.effect_target = dvui.Texture.Target.create(.{ .width = width, .height = height }) catch {
+                self.dropEffects();
+                return null;
+            };
+        }
+
+        const target = self.effect_target.?;
+        target.clear();
+        return dvui.RenderTarget.setAsCurrent(.{ .texture = target, .offset = .{} });
+    }
+
+    /// Puts the frame back on screen through the effects, then gives rendering
+    /// back to the screen so anything drawn later is not captured.
+    fn paint(self: *App, previous: ?dvui.RenderTarget) void {
+        // The screen is the target again before anything else: leaving the
+        // drawable set to a texture that is about to be destroyed freezes the
+        // window on the last frame that reached it.
+        const restored = previous orelse return;
+        _ = dvui.RenderTarget.setAsCurrent(restored);
+
+        const target = self.effect_target orelse return;
+        self.blit(target, restored) catch {
+            // The frame is already in the copy, so a blit that fails leaves the
+            // window frozen unless the modes give way to plain rendering.
+            self.dropEffects();
+        };
+    }
+
+    fn blit(self: *App, target: dvui.Texture.Target, screen: dvui.RenderTarget) !void {
+        const texture = try dvui.textureFromTarget(target);
+        const rect = dvui.currentWindow().rect_pixels;
+        const arena = dvui.currentWindow().arena();
+        const size = dvui.Size.Physical{ .w = rect.w, .h = rect.h };
+        const stills = self.stillRects();
+        dvui.clipSet(rect);
+
+        // Both modes: LSD lands in its own copy, and DMT folds that copy, so
+        // the drift stays underneath the tunnel instead of being painted over.
+        var source = texture;
+        if (self.effect.lsd and self.effect.dmt) {
+            const under = try self.driftTarget(size);
+            under.clear();
+            _ = dvui.RenderTarget.setAsCurrent(.{ .texture = under, .offset = .{} });
+            // A failed drift draw must not leave the window drawing into the
+            // throwaway copy, or the screen stays frozen when the modes drop.
+            errdefer _ = dvui.RenderTarget.setAsCurrent(screen);
+            try lsd.draw(texture, arena, self.effect_time, size, stills);
+            _ = dvui.RenderTarget.setAsCurrent(screen);
+            source = try dvui.textureFromTarget(under);
+        } else if (self.effect.lsd) {
+            try lsd.draw(texture, arena, self.effect_time, size, stills);
+        }
+
+        if (self.effect.dmt) {
+            try dmt.draw(source, arena, self.effect_time, size, stills);
+        }
+    }
+
+    /// LSD's output copy, kept for as long as both modes run.
+    fn driftTarget(self: *App, size: dvui.Size.Physical) !dvui.Texture.Target {
+        const width: u32 = @intFromFloat(@max(1, @floor(size.w)));
+        const height: u32 = @intFromFloat(@max(1, @floor(size.h)));
+        if (self.lsd_target) |target| {
+            if (target.width == width and target.height == height) return target;
+            target.destroyLater();
+            self.lsd_target = null;
+        }
+        const target = try dvui.Texture.Target.create(.{ .width = width, .height = height });
+        self.lsd_target = target;
+        return target;
+    }
+
+    fn dropEffects(self: *App) void {
+        self.effect = .{};
+        // The copies are only worth their memory while a mode runs.
+        if (self.effect_target) |target| target.destroyLater();
+        self.effect_target = null;
+        if (self.lsd_target) |target| target.destroyLater();
+        self.lsd_target = null;
+        dvui.refresh(null, @src(), null);
+    }
+
+    fn toggleEffect(self: *App, which: EffectMode) void {
+        const running = switch (which) {
+            .lsd => &self.effect.lsd,
+            .dmt => &self.effect.dmt,
+        };
+        running.* = !running.*;
+        if (!self.effect.any()) {
+            self.dropEffects();
+            return;
+        }
+        dvui.refresh(null, @src(), null);
+    }
+
+    /// The patches the effects leave alone: the mode chips, in physical pixels,
+    /// with a pixel of margin so their borders are not pulled either.
+    fn stillRects(self: *const App) []const dvui.Rect.Physical {
+        return self.stills[0..self.still_count];
+    }
+
     fn frameToolbar(self: *App) void {
-        _ = self;
         var bar = dvui.box(@src(), .{ .dir = .horizontal }, .{
             .expand = .horizontal,
             .padding = .{ .x = 16, .y = 8 },
@@ -343,8 +494,49 @@ pub const App = struct {
             .margin = .{ .x = 4 },
         });
 
-        var spacer = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal });
-        spacer.deinit();
+        self.still_count = 0;
+        self.effectChip("LSD", .lsd, .lsd, 7120);
+        self.effectChip("DMT", .dmt, .dmt, 7130);
+    }
+
+    /// A mode switch. `paint` reads the chip's rect back and keeps that patch of
+    /// window untouched, so the chip never moves out from under the cursor.
+    fn effectChip(self: *App, text: []const u8, which: EffectMode, target: hit.Target, id: u32) void {
+        const on = switch (which) {
+            .lsd => self.effect.lsd,
+            .dmt => self.effect.dmt,
+        };
+        var chip = dvui.box(@src(), .{ .dir = .horizontal }, .{
+            .gravity_x = 1,
+            .gravity_y = 0.5,
+            .margin = .{ .x = 3 },
+            .padding = .{ .x = 8, .y = 0 },
+            .min_size_content = .{ .h = 24 },
+            .background = true,
+            .color_fill = .{ .color = if (on) Palette.purple else Palette.field },
+            .corners = square,
+            .id_extra = id,
+        });
+        defer chip.deinit();
+
+        labelStyled(@src(), text, .{
+            .gravity_y = 0.5,
+            .color_text = .{ .color = if (on) Palette.background else Palette.muted },
+            .font = metaFont(),
+            .id_extra = id + 1,
+        });
+
+        const rect = rectFrom(chip.data().rectScaleFromParent().r);
+        if (self.still_count < self.stills.len) {
+            self.stills[self.still_count] = .{
+                .x = rect.x - 1,
+                .y = rect.y - 1,
+                .w = rect.w + 2,
+                .h = rect.h + 2,
+            };
+            self.still_count += 1;
+        }
+        self.hit_map.append(rect, target);
     }
 
     /// Orders the suggestions by BPM. Dim and inert until there are any.
@@ -821,7 +1013,7 @@ pub const App = struct {
             .margin = .{ .x = 3, .y = 0 },
             .padding = .{ .x = 4, .y = 0 },
             .data_out = &widget,
-            .id_extra = @intFromEnum(toggle) + 1,
+            .id_extra = @backingInt(toggle) + 1,
             .corners = square,
             .font = headingFont().withSize(18),
             .background = true,
@@ -949,7 +1141,34 @@ pub const App = struct {
             },
             .none => {},
         }
+    }
 
+    /// Effect time runs on the master tempo: one second per second at 120 BPM,
+    /// so a faster track drives the drift and the tunnel faster.
+    fn advanceEffects(self: *App) void {
+        const now = dvui.currentWindow().backend.nanoTime();
+        const last = self.effect_last_ns;
+        self.effect_last_ns = now;
+        if (!self.effect.any() or last == 0 or now <= last) return;
+
+        const elapsed = @as(f64, @floatFromInt(now - last)) * 1e-9;
+        self.effect_time += dmt.tempoStep(elapsed, self.masterBpm());
+    }
+
+    /// An effect changes which texel sits under the cursor, so the pointer runs
+    /// the same map the mesh does: a press lands on what the eye sees.
+    fn pointed(self: *const App, p: hit.Point) hit.Point {
+        if (!self.effect.any()) return p;
+        const rect = dvui.currentWindow().rect_pixels;
+        const size = dvui.Size.Physical{ .w = rect.w, .h = rect.h };
+        const stills = self.stillRects();
+
+        // DMT runs on top of LSD, so a press follows the tunnel first and the
+        // drift underneath it second.
+        var shown = dvui.Point.Physical{ .x = p.x, .y = p.y };
+        if (self.effect.dmt) shown = dmt.fold(shown, self.effect_time, size, stills);
+        if (self.effect.lsd) shown = lsd.sample(shown, self.effect_time, size, stills);
+        return .{ .x = shown.x, .y = shown.y };
     }
 
     /// One pass over the frame's events, before any widget can take them.
@@ -957,7 +1176,7 @@ pub const App = struct {
         for (dvui.events()) |*event| {
             if (event.evt != .mouse) continue;
             const mouse = event.evt.mouse;
-            const p = pointFrom(mouse.p);
+            const p = self.pointed(pointFrom(mouse.p));
 
             switch (mouse.action) {
                 .press => {
@@ -1059,6 +1278,8 @@ pub const App = struct {
                 self.refresh() catch {};
                 dvui.refresh(null, @src(), null);
             },
+            .toggle_lsd => self.toggleEffect(.lsd),
+            .toggle_dmt => self.toggleEffect(.dmt),
             .select_playlist => |index| {
                 if (index >= self.playlists.len) return;
                 self.selectPlaylist(index);
@@ -1141,7 +1362,7 @@ pub const App = struct {
     }
 
     pub fn animating(self: *const App) bool {
-        return self.transport.anyPlaying();
+        return self.transport.anyPlaying() or self.effect.any();
     }
 
     /// Loads a grid lane for every block. Lanes survive edits: a lane matched
@@ -1848,7 +2069,6 @@ pub const App = struct {
                 const height = rect.h * smoothed;
                 const color = if (has_bands) waveColor(wave_colour.tintBands(smoothed, analysis.bands[a..b])) else bandColor(smoothed);
                 fillRectInto(&builder, rect.x + x, rect.bottom() - height, width, height, color);
-
             }
         }
     }
@@ -2360,9 +2580,13 @@ fn pointFrom(point: dvui.Point.Physical) hit.Point {
     return .{ .x = point.x, .y = point.y };
 }
 
+/// Seconds on the backend clock, for the drift's phase.
+fn secondsNow() f64 {
+    return @as(f64, @floatFromInt(dvui.currentWindow().backend.nanoTime())) * 1e-9;
+}
+
 /// Along the bottom: the BPM window and direction filters on the left, the
 /// transport, span and master on the right, all on one centreline.
-
 fn frameFooter(app: *App) void {
     var bar = dvui.box(@src(), .{ .dir = .horizontal }, .{
         .expand = .horizontal,
@@ -2565,5 +2789,4 @@ pub const Palette = struct {
     pub const orange = dvui.Color{ .r = 0xff, .g = 0xb8, .b = 0x6c, .a = 0xff };
     pub const purple = dvui.Color{ .r = 0xbd, .g = 0x93, .b = 0xf9, .a = 0xff };
     pub const red = dvui.Color{ .r = 0xff, .g = 0x55, .b = 0x55, .a = 0xff };
-
 };

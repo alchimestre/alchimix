@@ -59,6 +59,34 @@ Drag a row from the left column into the canvas to insert it; a click alone adds
 nothing. Drag a block by its body and drop it on a gap line to move it. Pressing a
 block selects it, and the suggestions follow that selection. `×` removes a block.
 
+## Effects
+
+`LSD` drifts the window. The frame is drawn into an offscreen copy and laid back
+through a slowly moving displacement field, one colour channel at a time, under
+a drifting wash and a lens flare. Red rides a few pixels out of blue at every
+hard edge.
+
+`DMT` repeats the window in a funnel. Every ring is a whole copy of the frame,
+0.55 of the ring outside it and turned slightly against it, so the UI itself is
+the fractal and the funnel is its scale. Rings advance with the effect clock.
+
+The effect clock runs at the master tempo over 128, so a 140 BPM track moves the
+drift and the funnel faster than a 90 BPM one. 128 is the default when no track
+has set the tempo.
+
+Both effects can run at once. `DMT` folds the frame `LSD` has already drifted,
+and both chips stay live.
+
+Each mode runs the same map for drawing and for the pointer, so a click lands on
+the control the eye sees under the cursor. With both on, the pointer follows the
+tunnel first and the drift underneath it. The chips are painted back from the
+copy last, so they never move and always respond.
+
+The shapes follow reported phenomenology rather than a shader: fractal and
+geometric patterns with vivid colour are the most common visual content
+(Sci. Rep. 2022, n = 3,778), entities appear in 45.5% of accounts, and tunnels,
+spirals and lattices are Klüver's form constants.
+
 ## Where the tracks come from
 
 `~/Library/Pioneer/rekordbox/master.db`, opened read-only. Nothing is written back.
@@ -82,6 +110,9 @@ To read the collection from another source, implement the port in `src/ports/lib
 | `src/adapters/memory.zig` | in-memory source for tests and the demo |
 | `src/ui/app.zig` | block canvas, picker, toolbar |
 | `src/ui/hit.zig` | hit rectangles, pointer-to-beat conversion and drag rules |
+| `src/ui/lsd.zig` | the drift field, the colour passes and the flare |
+| `src/ui/dmt.zig` | the fold, the tunnel haze and the beings |
+| `src/ui/geom.zig` | triangle buffers shared by both effects |
 | `src/ui/run.zig` | window and frame loop |
 | `src/audio/transport.zig` | playback positions, bar joins, jog and retune transitions |
 | `src/audio/mixer.zig` | decoder buffers, shared output clock and lane start times |
