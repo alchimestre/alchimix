@@ -158,6 +158,8 @@ pub const EffectMode = enum { lsd, mushroom, dmt, dmt_a, dmt_b, dmt_og };
 
 /// The bundled emoji family, loaded at startup.
 pub const emoji_family = "noto emoji";
+/// Loaded from the system at startup; Courier is what the art was drawn for.
+pub const garden_family = "garden";
 
 pub const App = struct {
     allocator: std.mem.Allocator,
@@ -193,6 +195,8 @@ pub const App = struct {
     typing: bool = false,
     /// The bundled emoji font loaded, so the garden can draw real glyphs.
     emoji_font: bool = false,
+    /// A terminal mono loaded, so the ASCII art keeps its grid.
+    garden_font: bool = false,
     /// A preview waiting for the next master bar so it lands in sync.
     preview_pending: ?Track = null,
     preview_at_ns: i128 = 0,
@@ -523,7 +527,7 @@ pub const App = struct {
     fn drawLook(self: *App, texture: dvui.Texture, arena: std.mem.Allocator, size: dvui.Size.Physical, stills: []const dvui.Rect.Physical) !void {
         switch (self.effect.look) {
             .drift => try lsd.draw(texture, arena, self.effect_time, size, stills),
-            .mushroom => try mushroom.draw(texture, arena, &self.mushroom, self.effect_time, size, stills),
+            .mushroom => try mushroom.draw(texture, arena, &self.mushroom, self.effect_time, size, stills, self.gardenType()),
             .none => {},
         }
     }
@@ -1362,6 +1366,11 @@ pub const App = struct {
                 else => {},
             }
         }
+    }
+
+    fn gardenType(self: *const App) dvui.Font {
+        const body = dvui.themeGet().font_body;
+        return if (self.garden_font) body.withFamily(garden_family) else dvui.themeGet().font_mono;
     }
 
     /// The bundled emoji family at a size, or the body font when it did not load.

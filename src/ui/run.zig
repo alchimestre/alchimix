@@ -11,6 +11,11 @@ const font_file = "CaskaydiaCoveNerdFont-Regular.ttf";
 /// Bundled monochrome emoji: the system emoji font is a colour bitmap, which the
 /// rasteriser cannot read.
 const emoji_family = @import("app.zig").emoji_family;
+const garden_family = @import("app.zig").garden_family;
+const garden_files = [_][]const u8{
+    "/System/Library/Fonts/Supplemental/Courier New.ttf",
+    "/System/Library/Fonts/Supplemental/Andale Mono.ttf",
+};
 
 pub fn run(init: std.process.Init, app: *App) !void {
     var backend = try SDLBackend.initWindow(.{
@@ -51,6 +56,7 @@ pub fn run(init: std.process.Init, app: *App) !void {
                 app.arrow_font = true;
             }
             app.emoji_font = loadEmojiFont(init);
+            app.garden_font = loadGardenFont(init);
         }
 
         if (!app.frame()) break;
@@ -113,6 +119,20 @@ fn applyNerdFont() void {
 /// The bundled font has no arrow glyph, and a Nerd Font is already installed on
 /// most machines that would run this. It is read at runtime rather than
 /// embedded, so the repository stays small.
+/// Courier first: the face this kind of ASCII art was drawn for.
+fn loadGardenFont(init: std.process.Init) bool {
+    for (garden_files) |path| {
+        const bytes = std.Io.Dir.cwd().readFileAlloc(init.io, path, init.gpa, .limited(4 * 1024 * 1024)) catch continue;
+        dvui.addFont(garden_family, bytes, init.gpa) catch {
+            init.gpa.free(bytes);
+            continue;
+        };
+        return true;
+    }
+    std.debug.print("no garden font found; ASCII uses the theme mono\n", .{});
+    return false;
+}
+
 fn loadEmojiFont(init: std.process.Init) bool {
     // Read from the repository asset, not compiled in. The system emoji font is
     // a colour bitmap the rasteriser cannot read, so a monochrome face has to
