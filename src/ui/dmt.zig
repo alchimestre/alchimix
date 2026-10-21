@@ -20,14 +20,10 @@ const rings_per_log: f32 = 2.2;
 /// Ring phase advanced per effect second. Positive means the rings travel
 /// outward, from the fulcrum to the edges.
 const rush: f32 = 0.9;
-/// Turning speed of the ring content, in radians per effect second.
-const spin: f32 = 0.5;
 /// How far each ring is turned against the next.
 const twist: f32 = 0.55;
-/// Effect speed against the tempo clock: half again as fast as the beat.
+/// Effect speed against the tempo clock. The shared slider scales this.
 const speed: f32 = 1.6;
-/// The window border is pinned, so the fold never samples outside the frame.
-const border: f32 = 26;
 /// Pixels between a still rect and the full fold around it.
 const calm: f32 = 18;
 /// Vertex every this many physical pixels. Mirror seams are sharp, so the grid
@@ -37,18 +33,66 @@ const cell: f32 = 9;
 /// cells gets a coarser stride instead of an overflowing index.
 const vertex_budget: f32 = 60_000;
 
-/// The texel shown at `p`. Identity on the window border and inside `stills`.
+/// Motion for the effect: seeded speed wander and a turn that flips
+/// direction on a schedule, so the loop never settles.
+pub const Mood = struct {
+    /// Speed against the slider's setting.
+    rate: f32 = 1,
+    /// Radians per effect second; the sign is the turn direction.
+    spin: f32 = 0.5,
+};
+
+/// The effect's own clock. Mood scales the step, never the elapsed time: a
+/// multiplier on elapsed time shifts the phase every time the mood moves, and
+/// once the effect has run for a minute that shift dwarfs the speed slider.
+pub const Clock = struct {
+    rush: f64 = 0,
+    turn: f64 = 0,
+
+    pub fn advance(self: *Clock, seconds: f64, mood_at: Mood) void {
+        self.rush += seconds * @as(f64, mood_at.rate);
+        self.turn += seconds * @as(f64, mood_at.spin);
+    }
+};
+
+/// Seed is time alone: the effect changes without needing a track.
+pub fn mood(time: f64) Mood {
+    const t: f32 = @floatCast(time);
+    const phase = 0.7;
+
+    // 0.8 to 1.3, so the wander never cancels the slider's setting.
+    const rate = 1.05 + 0.2 * @sin(t * 0.37 + phase) + 0.05 * @sin(t * 0.11 + phase * 1.9);
+    const epoch: i64 = @intFromFloat(@floor(time / 6.5));
+    const flip: f32 = if (seeded(epoch) & 1 == 0) 1 else -1;
+
+    return .{
+        .rate = rate,
+        .spin = flip * (0.35 + 0.2 * @sin(t * 0.23 + phase)),
+    };
+}
+
+/// Splitmix64 over the flip epoch.
+fn seeded(epoch: i64) u64 {
+    var z = @as(u64, @bitCast(epoch)) +% 0x9e3779b97f4a7c15;
+    z = (z ^ (z >> 30)) *% 0xbf58476d1ce4e5b9;
+    z = (z ^ (z >> 27)) *% 0x94d049bb133111eb;
+    return z ^ (z >> 31);
+}
+
+/// The texel shown at `p`. Identity only inside `stills`: everything else is
+/// part of the transformation.
 pub fn fold(
     p: dvui.Point.Physical,
-    time: f64,
+    clock: Clock,
     size: dvui.Size.Physical,
     stills: []const dvui.Rect.Physical,
 ) dvui.Point.Physical {
     if (size.w <= 0 or size.h <= 0) return p;
-    const strength = clean(p.x, p.y, size, stills);
+    const strength = clean(p.x, p.y, stills);
     if (strength <= 0) return p;
 
-    const t: f32 = @floatCast(time * speed);
+    const rush_phase: f32 = @floatCast(clock.rush * speed);
+    const turn_phase: f32 = @floatCast(clock.turn * speed);
     const half = @min(size.w, size.h) / 2;
     const centre = dvui.Point.Physical{ .x = size.w / 2, .y = size.h / 2 };
     const q = dvui.Point.Physical{ .x = p.x - centre.x, .y = p.y - centre.y };
@@ -56,16 +100,15 @@ pub fn fold(
 
     // Tunnel: the log radius picks the ring, and the phase pushes every ring
     // outward, so the frame is always leaving the fulcrum.
-    const depth = @log(radius / half + 0.01) * rings_per_log - t * rush;
+    const depth = @log(radius / half + 0.01) * rings_per_log - rush_phase;
     const level = @floor(depth);
     const band = depth - level;
 
     // Each ring shows the frame again at a full radius, turned against its
     // neighbour. Mirroring both axes folds that copy into V chevrons.
-    const angle = std.math.atan2(q.y, q.x) + level * twist + t * spin;
-    const turn = t * spin;
-    const c = @cos(turn);
-    const s_ = @sin(turn);
+    const angle = std.math.atan2(q.y, q.x) + level * twist + turn_phase;
+    const c = @cos(turn_phase);
+    const s_ = @sin(turn_phase);
     var local = dvui.Point.Physical{
         .x = @cos(angle) * half * band,
         .y = @sin(angle) * half * band,
@@ -100,7 +143,7 @@ fn wrap(v: f32, extent: f32) f32 {
 /// A grid of quads over the window, every vertex showing a folded texel.
 pub fn mesh(
     arena: std.mem.Allocator,
-    time: f64,
+    clock: Clock,
     size: dvui.Size.Physical,
     stills: []const dvui.Rect.Physical,
 ) !geom.Mesh {
@@ -115,7 +158,7 @@ pub fn mesh(
         const y = size.h * @as(f32, @floatFromInt(row)) / down;
         for (0..across) |column| {
             const x = size.w * @as(f32, @floatFromInt(column)) / right;
-            const source = fold(.{ .x = x, .y = y }, time, size, stills);
+            const source = fold(.{ .x = x, .y = y }, clock, size, stills);
             vertexes[at] = .{
                 .pos = .{ .x = x, .y = y },
                 .col = .white,
@@ -147,14 +190,15 @@ fn gridShape(size: dvui.Size.Physical) Shape {
 pub fn draw(
     texture: dvui.Texture,
     arena: std.mem.Allocator,
-    time: f64,
+    clock: Clock,
     size: dvui.Size.Physical,
     stills: []const dvui.Rect.Physical,
 ) !void {
     if (size.w <= 0 or size.h <= 0) return;
     const bounds = dvui.Rect.Physical{ .x = 0, .y = 0, .w = size.w, .h = size.h };
 
-    const grid = try mesh(arena, time, size, stills);
+    const grid = try mesh(arena, clock, size, stills);
+
     try dvui.renderTriangles(.{
         .vertexes = grid.vertexes,
         .indices = grid.indices,
@@ -164,17 +208,29 @@ pub fn draw(
     try geom.repaint(arena, stills, size, texture);
 }
 
+/// Shared effect-speed range, driven by the slider under the mode chips.
+pub const min_speed: f32 = 0.2;
+pub const max_speed: f32 = 2;
+
+/// Slider position for a speed, clamped to the track.
+pub fn speedFraction(value: f32) f32 {
+    return std.math.clamp((value - min_speed) / (max_speed - min_speed), 0, 1);
+}
+
+/// Speed for a slider position, clamped to the range.
+pub fn speedAt(fraction: f32) f32 {
+    return min_speed + std.math.clamp(fraction, 0, 1) * (max_speed - min_speed);
+}
+
 /// Effect seconds from wall seconds. A 128 BPM track runs in real time; the app
 /// defaults to 128 when no track has set the tempo.
 pub fn tempoStep(elapsed: f64, bpm: f32) f64 {
     return elapsed * @as(f64, @floatCast(bpm)) / 128.0;
 }
 
-/// Zero at the border and inside a still rect, one in the open frame.
-fn clean(x: f32, y: f32, size: dvui.Size.Physical, stills: []const dvui.Rect.Physical) f32 {
-    const inset = @min(@min(x, y), @min(size.w - x, size.h - y));
-    const anchorage = std.math.clamp(inset / border, 0, 1);
-    return anchorage * geom.stillMask(x, y, stills, calm);
+/// Zero inside a still rect, one everywhere else.
+fn clean(x: f32, y: f32, stills: []const dvui.Rect.Physical) f32 {
+    return geom.stillMask(x, y, stills, calm);
 }
 
 const framesize = dvui.Size.Physical{ .w = 1180, .h = 720 };
@@ -186,19 +242,24 @@ const chips = [_]dvui.Rect.Physical{
 test "the chips do not move" {
     const middle = dvui.Point.Physical{ .x = 1062, .y = 26 };
     for (0..40) |step| {
-        const shown = fold(middle, @as(f64, @floatFromInt(step)) * 0.6, framesize, &chips);
+        const shown = fold(middle, .{ .rush = @as(f64, @floatFromInt(step)) * 0.6 }, framesize, &chips);
         try std.testing.expectEqual(@as(f32, 1062), shown.x);
         try std.testing.expectEqual(@as(f32, 26), shown.y);
     }
 }
 
-test "the window border does not move" {
-    const edge = dvui.Point.Physical{ .x = 0, .y = 360 };
-    for (0..20) |step| {
-        const shown = fold(edge, @as(f64, @floatFromInt(step)) * 0.9, framesize, &chips);
-        try std.testing.expectEqual(edge.x, shown.x);
-        try std.testing.expectEqual(edge.y, shown.y);
+test "everything outside the stills is transformed" {
+    var moved: usize = 0;
+    var step: usize = 0;
+    while (step < 20) : (step += 1) {
+        const p = dvui.Point.Physical{
+            .x = @as(f32, @floatFromInt(step)) * 59,
+            .y = 4,
+        };
+        const shown = fold(p, .{ .rush = 2.5 }, framesize, &chips);
+        if (@abs(shown.x - p.x) + @abs(shown.y - p.y) > 5) moved += 1;
     }
+    try std.testing.expect(moved > 10);
 }
 
 test "the fold always samples inside the frame" {
@@ -209,7 +270,7 @@ test "the fold always samples inside the frame" {
                 .x = @as(f32, @floatFromInt(column)) * 29.5,
                 .y = @as(f32, @floatFromInt(row)) * 18.0,
             };
-            const shown = fold(p, time, framesize, &chips);
+            const shown = fold(p, .{ .rush = time }, framesize, &chips);
             try std.testing.expect(shown.x >= 0 and shown.x <= framesize.w);
             try std.testing.expect(shown.y >= 0 and shown.y <= framesize.h);
         }
@@ -227,7 +288,7 @@ test "the frame is folded, not copied" {
                 .x = 60 + @as(f32, @floatFromInt(column)) * 55,
                 .y = 60 + @as(f32, @floatFromInt(row)) * 32,
             };
-            const shown = fold(p, time, framesize, &chips);
+            const shown = fold(p, .{ .rush = time }, framesize, &chips);
             if (@abs(shown.x - p.x) + @abs(shown.y - p.y) > 20) folded += 1;
         }
     }
@@ -236,9 +297,55 @@ test "the frame is folded, not copied" {
 
 test "the mirror axes turn with the clock" {
     const p = dvui.Point.Physical{ .x = 700, .y = 300 };
-    const before = fold(p, 0, framesize, &chips);
-    const after = fold(p, 1, framesize, &chips);
+    const before = fold(p, .{ .rush = 0 }, framesize, &chips);
+    const after = fold(p, .{ .rush = 1 }, framesize, &chips);
     try std.testing.expect(@abs(before.x - after.x) + @abs(before.y - after.y) > 0.5);
+}
+
+test "the phase advances by the step, not by the elapsed time" {
+    var clock: Clock = .{};
+    var seconds: f64 = 0;
+    while (seconds < 120) : (seconds += 0.5) {
+        clock.advance(0.5, mood(seconds));
+    }
+
+    const before = clock.rush;
+    const step = 0.01;
+    clock.advance(step, mood(seconds));
+    const moved = clock.rush - before;
+
+    // A quarter faster or slower than the step, never a jump of the whole
+    // effect clock.
+    try std.testing.expect(moved > step * 0.8 and moved < step * 1.3);
+}
+
+test "speed and turn are seeded, not stepped" {
+    const start = mood(0);
+    try std.testing.expect(start.rate > 0.8 and start.rate < 1.3);
+
+    var flips: usize = 0;
+    var epoch: i64 = 0;
+    while (epoch < 9) : (epoch += 1) {
+        const before = mood(@as(f64, @floatFromInt(epoch)) * 6.5 + 0.1).spin;
+        const after = mood(@as(f64, @floatFromInt(epoch + 1)) * 6.5 + 0.1).spin;
+        if ((before > 0) != (after > 0)) flips += 1;
+    }
+    try std.testing.expect(flips > 0);
+
+    const one = mood(12.31);
+    const again = mood(12.31);
+    try std.testing.expectEqual(one.rate, again.rate);
+    try std.testing.expectEqual(one.spin, again.spin);
+}
+
+test "the speed slider round-trips and clamps" {
+    for ([_]f32{ min_speed, 0.5, 1, 1.7, max_speed }) |value| {
+        try std.testing.expectApproxEqAbs(value, speedAt(speedFraction(value)), 1e-6);
+    }
+    try std.testing.expectEqual(@as(f32, min_speed), speedAt(-1));
+    try std.testing.expectEqual(@as(f32, max_speed), speedAt(2));
+    try std.testing.expectEqual(@as(f32, 0), speedFraction(0));
+    try std.testing.expectEqual(@as(f32, 1), speedFraction(99));
 }
 
 test "the effect clock follows the tempo" {
