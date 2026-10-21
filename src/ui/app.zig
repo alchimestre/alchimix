@@ -10,6 +10,7 @@ const std = @import("std");
 const dvui = @import("dvui");
 const pl = @import("alchimix");
 const dmt = @import("dmt.zig");
+const geom = @import("geom.zig");
 const hit = @import("hit.zig");
 const lsd = @import("lsd.zig");
 const wave_colour = @import("wave_colour.zig");
@@ -84,14 +85,24 @@ fn presetName(preset: pl.mixer.EqPreset) []const u8 {
 /// the frame LSD has already drifted.
 pub const Effect = struct {
     lsd: bool = false,
-    dmt: bool = false,
+    dmt: Dmt = .off,
 
     pub fn any(self: Effect) bool {
-        return self.lsd or self.dmt;
+        return self.lsd or self.dmt != .off;
     }
 };
 
-pub const EffectMode = enum { lsd, dmt };
+/// Two ways to keep colour in the picture: A dims the whole fold, B dims it and
+/// paints the coloured fills back at full strength.
+pub const Dmt = enum { off, a, b };
+
+/// Pressing a mode's chip runs it; pressing the one already running stops it,
+/// and pressing the other swaps instead of stopping.
+fn pressed(current: Dmt, choice: Dmt) Dmt {
+    return if (current == choice) .off else choice;
+}
+
+pub const EffectMode = enum { lsd, dmt_a, dmt_b };
 
 pub const App = struct {
     allocator: std.mem.Allocator,
@@ -166,6 +177,9 @@ pub const App = struct {
     effect_target: ?dvui.Texture.Target = null,
     /// LSD's output while DMT folds it. Only allocated when both run.
     lsd_target: ?dvui.Texture.Target = null,
+    /// The frame's coloured fills, for DMT B. Only kept while it runs.
+    colours: std.ArrayListUnmanaged(geom.Quad) = .empty,
+    colour_target: ?dvui.Texture.Target = null,
     /// Effect seconds: wall seconds scaled by tempo and the speed slider. LSD
     /// reads it straight; DMT integrates it through its mood.
     effect_time: f64 = 0,
@@ -173,7 +187,7 @@ pub const App = struct {
     effect_clock: dmt.Clock = .{},
     /// Shared effect speed multiplier, under both mode chips.
     effect_speed: f32 = 1,
-    stills: [3]dvui.Rect.Physical = .{ .{}, .{}, .{} },
+    stills: [4]dvui.Rect.Physical = .{ .{}, .{}, .{}, .{} },
     still_count: usize = 0,
 
     /// Tempo window for suggestions, as a percentage of the seed's BPM.
@@ -313,6 +327,7 @@ pub const App = struct {
     pub fn frame(self: *App) bool {
         // The whole frame has to exist before it can be warped, so while the
         // mode runs it is drawn into an offscreen copy and blitted back.
+        self.colours.clearRetainingCapacity();
         const previous = self.capture();
 
         var root = dvui.box(@src(), .{ .dir = .vertical }, .{
@@ -421,7 +436,7 @@ pub const App = struct {
         // Both modes: LSD lands in its own copy, and DMT folds that copy, so
         // the drift stays underneath the tunnel instead of being painted over.
         var source = texture;
-        if (self.effect.lsd and self.effect.dmt) {
+        if (self.effect.lsd and self.effect.dmt != .off) {
             const under = try self.driftTarget(size);
             under.clear();
             _ = dvui.RenderTarget.setAsCurrent(.{ .texture = under, .offset = .{} });
@@ -435,23 +450,39 @@ pub const App = struct {
             try lsd.draw(texture, arena, self.effect_time, size, stills);
         }
 
-        if (self.effect.dmt) {
-            try dmt.draw(source, arena, self.effect_clock, size, stills);
+        if (self.effect.dmt != .off) {
+            try dmt.draw(source, arena, self.effect_clock, size, stills, dmt.damp);
+            if (self.effect.dmt == .b) try self.paintColours(arena, screen, size);
         }
+    }
+
+    /// DMT B: the coloured fills the frame kept, folded through the same map at
+    /// full strength, so the dimmed fold cannot take their weight.
+    fn paintColours(self: *App, arena: std.mem.Allocator, screen: dvui.RenderTarget, size: dvui.Size.Physical) !void {
+        if (self.colours.items.len == 0) return;
+
+        const layer = try sizedTarget(&self.colour_target, size);
+        layer.clear();
+        _ = dvui.RenderTarget.setAsCurrent(.{ .texture = layer, .offset = .{} });
+        // A failed draw must hand rendering back, or the window freezes on the
+        // last frame that reached it.
+        errdefer _ = dvui.RenderTarget.setAsCurrent(screen);
+
+        const quads = try geom.solidQuads(arena, self.colours.items);
+        try dvui.renderTriangles(.{
+            .vertexes = quads.vertexes,
+            .indices = quads.indices,
+            .bounds = .{ .x = 0, .y = 0, .w = size.w, .h = size.h },
+        }, null);
+
+        _ = dvui.RenderTarget.setAsCurrent(screen);
+        const layer_texture = try dvui.textureFromTarget(layer);
+        try dmt.draw(layer_texture, arena, self.effect_clock, size, &.{}, 1);
     }
 
     /// LSD's output copy, kept for as long as both modes run.
     fn driftTarget(self: *App, size: dvui.Size.Physical) !dvui.Texture.Target {
-        const width: u32 = @intFromFloat(@max(1, @floor(size.w)));
-        const height: u32 = @intFromFloat(@max(1, @floor(size.h)));
-        if (self.lsd_target) |target| {
-            if (target.width == width and target.height == height) return target;
-            target.destroyLater();
-            self.lsd_target = null;
-        }
-        const target = try dvui.Texture.Target.create(.{ .width = width, .height = height });
-        self.lsd_target = target;
-        return target;
+        return sizedTarget(&self.lsd_target, size);
     }
 
     fn dropEffects(self: *App) void {
@@ -461,15 +492,17 @@ pub const App = struct {
         self.effect_target = null;
         if (self.lsd_target) |target| target.destroyLater();
         self.lsd_target = null;
+        if (self.colour_target) |target| target.destroyLater();
+        self.colour_target = null;
         dvui.refresh(null, @src(), null);
     }
 
     fn toggleEffect(self: *App, which: EffectMode) void {
-        const running = switch (which) {
-            .lsd => &self.effect.lsd,
-            .dmt => &self.effect.dmt,
-        };
-        running.* = !running.*;
+        switch (which) {
+            .lsd => self.effect.lsd = !self.effect.lsd,
+            .dmt_a => self.effect.dmt = pressed(self.effect.dmt, .a),
+            .dmt_b => self.effect.dmt = pressed(self.effect.dmt, .b),
+        }
         if (!self.effect.any()) {
             self.dropEffects();
             return;
@@ -512,9 +545,13 @@ pub const App = struct {
                 .margin = .{ .x = 4 },
             });
 
+            var modes = dvui.box(@src(), .{ .dir = .horizontal }, .{ .gravity_x = 1, .gravity_y = 0.5 });
+            defer modes.deinit();
+
             self.still_count = 0;
             self.effectChip("LSD", .lsd, .lsd, 7120);
-            self.effectChip("DMT", .dmt, .dmt, 7130);
+            self.effectChip("DMT A", .dmt_a, .dmt_a, 7130);
+            self.effectChip("DMT B", .dmt_b, .dmt_b, 7140);
         }
 
         self.effectSpeed();
@@ -559,10 +596,10 @@ pub const App = struct {
     fn effectChip(self: *App, text: []const u8, which: EffectMode, target: hit.Target, id: u32) void {
         const on = switch (which) {
             .lsd => self.effect.lsd,
-            .dmt => self.effect.dmt,
+            .dmt_a => self.effect.dmt == .a,
+            .dmt_b => self.effect.dmt == .b,
         };
         var chip = dvui.box(@src(), .{ .dir = .horizontal }, .{
-            .gravity_x = 1,
             .gravity_y = 0.5,
             .margin = .{ .x = 3 },
             .padding = .{ .x = 8, .y = 0 },
@@ -1215,7 +1252,7 @@ pub const App = struct {
         // DMT runs on top of LSD, so a press follows the tunnel first and the
         // drift underneath it second.
         var shown = dvui.Point.Physical{ .x = p.x, .y = p.y };
-        if (self.effect.dmt) shown = dmt.fold(shown, self.effect_clock, size, stills);
+        if (self.effect.dmt != .off) shown = dmt.fold(shown, self.effect_clock, size, stills);
         if (self.effect.lsd) shown = lsd.sample(shown, self.effect_time, size, stills);
         return .{ .x = shown.x, .y = shown.y };
     }
@@ -1328,7 +1365,8 @@ pub const App = struct {
                 dvui.refresh(null, @src(), null);
             },
             .toggle_lsd => self.toggleEffect(.lsd),
-            .toggle_dmt => self.toggleEffect(.dmt),
+            .toggle_dmt_a => self.toggleEffect(.dmt_a),
+            .toggle_dmt_b => self.toggleEffect(.dmt_b),
             .select_playlist => |index| {
                 if (index >= self.playlists.len) return;
                 self.selectPlaylist(index);
@@ -1898,7 +1936,7 @@ pub const App = struct {
 
             fillRect(self.allocator, bar_rect.x, bar_rect.y, bar_rect.w, bar_rect.h, Palette.field);
             if (lane.analysis) |*analysis| {
-                paintOverview(self.allocator, analysis, bar_rect);
+                self.paintOverview(analysis, bar_rect);
             }
 
             const window_x = bar_rect.x + bar_rect.w * start;
@@ -2117,9 +2155,21 @@ pub const App = struct {
                 const width = @min(rect.w - x, @max(1, next_x - x));
                 const height = rect.h * smoothed;
                 const color = if (has_bands) waveColor(wave_colour.tintBands(smoothed, analysis.bands[a..b])) else bandColor(smoothed);
-                fillRectInto(&builder, rect.x + x, rect.bottom() - height, width, height, color);
+                self.waveFill(&builder, rect.x + x, rect.bottom() - height, width, height, color);
             }
         }
+    }
+
+    /// A waveform column: drawn now, and kept for DMT B, which needs the
+    /// coloured fills on their own.
+    fn waveFill(self: *App, builder: *dvui.Path.Builder, x: f32, y: f32, w: f32, h: f32, colour: dvui.Color) void {
+        const shown = lifted(self.effect, colour);
+        fillRectInto(builder, x, y, w, h, shown);
+        if (self.effect.dmt != .b) return;
+        self.colours.append(self.allocator, .{
+            .rect = .{ .x = x, .y = y, .w = w, .h = h },
+            .colour = shown,
+        }) catch return;
     }
 
     fn paintBeats(self: *App, rect: hit.Rect, start_beat: f32, beat_offset: f32) void {
@@ -2134,12 +2184,12 @@ pub const App = struct {
 
     /// The whole track at the lane's width, so the navigator reads as a
     /// waveform rather than a slider.
-    fn paintOverview(allocator: std.mem.Allocator, analysis: *const pl.analysis.Analysis, rect: hit.Rect) void {
+    fn paintOverview(self: *App, analysis: *const pl.analysis.Analysis, rect: hit.Rect) void {
         if (rect.w <= 0 or rect.h <= 0 or analysis.waveform.len == 0) return;
         const len: f32 = @floatFromInt(analysis.waveform.len);
         const scale: f32 = 255 / @as(f32, @floatFromInt(@max(1, analysis.peak)));
 
-        var builder = dvui.Path.Builder.init(allocator);
+        var builder = dvui.Path.Builder.init(self.allocator);
         defer builder.deinit();
 
         const has_bands = analysis.bands.len == analysis.waveform.len;
@@ -2161,7 +2211,7 @@ pub const App = struct {
             smoothed = smoothed * 0.75 + level * 0.25;
             const height = rect.h * smoothed;
             const color = if (has_bands) waveColor(wave_colour.tintBands(smoothed, analysis.bands[from..to])) else bandColor(smoothed);
-            fillRectInto(&builder, rect.x + x, rect.bottom() - height, 6, height, color);
+            self.waveFill(&builder, rect.x + x, rect.bottom() - height, 6, height, color);
         }
     }
 
@@ -2571,6 +2621,31 @@ fn drawPauseBars(allocator: std.mem.Allocator, cx: f32, cy: f32, size: f32) void
 }
 
 /// Same colour at a given opacity, for the block being carried.
+/// Waveform colour held against the fold's dampening: the grey chrome dims,
+/// the heat map keeps its weight.
+fn lifted(effect: Effect, colour: dvui.Color) dvui.Color {
+    if (!effect.any()) return colour;
+
+    const red: f32 = @floatFromInt(colour.r);
+    const green: f32 = @floatFromInt(colour.g);
+    const blue: f32 = @floatFromInt(colour.b);
+    const grey = 0.299 * red + 0.587 * green + 0.114 * blue;
+    return .{
+        .r = liftChannel(red, grey),
+        .g = liftChannel(green, grey),
+        .b = liftChannel(blue, grey),
+        .a = colour.a,
+    };
+}
+
+/// Push a channel away from the colour's own grey, then lift it a little.
+fn liftChannel(value: f32, grey: f32) u8 {
+    const chroma: f32 = 1.45;
+    const gain: f32 = 1.15;
+    const shown = (grey + (value - grey) * chroma) * gain;
+    return @intFromFloat(@round(std.math.clamp(shown, 0, 255)));
+}
+
 pub fn fade(color: dvui.Color, alpha: u8) dvui.Color {
     var dimmed = color;
     dimmed.a = alpha;
@@ -2619,6 +2694,20 @@ pub fn fillRectInto(builder: *dvui.Path.Builder, x: f32, y: f32, w: f32, h: f32,
     builder.addPoint(.{ .x = x + w, .y = y + h });
     builder.addPoint(.{ .x = x, .y = y + h });
     dvui.Path.fillConvex(builder.build(), .{ .color = .{ .color = color } });
+}
+
+/// A window-sized texture for an effect layer, reused until the window resizes.
+fn sizedTarget(slot: *?dvui.Texture.Target, size: dvui.Size.Physical) !dvui.Texture.Target {
+    const width: u32 = @intFromFloat(@max(1, @floor(size.w)));
+    const height: u32 = @intFromFloat(@max(1, @floor(size.h)));
+    if (slot.*) |target| {
+        if (target.width == width and target.height == height) return target;
+        target.destroyLater();
+        slot.* = null;
+    }
+    const target = try dvui.Texture.Target.create(.{ .width = width, .height = height });
+    slot.* = target;
+    return target;
 }
 
 fn rectFrom(rect: dvui.Rect.Physical) hit.Rect {
@@ -2839,3 +2928,26 @@ pub const Palette = struct {
     pub const purple = dvui.Color{ .r = 0xbd, .g = 0x93, .b = 0xf9, .a = 0xff };
     pub const red = dvui.Color{ .r = 0xff, .g = 0x55, .b = 0x55, .a = 0xff };
 };
+
+test "waveform colour survives the fold" {
+    const plain = dvui.Color{ .r = 0x30, .g = 0xfa, .b = 0x7b, .a = 0xff };
+    try std.testing.expectEqual(plain, lifted(.{}, plain));
+
+    const grey = dvui.Color{ .r = 0x40, .g = 0x40, .b = 0x40, .a = 0xff };
+    const shown_grey = lifted(.{ .dmt = .b }, grey);
+    try std.testing.expectEqual(shown_grey.r, shown_grey.g);
+    try std.testing.expectEqual(shown_grey.g, shown_grey.b);
+    try std.testing.expect(shown_grey.r > grey.r);
+
+    const shown = lifted(.{ .dmt = .a }, plain);
+    try std.testing.expect(shown.r < plain.r and shown.g >= plain.g);
+}
+
+test "a mode chip runs itself and stops only itself" {
+    try std.testing.expectEqual(Dmt.a, pressed(.off, .a));
+    try std.testing.expectEqual(Dmt.b, pressed(.off, .b));
+    try std.testing.expectEqual(Dmt.off, pressed(.a, .a));
+    try std.testing.expectEqual(Dmt.off, pressed(.b, .b));
+    try std.testing.expectEqual(Dmt.a, pressed(.b, .a));
+    try std.testing.expectEqual(Dmt.b, pressed(.a, .b));
+}

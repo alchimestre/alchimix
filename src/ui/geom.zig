@@ -81,6 +81,40 @@ pub fn quadMesh(arena: std.mem.Allocator, rect: dvui.Rect.Physical, size: dvui.S
     return .{ .vertexes = vertexes, .indices = indices };
 }
 
+/// A coloured rect the frame kept, so an effect can paint it again.
+pub const Quad = struct {
+    rect: dvui.Rect.Physical,
+    colour: dvui.Color,
+};
+
+/// One mesh for a run of solid quads, drawn without a texture.
+pub fn solidQuads(arena: std.mem.Allocator, quads: []const Quad) !Mesh {
+    const vertexes = try arena.alloc(dvui.Vertex, quads.len * 4);
+    const indices = try arena.alloc(dvui.Vertex.Index, quads.len * 6);
+    const fan = [_]dvui.Vertex.Index{ 0, 1, 2, 0, 2, 3 };
+
+    for (quads, 0..) |quad, at| {
+        const rect = quad.rect;
+        const corners = [_]dvui.Point.Physical{
+            .{ .x = rect.x, .y = rect.y },
+            .{ .x = rect.x + rect.w, .y = rect.y },
+            .{ .x = rect.x + rect.w, .y = rect.y + rect.h },
+            .{ .x = rect.x, .y = rect.y + rect.h },
+        };
+        const first: dvui.Vertex.Index = @intCast(at * 4);
+        for (corners, 0..) |corner, corner_at| {
+            vertexes[at * 4 + corner_at] = .{
+                .pos = corner,
+                .col = .fromColor(quad.colour),
+                .uv = .{ 0, 0 },
+            };
+        }
+        for (fan, 0..) |offset, i| indices[at * 6 + i] = first + offset;
+    }
+
+    return .{ .vertexes = vertexes, .indices = indices };
+}
+
 /// Paint every rect in `rects` back from `texture`, untouched.
 pub fn repaint(
     arena: std.mem.Allocator,
@@ -218,4 +252,28 @@ test "the still mask is zero inside and one far away" {
     // Two rects: the nearer one wins.
     const other = dvui.Rect.Physical{ .x = 400, .y = 400, .w = 10, .h = 10 };
     try std.testing.expectEqual(@as(f32, 0), stillMask(405, 405, &.{ rect, other }, 18));
+}
+
+test "solid quads keep their colour and cover their rect" {
+    const quads = [_]Quad{
+        .{
+            .rect = .{ .x = 4, .y = 6, .w = 10, .h = 20 },
+            .colour = .{ .r = 0xff, .g = 0x40, .b = 0x00, .a = 0xff },
+        },
+        .{ .rect = .{ .x = 0, .y = 0, .w = 2, .h = 2 }, .colour = .white },
+    };
+
+    const mesh = try solidQuads(std.testing.allocator, &quads);
+    defer {
+        std.testing.allocator.free(mesh.vertexes);
+        std.testing.allocator.free(mesh.indices);
+    }
+
+    try std.testing.expectEqual(@as(usize, 8), mesh.vertexes.len);
+    try std.testing.expectEqual(@as(usize, 12), mesh.indices.len);
+    try std.testing.expectEqual(@as(f32, 14), mesh.vertexes[2].pos.x);
+    try std.testing.expectEqual(@as(f32, 26), mesh.vertexes[2].pos.y);
+    try std.testing.expectEqual(@as(u8, 0xff), mesh.vertexes[0].col.r);
+    try std.testing.expectEqual(@as(u8, 0x40), mesh.vertexes[0].col.g);
+    for (mesh.indices) |index| try std.testing.expect(index < mesh.vertexes.len);
 }

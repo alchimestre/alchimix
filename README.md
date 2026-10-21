@@ -78,6 +78,12 @@ has set the tempo.
 seconds, so the motion never settles into a loop. A speed slider under the mode
 chips scales both effects.
 
+The funnel is drawn at 0.55 brightness: the frame is mostly grey chrome, and the
+coloured content is what should carry the picture. `DMT A` dims the whole fold.
+`DMT B` dims it too, then paints the waveform fills back at full strength
+through the same map, so colour survives the fold undimmed. Both chips are live
+while either runs; pressing the active one stops it.
+
 Both effects can run at once. `DMT` folds the frame `LSD` has already drifted,
 and both chips stay live.
 
