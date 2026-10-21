@@ -13,6 +13,7 @@ const dmt = @import("dmt.zig");
 const geom = @import("geom.zig");
 const hit = @import("hit.zig");
 const lsd = @import("lsd.zig");
+const mushroom = @import("mushroom.zig");
 const wave_colour = @import("wave_colour.zig");
 
 const Track = pl.track.Track;
@@ -81,14 +82,18 @@ fn presetName(preset: pl.mixer.EqPreset) []const u8 {
     };
 }
 
-/// What the frame is drawn through. Both modes can run at once; DMT then folds
-/// the frame LSD has already drifted.
+/// The drift look. One at a time: both warp the whole frame from the same
+/// capture, so the second would paint over the first.
+pub const Look = enum { none, drift, mushroom };
+
+/// What the frame is drawn through. A look and a fold can run at once; DMT then
+/// folds the frame the look has already bent.
 pub const Effect = struct {
-    lsd: bool = false,
+    look: Look = .none,
     dmt: Dmt = .off,
 
     pub fn any(self: Effect) bool {
-        return self.lsd or self.dmt != .off;
+        return self.look != .none or self.dmt != .off;
     }
 
     /// Only the colour-weighted variants lift the waveform; the plain funnel
@@ -100,7 +105,7 @@ pub const Effect = struct {
 
 /// `plain` is the funnel as it was: the frame at full brightness. `a` dims the
 /// whole fold; `b` dims it and paints the coloured fills back at full strength.
-pub const Dmt = enum { off, plain, a, b };
+pub const Dmt = enum { off, plain, a, b, og };
 
 /// Lane indices for remembered tracks the crate still holds, oldest first.
 pub fn rememberedLanes(remembered: []const u64, lanes: []const u64, out: *[Played.limit]usize) usize {
@@ -149,7 +154,7 @@ fn pressed(current: Dmt, choice: Dmt) Dmt {
     return if (current == choice) .off else choice;
 }
 
-pub const EffectMode = enum { lsd, dmt, dmt_a, dmt_b };
+pub const EffectMode = enum { lsd, mushroom, dmt, dmt_a, dmt_b, dmt_og };
 
 pub const App = struct {
     allocator: std.mem.Allocator,
@@ -179,6 +184,8 @@ pub const App = struct {
     lane_right: f32 = 0,
     /// Tracks that started lately; the transport button replays them.
     played: Played = .{},
+    /// The mushroom undergrowth: plants, rain and rings.
+    mushroom: mushroom.State = .{},
     /// A text field held the keyboard last frame, so space is a space.
     typing: bool = false,
     /// A preview waiting for the next master bar so it lands in sync.
@@ -233,9 +240,12 @@ pub const App = struct {
     effect_time: f64 = 0,
     effect_last_ns: i128 = 0,
     effect_clock: dmt.Clock = .{},
+    /// The pinned look's own clock: tempo only, so the speed slider leaves it
+    /// exactly as it was.
+    og_clock: dmt.Clock = .{},
     /// Shared effect speed multiplier, under both mode chips.
     effect_speed: f32 = 1,
-    stills: [5]dvui.Rect.Physical = .{ .{}, .{}, .{}, .{}, .{} },
+    stills: [7]dvui.Rect.Physical = .{ .{}, .{}, .{}, .{}, .{}, .{}, .{} },
     still_count: usize = 0,
 
     /// Tempo window for suggestions, as a percentage of the seed's BPM.
@@ -485,24 +495,31 @@ pub const App = struct {
         // Both modes: LSD lands in its own copy, and DMT folds that copy, so
         // the drift stays underneath the tunnel instead of being painted over.
         var source = texture;
-        if (self.effect.lsd and self.effect.dmt != .off) {
+        if (self.effect.look != .none and self.effect.dmt != .off) {
             const under = try self.driftTarget(size);
             under.clear();
             _ = dvui.RenderTarget.setAsCurrent(.{ .texture = under, .offset = .{} });
             // A failed drift draw must not leave the window drawing into the
             // throwaway copy, or the screen stays frozen when the modes drop.
             errdefer _ = dvui.RenderTarget.setAsCurrent(screen);
-            try lsd.draw(texture, arena, self.effect_time, size, stills);
+            try self.drawLook(texture, arena, size, stills);
             _ = dvui.RenderTarget.setAsCurrent(screen);
             source = try dvui.textureFromTarget(under);
-        } else if (self.effect.lsd) {
-            try lsd.draw(texture, arena, self.effect_time, size, stills);
+        } else if (self.effect.look != .none) {
+            try self.drawLook(texture, arena, size, stills);
         }
 
         if (self.effect.dmt != .off) {
-            const shade: f32 = if (self.effect.dmt == .plain) 1 else dmt.damp;
-            try dmt.draw(source, arena, self.effect_clock, size, stills, shade);
+            try dmt.draw(source, arena, self.dmtClock(), size, stills, self.dmtShade(), self.dmtBorder());
             if (self.effect.dmt == .b) try self.paintColours(arena, screen, size);
+        }
+    }
+
+    fn drawLook(self: *App, texture: dvui.Texture, arena: std.mem.Allocator, size: dvui.Size.Physical, stills: []const dvui.Rect.Physical) !void {
+        switch (self.effect.look) {
+            .drift => try lsd.draw(texture, arena, self.effect_time, size, stills),
+            .mushroom => try mushroom.draw(texture, arena, &self.mushroom, self.effect_time, size, stills),
+            .none => {},
         }
     }
 
@@ -527,7 +544,7 @@ pub const App = struct {
 
         _ = dvui.RenderTarget.setAsCurrent(screen);
         const layer_texture = try dvui.textureFromTarget(layer);
-        try dmt.draw(layer_texture, arena, self.effect_clock, size, &.{}, 1);
+        try dmt.draw(layer_texture, arena, self.dmtClock(), size, &.{}, 1, 0);
     }
 
     /// LSD's output copy, kept for as long as both modes run.
@@ -549,10 +566,12 @@ pub const App = struct {
 
     fn toggleEffect(self: *App, which: EffectMode) void {
         switch (which) {
-            .lsd => self.effect.lsd = !self.effect.lsd,
+            .lsd => self.effect.look = if (self.effect.look == .drift) .none else .drift,
+            .mushroom => self.effect.look = if (self.effect.look == .mushroom) .none else .mushroom,
             .dmt => self.effect.dmt = pressed(self.effect.dmt, .plain),
             .dmt_a => self.effect.dmt = pressed(self.effect.dmt, .a),
             .dmt_b => self.effect.dmt = pressed(self.effect.dmt, .b),
+            .dmt_og => self.effect.dmt = pressed(self.effect.dmt, .og),
         }
         if (!self.effect.any()) {
             self.dropEffects();
@@ -601,9 +620,11 @@ pub const App = struct {
 
             self.still_count = 0;
             self.effectChip("LSD", .lsd, .lsd, 7120);
+            self.effectChip(".-.", .mushroom, .mushroom, 7122);
             self.effectChip("DMT", .dmt, .dmt, 7125);
             self.effectChip("DMT A", .dmt_a, .dmt_a, 7130);
             self.effectChip("DMT B", .dmt_b, .dmt_b, 7140);
+            self.effectChip("OG DMT", .dmt_og, .dmt_og, 7150);
         }
 
         self.effectSpeed();
@@ -647,10 +668,12 @@ pub const App = struct {
     /// window untouched, so the chip never moves out from under the cursor.
     fn effectChip(self: *App, text: []const u8, which: EffectMode, target: hit.Target, id: u32) void {
         const on = switch (which) {
-            .lsd => self.effect.lsd,
+            .lsd => self.effect.look == .drift,
+            .mushroom => self.effect.look == .mushroom,
             .dmt => self.effect.dmt == .plain,
             .dmt_a => self.effect.dmt == .a,
             .dmt_b => self.effect.dmt == .b,
+            .dmt_og => self.effect.dmt == .og,
         };
         var chip = dvui.box(@src(), .{ .dir = .horizontal }, .{
             .gravity_y = 0.5,
@@ -782,6 +805,7 @@ pub const App = struct {
         self.crate.clear();
         self.selected.clearRetainingCapacity();
         self.query.clearRetainingCapacity();
+        self.played = .{};
 
         const all = self.library.all() catch &.{};
         for (ids) |id| {
@@ -1291,6 +1315,10 @@ pub const App = struct {
         const step = dmt.tempoStep(elapsed, self.masterBpm()) * self.effect_speed;
         self.effect_time += step;
         self.effect_clock.advance(step, dmt.mood(self.effect_time));
+        self.og_clock.advance(dmt.tempoStep(elapsed, self.masterBpm()), .{});
+        if (self.transport.anyPlaying()) self.mushroom.grow(step);
+        self.mushroom.tick(self.effect_time);
+        self.mushroom.fall(step, self.effect_time);
     }
 
     /// An effect changes which texel sits under the cursor, so the pointer runs
@@ -1304,8 +1332,12 @@ pub const App = struct {
         // DMT runs on top of LSD, so a press follows the tunnel first and the
         // drift underneath it second.
         var shown = dvui.Point.Physical{ .x = p.x, .y = p.y };
-        if (self.effect.dmt != .off) shown = dmt.fold(shown, self.effect_clock, size, stills);
-        if (self.effect.lsd) shown = lsd.sample(shown, self.effect_time, size, stills);
+        if (self.effect.dmt != .off) shown = dmt.fold(shown, self.dmtClock(), size, stills, self.dmtBorder());
+        switch (self.effect.look) {
+            .drift => shown = lsd.sample(shown, self.effect_time, size, stills, 1),
+            .mushroom => shown = lsd.sample(shown, self.effect_time, size, stills, mushroom.reach),
+            .none => {},
+        }
         return .{ .x = shown.x, .y = shown.y };
     }
 
@@ -1327,6 +1359,13 @@ pub const App = struct {
         }
     }
 
+    fn onPlant(at: dvui.Point.Physical) bool {
+        const screen = dvui.currentWindow().rect_pixels;
+        const plant = mushroom.plantRect(.{ .w = screen.w, .h = screen.h });
+        return at.x >= plant.x and at.x <= plant.x + plant.w and
+            at.y >= plant.y and at.y <= plant.y + plant.h;
+    }
+
     /// A text field owns the keyboard this frame, so the next frame's keys are
     /// typing, not shortcuts.
     fn noteTyping(self: *App, id: dvui.Id) void {
@@ -1340,6 +1379,14 @@ pub const App = struct {
         switch (mouse.action) {
             .press => {
                 if (!mouse.button.pointer()) return;
+                // The plant is painted after the layout, so it is hit in screen
+                // space rather than through the widget map.
+                if (self.effect.look == .mushroom and onPlant(mouse.p)) {
+                    self.mushroom.poke(self.effect_time);
+                    dvui.refresh(null, @src(), null);
+                    return;
+                }
+
                 const target = self.hit_map.hit(p) orelse return;
                 self.last_point = p;
                 self.apply(self.drag.press(target, p, mouse.mod.shift()));
@@ -1435,9 +1482,11 @@ pub const App = struct {
                 dvui.refresh(null, @src(), null);
             },
             .toggle_lsd => self.toggleEffect(.lsd),
+            .toggle_mushroom => self.toggleEffect(.mushroom),
             .toggle_dmt => self.toggleEffect(.dmt),
             .toggle_dmt_a => self.toggleEffect(.dmt_a),
             .toggle_dmt_b => self.toggleEffect(.dmt_b),
+            .toggle_dmt_og => self.toggleEffect(.dmt_og),
             .select_playlist => |index| {
                 if (index >= self.playlists.len) return;
                 self.selectPlaylist(index);
@@ -1451,6 +1500,7 @@ pub const App = struct {
                 if (index >= self.grid.items.len) return;
                 if (self.transport.isPlaying(index)) {
                     self.transport.stop(index);
+                    self.played.remember(self.grid.items[index].track_id);
                 } else {
                     self.transport.start(index, .next_bar);
                     self.played.remember(self.grid.items[index].track_id);
@@ -1806,6 +1856,7 @@ pub const App = struct {
         }
         self.selected_playlist = null;
         self.open_count = 0;
+        self.played = .{};
         self.selected.clearRetainingCapacity();
         self.query.clearRetainingCapacity();
         self.master_text.clearRetainingCapacity();
@@ -2041,15 +2092,42 @@ pub const App = struct {
         self.player.toggle(track, tempo);
     }
 
+    /// The pinned look runs on tempo alone, at its own constant turn; the other
+    /// variants use the mood-driven clock.
+    fn dmtClock(self: *const App) dmt.Clock {
+        return if (self.effect.dmt == .og) self.og_clock else self.effect_clock;
+    }
+
+    fn dmtShade(self: *const App) f32 {
+        return switch (self.effect.dmt) {
+            .a, .b => dmt.damp,
+            else => 1,
+        };
+    }
+
+    fn dmtBorder(self: *const App) f32 {
+        return if (self.effect.dmt == .og) dmt.og_border else 0;
+    }
+
     /// Play: start the remembered tracks together. With nothing playable
     /// remembered, start every lane and remember what started.
     fn replayPlayed(self: *App) void {
-        var lanes: [256]u64 = undefined;
-        const lane_count = @min(self.grid.items.len, lanes.len);
-        for (self.grid.items[0..lane_count], 0..) |lane, at| lanes[at] = lane.track_id;
-
         var indices: [Played.limit]usize = undefined;
-        const count = rememberedLanes(self.played.items(), lanes[0..lane_count], &indices);
+        var count: usize = 0;
+
+        if (self.grid.items.len >= Played.limit) {
+            // A full crate already names the four: play them in crate order.
+            for (0..Played.limit) |index| {
+                indices[index] = index;
+                count += 1;
+            }
+        } else {
+            var lanes: [256]u64 = undefined;
+            const lane_count = @min(self.grid.items.len, lanes.len);
+            for (self.grid.items[0..lane_count], 0..) |lane, at| lanes[at] = lane.track_id;
+            count = rememberedLanes(self.played.items(), lanes[0..lane_count], &indices);
+        }
+
         if (count > 0 and self.transport.startGroup(indices[0..count])) return;
 
         self.transport.startAll();
@@ -2972,7 +3050,7 @@ test "waveform colour survives the fold" {
 
     // The plain funnel is the reference look: colour comes through untouched.
     try std.testing.expectEqual(plain, lifted(.{ .dmt = .plain }, plain));
-    try std.testing.expectEqual(plain, lifted(.{ .lsd = true }, plain));
+    try std.testing.expectEqual(plain, lifted(.{ .look = .drift }, plain));
 }
 
 test "a mode chip runs itself and stops only itself" {

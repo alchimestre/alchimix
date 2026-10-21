@@ -24,6 +24,8 @@ const rush: f32 = 0.9;
 const twist: f32 = 0.55;
 /// Effect speed against the tempo clock. The shared slider scales this.
 const speed: f32 = 1.6;
+/// The pinned look: the window border never samples outside the frame.
+pub const og_border: f32 = 26;
 /// Fold brightness. The frame is mostly grey chrome, so the fold is damped and
 /// the coloured content carries the picture instead.
 pub const damp: f32 = 0.55;
@@ -89,9 +91,10 @@ pub fn fold(
     clock: Clock,
     size: dvui.Size.Physical,
     stills: []const dvui.Rect.Physical,
+    border: f32,
 ) dvui.Point.Physical {
     if (size.w <= 0 or size.h <= 0) return p;
-    const strength = clean(p.x, p.y, stills);
+    const strength = clean(p.x, p.y, size, stills, border);
     if (strength <= 0) return p;
 
     const rush_phase: f32 = @floatCast(clock.rush * speed);
@@ -150,6 +153,7 @@ pub fn mesh(
     size: dvui.Size.Physical,
     stills: []const dvui.Rect.Physical,
     shade: f32,
+    border: f32,
 ) !geom.Mesh {
     const shape = gridShape(size);
     const across = shape.columns + 1;
@@ -163,7 +167,7 @@ pub fn mesh(
         const y = size.h * @as(f32, @floatFromInt(row)) / down;
         for (0..across) |column| {
             const x = size.w * @as(f32, @floatFromInt(column)) / right;
-            const source = fold(.{ .x = x, .y = y }, clock, size, stills);
+            const source = fold(.{ .x = x, .y = y }, clock, size, stills, border);
             vertexes[at] = .{
                 .pos = .{ .x = x, .y = y },
                 .col = tint,
@@ -199,11 +203,12 @@ pub fn draw(
     size: dvui.Size.Physical,
     stills: []const dvui.Rect.Physical,
     shade: f32,
+    border: f32,
 ) !void {
     if (size.w <= 0 or size.h <= 0) return;
     const bounds = dvui.Rect.Physical{ .x = 0, .y = 0, .w = size.w, .h = size.h };
 
-    const grid = try mesh(arena, clock, size, stills, shade);
+    const grid = try mesh(arena, clock, size, stills, shade, border);
 
     try dvui.renderTriangles(.{
         .vertexes = grid.vertexes,
@@ -240,9 +245,13 @@ fn shadeColour(shade: f32) dvui.Color.PMA {
     return .{ .r = level, .g = level, .b = level };
 }
 
-/// Zero inside a still rect, one everywhere else.
-fn clean(x: f32, y: f32, stills: []const dvui.Rect.Physical) f32 {
-    return geom.stillMask(x, y, stills, calm);
+/// Zero inside a still rect, one everywhere else. A positive `border` fades the
+/// fold out at the window edge, so nothing samples past the frame.
+fn clean(x: f32, y: f32, size: dvui.Size.Physical, stills: []const dvui.Rect.Physical, border: f32) f32 {
+    const mask = geom.stillMask(x, y, stills, calm);
+    if (border <= 0) return mask;
+    const inset = @min(@min(x, y), @min(size.w - x, size.h - y));
+    return std.math.clamp(inset / border, 0, 1) * mask;
 }
 
 const framesize = dvui.Size.Physical{ .w = 1180, .h = 720 };
@@ -254,7 +263,7 @@ const chips = [_]dvui.Rect.Physical{
 test "the chips do not move" {
     const middle = dvui.Point.Physical{ .x = 1062, .y = 26 };
     for (0..40) |step| {
-        const shown = fold(middle, .{ .rush = @as(f64, @floatFromInt(step)) * 0.6 }, framesize, &chips);
+        const shown = fold(middle, .{ .rush = @as(f64, @floatFromInt(step)) * 0.6 }, framesize, &chips, 0);
         try std.testing.expectEqual(@as(f32, 1062), shown.x);
         try std.testing.expectEqual(@as(f32, 26), shown.y);
     }
@@ -268,7 +277,7 @@ test "everything outside the stills is transformed" {
             .x = @as(f32, @floatFromInt(step)) * 59,
             .y = 4,
         };
-        const shown = fold(p, .{ .rush = 2.5 }, framesize, &chips);
+        const shown = fold(p, .{ .rush = 2.5 }, framesize, &chips, 0);
         if (@abs(shown.x - p.x) + @abs(shown.y - p.y) > 5) moved += 1;
     }
     try std.testing.expect(moved > 10);
@@ -282,7 +291,7 @@ test "the fold always samples inside the frame" {
                 .x = @as(f32, @floatFromInt(column)) * 29.5,
                 .y = @as(f32, @floatFromInt(row)) * 18.0,
             };
-            const shown = fold(p, .{ .rush = time }, framesize, &chips);
+            const shown = fold(p, .{ .rush = time }, framesize, &chips, 0);
             try std.testing.expect(shown.x >= 0 and shown.x <= framesize.w);
             try std.testing.expect(shown.y >= 0 and shown.y <= framesize.h);
         }
@@ -300,7 +309,7 @@ test "the frame is folded, not copied" {
                 .x = 60 + @as(f32, @floatFromInt(column)) * 55,
                 .y = 60 + @as(f32, @floatFromInt(row)) * 32,
             };
-            const shown = fold(p, .{ .rush = time }, framesize, &chips);
+            const shown = fold(p, .{ .rush = time }, framesize, &chips, 0);
             if (@abs(shown.x - p.x) + @abs(shown.y - p.y) > 20) folded += 1;
         }
     }
@@ -309,8 +318,8 @@ test "the frame is folded, not copied" {
 
 test "the mirror axes turn with the clock" {
     const p = dvui.Point.Physical{ .x = 700, .y = 300 };
-    const before = fold(p, .{ .rush = 0 }, framesize, &chips);
-    const after = fold(p, .{ .rush = 1 }, framesize, &chips);
+    const before = fold(p, .{ .rush = 0 }, framesize, &chips, 0);
+    const after = fold(p, .{ .rush = 1 }, framesize, &chips, 0);
     try std.testing.expect(@abs(before.x - after.x) + @abs(before.y - after.y) > 0.5);
 }
 
@@ -383,4 +392,18 @@ test "the fold is drawn at the shade it is given" {
     try std.testing.expectEqual(@as(u8, 0), shadeColour(0).r);
     try std.testing.expectEqual(@as(u8, 140), shadeColour(damp).g);
     try std.testing.expectEqual(@as(u8, 255), shadeColour(damp).a);
+}
+
+test "the pinned look holds the window border still" {
+    const clock = Clock{ .rush = 40, .turn = 7 };
+
+    const edge = dvui.Point.Physical{ .x = 0, .y = 360 };
+    const shown = fold(edge, clock, framesize, &chips, og_border);
+    try std.testing.expectEqual(edge.x, shown.x);
+    try std.testing.expectEqual(edge.y, shown.y);
+
+    // Past the border the fold runs again.
+    const inside = dvui.Point.Physical{ .x = 200, .y = 360 };
+    const moved = fold(inside, clock, framesize, &chips, og_border);
+    try std.testing.expect(@abs(moved.x - inside.x) + @abs(moved.y - inside.y) > 1);
 }

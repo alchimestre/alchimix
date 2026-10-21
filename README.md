@@ -48,6 +48,12 @@ at the far right doubles as a level meter;
 sets the waveform span (16, 32 or 64 beats), next to the master BPM. The
 waveform is tinted by rekordbox's three bands: kick red, mid green, high blue.
 
+The mushroom chip runs the same drift field at 0.45 strength with the same
+colour fringe and no flare, under an ASCII undergrowth: mushrooms pop and grow,
+big ones rise slower, rain falls and rings where it lands. A plant grows at the
+left edge while music plays; pressing it sends insects in from both sides and
+floats hearts up to pop.
+
 `space`, or the footer's `play`, starts the last four tracks that played,
 together; `stop` stops every lane. The history holds the four most recent
 tracks to start, so a lane begun from its own `▶` joins it too. With nothing
@@ -82,6 +88,10 @@ has set the tempo.
 `DMT` speed wanders on seeded sines and the turn flips direction every 6.5
 seconds, so the motion never settles into a loop. A speed slider under the mode
 chips scales both effects.
+
+`OG DMT` is the pinned look: full brightness, constant turn, and the window
+border held still so nothing samples past the frame. It runs on tempo alone, so
+the speed slider leaves it alone.
 
 `DMT` folds at full brightness, the frame as it is. `DMT A` and `DMT B` fold at
 0.55: the frame is mostly grey chrome, and the coloured content should carry the

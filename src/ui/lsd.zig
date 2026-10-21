@@ -37,6 +37,7 @@ pub fn offset(
     time: f64,
     size: dvui.Size.Physical,
     still: []const dvui.Rect.Physical,
+    strength: f32,
 ) dvui.Point.Physical {
     const reach = @min(size.w, size.h);
     if (reach <= 0) return .{};
@@ -54,7 +55,7 @@ pub fn offset(
         0.35 * @sin((x - y) * 0.0049 + t * 0.49) +
         0.20 * @cos((x + y * 0.8) * 0.0118 - t * 1.07);
 
-    const amount = amplitude * reach * clean(x, y, size, still);
+    const amount = amplitude * reach * strength * clean(x, y, size, still);
     return .{ .x = drift_x * amount, .y = drift_y * amount };
 }
 
@@ -65,8 +66,9 @@ pub fn sample(
     time: f64,
     size: dvui.Size.Physical,
     still: []const dvui.Rect.Physical,
+    strength: f32,
 ) dvui.Point.Physical {
-    const moved = offset(p, time, size, still);
+    const moved = offset(p, time, size, still, strength);
     return .{ .x = p.x + moved.x, .y = p.y + moved.y };
 }
 
@@ -78,6 +80,7 @@ pub fn mesh(
     size: dvui.Size.Physical,
     still: []const dvui.Rect.Physical,
     channel: Channel,
+    strength: f32,
 ) !geom.Mesh {
     const columns: usize = @intFromFloat(@max(1, @ceil(size.w / cell)));
     const rows: usize = @intFromFloat(@max(1, @ceil(size.h / cell)));
@@ -91,7 +94,7 @@ pub fn mesh(
         const y = @min(size.h, @as(f32, @floatFromInt(row)) * cell);
         for (0..across) |column| {
             const x = @min(size.w, @as(f32, @floatFromInt(column)) * cell);
-            const moved = offset(.{ .x = x, .y = y }, time, size, still);
+            const moved = offset(.{ .x = x, .y = y }, time, size, still, strength);
             const spread = disperse(x, y, size, still, channel);
             vertexes[at] = .{
                 .pos = .{ .x = x, .y = y },
@@ -121,7 +124,7 @@ pub fn draw(
     const bounds = dvui.Rect.Physical{ .x = 0, .y = 0, .w = size.w, .h = size.h };
 
     for ([_]Channel{ .red, .green, .blue }) |channel| {
-        const grid = try mesh(arena, time, size, still, channel);
+        const grid = try mesh(arena, time, size, still, channel, 1);
         try dvui.renderTriangles(.{
             .vertexes = grid.vertexes,
             .indices = grid.indices,
@@ -129,7 +132,7 @@ pub fn draw(
         }, texture);
     }
 
-    const colour = try wash(arena, time, size);
+    const colour = try wash(arena, time, size, wash_peak);
     try dvui.renderTriangles(colour, null);
 
     const glow = try flares(arena, time, size);
@@ -141,7 +144,7 @@ pub fn draw(
 /// A slow wash of colour over the whole frame, three palette hues drifting
 /// against each other. Additive, so the dark surface takes the colour and the
 /// text keeps its brightness.
-pub fn wash(arena: std.mem.Allocator, time: f64, size: dvui.Size.Physical) !dvui.Triangles {
+pub fn wash(arena: std.mem.Allocator, time: f64, size: dvui.Size.Physical, peak: f32) !dvui.Triangles {
     const columns = 6;
     const rows = 4;
     const across = columns + 1;
@@ -153,7 +156,7 @@ pub fn wash(arena: std.mem.Allocator, time: f64, size: dvui.Size.Physical) !dvui
             const at = row * across + column;
             const x = size.w * @as(f32, @floatFromInt(column)) / columns;
             const y = size.h * @as(f32, @floatFromInt(row)) / rows;
-            vertexes[at] = .{ .pos = .{ .x = x, .y = y }, .col = washColor(x, y, t) };
+            vertexes[at] = .{ .pos = .{ .x = x, .y = y }, .col = washColor(x, y, t, peak) };
         }
     }
 
@@ -179,7 +182,7 @@ pub fn wash(arena: std.mem.Allocator, time: f64, size: dvui.Size.Physical) !dvui
 }
 
 /// Three hues from the window palette, each on its own slow wave.
-fn washColor(x: f32, y: f32, t: f32) dvui.Color.PMA {
+fn washColor(x: f32, y: f32, t: f32, peak: f32) dvui.Color.PMA {
     const purple = waveAt(x, y, t, 0);
     const teal = waveAt(x * 1.3, y * 0.8, t, 2.1);
     const orange = waveAt(x * 0.7, y * 1.1, t, 4.2);
@@ -189,9 +192,9 @@ fn washColor(x: f32, y: f32, t: f32) dvui.Color.PMA {
     const b = (0.98 * purple + 0.85 * teal + 0.42 * orange) / 3;
 
     return .{
-        .r = @intFromFloat(r * wash_peak),
-        .g = @intFromFloat(g * wash_peak),
-        .b = @intFromFloat(b * wash_peak),
+        .r = @intFromFloat(r * peak),
+        .g = @intFromFloat(g * peak),
+        .b = @intFromFloat(b * peak),
         .a = 0,
     };
 }
@@ -303,7 +306,7 @@ const toggle = dvui.Rect.Physical{ .x = 1100, .y = 16, .w = 46, .h = 24 };
 test "the still rect does not move" {
     const middle = dvui.Point.Physical{ .x = 1120, .y = 28 };
     for (0..40) |step| {
-        const moved = offset(middle, @as(f64, @floatFromInt(step)) * 0.7, framesize, &.{toggle});
+        const moved = offset(middle, @as(f64, @floatFromInt(step)) * 0.7, framesize, &.{toggle}, 1);
         try std.testing.expectEqual(@as(f32, 0), moved.x);
         try std.testing.expectEqual(@as(f32, 0), moved.y);
     }
@@ -311,7 +314,7 @@ test "the still rect does not move" {
 
 test "the window border does not move" {
     const corner = dvui.Point.Physical{ .x = 0, .y = 0 };
-    const moved = offset(corner, 12.5, framesize, &.{});
+    const moved = offset(corner, 12.5, framesize, &.{}, 1);
     try std.testing.expectEqual(@as(f32, 0), moved.x);
     try std.testing.expectEqual(@as(f32, 0), moved.y);
 }
@@ -322,7 +325,7 @@ test "the drift stays within a few pixels" {
     while (y <= framesize.h) : (y += 30) {
         var x: f32 = 0;
         while (x <= framesize.w) : (x += 30) {
-            const moved = offset(.{ .x = x, .y = y }, 1.5, framesize, &.{});
+            const moved = offset(.{ .x = x, .y = y }, 1.5, framesize, &.{}, 1);
             try std.testing.expect(@abs(moved.x) <= reach);
             try std.testing.expect(@abs(moved.y) <= reach);
         }
@@ -330,7 +333,7 @@ test "the drift stays within a few pixels" {
 }
 
 test "the mesh bends the frame instead of sliding it" {
-    const grid = try mesh(std.testing.allocator, 1.5, framesize, &.{toggle}, .red);
+    const grid = try mesh(std.testing.allocator, 1.5, framesize, &.{toggle}, .red, 1);
     defer std.testing.allocator.free(grid.vertexes);
     defer std.testing.allocator.free(grid.indices);
 
@@ -349,7 +352,7 @@ test "the mesh bends the frame instead of sliding it" {
 }
 
 test "the mesh leaves the toggle on its own texels" {
-    const grid = try mesh(std.testing.allocator, 6.0, framesize, &.{toggle}, .blue);
+    const grid = try mesh(std.testing.allocator, 6.0, framesize, &.{toggle}, .blue, 1);
     defer std.testing.allocator.free(grid.vertexes);
     defer std.testing.allocator.free(grid.indices);
 
@@ -366,10 +369,10 @@ test "the mesh leaves the toggle on its own texels" {
 }
 
 test "the three passes leave the toggle identical" {
-    const red = try mesh(std.testing.allocator, 3.0, framesize, &.{toggle}, .red);
+    const red = try mesh(std.testing.allocator, 3.0, framesize, &.{toggle}, .red, 1);
     defer std.testing.allocator.free(red.vertexes);
     defer std.testing.allocator.free(red.indices);
-    const blue = try mesh(std.testing.allocator, 3.0, framesize, &.{toggle}, .blue);
+    const blue = try mesh(std.testing.allocator, 3.0, framesize, &.{toggle}, .blue, 1);
     defer std.testing.allocator.free(blue.vertexes);
     defer std.testing.allocator.free(blue.indices);
 
@@ -397,7 +400,7 @@ test "red rides out and blue rides in" {
 }
 
 test "the wash colours the frame without washing it out" {
-    const colour = try wash(std.testing.allocator, 5.0, framesize);
+    const colour = try wash(std.testing.allocator, 5.0, framesize, wash_peak);
     defer std.testing.allocator.free(colour.vertexes);
     defer std.testing.allocator.free(colour.indices);
 
@@ -429,7 +432,7 @@ test "the flare is light, not paint" {
 test "the mesh never samples outside the window" {
     var time: f64 = 0;
     while (time < 30) : (time += 7.5) {
-        const grid = try mesh(std.testing.allocator, time, framesize, &.{toggle}, .red);
+        const grid = try mesh(std.testing.allocator, time, framesize, &.{toggle}, .red, 1);
         defer std.testing.allocator.free(grid.vertexes);
         defer std.testing.allocator.free(grid.indices);
 
@@ -442,18 +445,18 @@ test "the mesh never samples outside the window" {
 
 test "the pointer runs the same map as the mesh" {
     const near = dvui.Point.Physical{ .x = 1120, .y = 60 };
-    const moved = offset(near, 4.25, framesize, &.{toggle});
+    const moved = offset(near, 4.25, framesize, &.{toggle}, 1);
     try std.testing.expect(@abs(moved.x) + @abs(moved.y) > 0);
 
     // What the mesh shows at `near` is what the pointer returns there, so a
     // press lands on the pixel under the cursor.
-    const shown = sample(near, 4.25, framesize, &.{toggle});
+    const shown = sample(near, 4.25, framesize, &.{toggle}, 1);
     try std.testing.expectApproxEqAbs(near.x + moved.x, shown.x, 1e-6);
     try std.testing.expectApproxEqAbs(near.y + moved.y, shown.y, 1e-6);
 
     // Inside the chip the map is the identity, so the chip cannot miss.
     const on_chip = dvui.Point.Physical{ .x = 1120, .y = 28 };
-    const there = sample(on_chip, 4.25, framesize, &.{toggle});
+    const there = sample(on_chip, 4.25, framesize, &.{toggle}, 1);
     try std.testing.expectEqual(@as(f32, 1120), there.x);
     try std.testing.expectEqual(@as(f32, 28), there.y);
 }
