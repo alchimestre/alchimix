@@ -50,7 +50,7 @@ pub fn run(init: std.process.Init, app: *App) !void {
                 applyNerdFont();
                 app.arrow_font = true;
             }
-            app.emoji_font = loadEmojiFont();
+            app.emoji_font = loadEmojiFont(init);
         }
 
         if (!app.frame()) break;
@@ -113,13 +113,28 @@ fn applyNerdFont() void {
 /// The bundled font has no arrow glyph, and a Nerd Font is already installed on
 /// most machines that would run this. It is read at runtime rather than
 /// embedded, so the repository stays small.
-fn loadEmojiFont() bool {
-    // Embedded, so the chip keeps its glyph wherever the binary runs.
-    dvui.addFont(emoji_family, @embedFile("../assets/NotoEmoji.ttf"), null) catch |err| {
-        std.debug.print("emoji font rejected ({s}); the garden falls back to ASCII\n", .{@errorName(err)});
-        return false;
+fn loadEmojiFont(init: std.process.Init) bool {
+    // Read from the repository asset, not compiled in. The system emoji font is
+    // a colour bitmap the rasteriser cannot read, so a monochrome face has to
+    // come from somewhere.
+    const candidates = [_][]const u8{
+        "assets/NotoEmoji.ttf",
+        "../assets/NotoEmoji.ttf",
+        "../../assets/NotoEmoji.ttf",
     };
-    return true;
+
+    for (candidates) |path| {
+        const bytes = std.Io.Dir.cwd().readFileAlloc(init.io, path, init.gpa, .limited(4 * 1024 * 1024)) catch continue;
+        dvui.addFont(emoji_family, bytes, init.gpa) catch |err| {
+            std.debug.print("emoji font rejected ({s}); the chip falls back to ASCII\n", .{@errorName(err)});
+            init.gpa.free(bytes);
+            return false;
+        };
+        return true;
+    }
+
+    std.debug.print("emoji font not found; the chip falls back to ASCII\n", .{});
+    return false;
 }
 
 fn loadNerdFont(init: std.process.Init) bool {
