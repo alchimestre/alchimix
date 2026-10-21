@@ -55,7 +55,7 @@ pub fn run(init: std.process.Init, app: *App) !void {
                 applyNerdFont();
                 app.arrow_font = true;
             }
-            app.emoji_font = loadEmojiFont(init);
+            app.emoji_font = loadEmojiFont();
             app.garden_font = loadGardenFont(init);
         }
 
@@ -133,28 +133,14 @@ fn loadGardenFont(init: std.process.Init) bool {
     return false;
 }
 
-fn loadEmojiFont(init: std.process.Init) bool {
-    // Read from the repository asset, not compiled in. The system emoji font is
-    // a colour bitmap the rasteriser cannot read, so a monochrome face has to
-    // come from somewhere.
-    const candidates = [_][]const u8{
-        "assets/NotoEmoji.ttf",
-        "../assets/NotoEmoji.ttf",
-        "../../assets/NotoEmoji.ttf",
+fn loadEmojiFont() bool {
+    // Compiled in: the shell's emoji font is a colour bitmap the rasteriser
+    // cannot read, so a monochrome face has to ship with the binary.
+    dvui.addFont(emoji_family, @embedFile("../assets/NotoEmoji.ttf"), null) catch |err| {
+        std.debug.print("emoji font rejected ({s}); the chip falls back to ASCII\n", .{@errorName(err)});
+        return false;
     };
-
-    for (candidates) |path| {
-        const bytes = std.Io.Dir.cwd().readFileAlloc(init.io, path, init.gpa, .limited(4 * 1024 * 1024)) catch continue;
-        dvui.addFont(emoji_family, bytes, init.gpa) catch |err| {
-            std.debug.print("emoji font rejected ({s}); the chip falls back to ASCII\n", .{@errorName(err)});
-            init.gpa.free(bytes);
-            return false;
-        };
-        return true;
-    }
-
-    std.debug.print("emoji font not found; the chip falls back to ASCII\n", .{});
-    return false;
+    return true;
 }
 
 fn loadNerdFont(init: std.process.Init) bool {
