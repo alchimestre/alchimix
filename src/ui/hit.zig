@@ -87,8 +87,6 @@ pub const Target = union(enum) {
     playlist_toggle: usize,
     /// Writes the current crate as a new playlist.
     save_playlist,
-    /// The brace marking the lanes under global play/stop.
-    group,
     /// Orders the suggestions by BPM.
     sort_bpm,
     /// Drifts the window, or stops it drifting.
@@ -318,10 +316,6 @@ pub const Drag = struct {
             .playlist => |index| .{ .select_playlist = index },
             .playlist_toggle => |index| .{ .toggle_playlist = index },
             .save_playlist => .save_playlist,
-            .group => blk: {
-                self.pressed = target;
-                break :blk .none;
-            },
             .master_lock => .toggle_master_lock,
             .pitch_lock => .toggle_pitch,
             .lane_play => |index| .{ .toggle_lane_play = index },
@@ -367,7 +361,7 @@ pub const Drag = struct {
     pub fn pull(self: *Drag, p: Point) ?Pull {
         const pressed = self.pressed orelse return null;
         switch (pressed) {
-            .lane, .nav, .eq_node, .trim, .group => {},
+            .lane, .nav, .eq_node, .trim => {},
             else => return null,
         }
         const dx = p.x - self.press_at.x;
@@ -380,7 +374,7 @@ pub const Drag = struct {
     pub fn motion(self: *Drag, p: Point, threshold: f32, canvas: Rect, rows: []const Rect) bool {
         const pressed = self.pressed orelse return false;
         switch (pressed) {
-            .lane, .nav, .eq_node, .eq_plot, .eq_preset, .trim, .clear, .playlist, .playlist_toggle, .save_playlist, .group, .sort_bpm, .lsd, .dmt, .dmt_a, .dmt_b => return false,
+            .lane, .nav, .eq_node, .eq_plot, .eq_preset, .trim, .clear, .playlist, .playlist_toggle, .save_playlist, .sort_bpm, .lsd, .dmt, .dmt_a, .dmt_b => return false,
             else => {},
         }
         if (self.carrying == null) {
@@ -401,7 +395,7 @@ pub const Drag = struct {
         return switch (target) {
             .block => |from| .{ .move_block = .{ .from = from, .gap = to } },
             .row => |track| .{ .drop_track = .{ .gap = to, .track = track } },
-            .toggle, .notation, .lane, .nav, .eq_node, .eq_plot, .eq_preset, .trim, .transport, .clear, .playlist, .playlist_toggle, .save_playlist, .group, .sort_bpm, .lsd, .dmt, .dmt_a, .dmt_b, .master_lock, .pitch_lock, .lane_play, .lane_mute, .width => .none,
+            .toggle, .notation, .lane, .nav, .eq_node, .eq_plot, .eq_preset, .trim, .transport, .clear, .playlist, .playlist_toggle, .save_playlist, .sort_bpm, .lsd, .dmt, .dmt_a, .dmt_b, .master_lock, .pitch_lock, .lane_play, .lane_mute, .width => .none,
         };
     }
 

@@ -102,6 +102,47 @@ pub const Effect = struct {
 /// whole fold; `b` dims it and paints the coloured fills back at full strength.
 pub const Dmt = enum { off, plain, a, b };
 
+/// Lane indices for remembered tracks the crate still holds, oldest first.
+pub fn rememberedLanes(remembered: []const u64, lanes: []const u64, out: *[Played.limit]usize) usize {
+    var count: usize = 0;
+    for (remembered) |track_id| {
+        out[count] = std.mem.indexOfScalar(u64, lanes, track_id) orelse continue;
+        count += 1;
+    }
+    return count;
+}
+
+/// The last few tracks that started, oldest first. Global play replays them.
+pub const Played = struct {
+    pub const limit = 4;
+
+    ids: [limit]u64 = @splat(0),
+    count: usize = 0,
+
+    /// Moves `id` to the newest slot, dropping the oldest track when full.
+    pub fn remember(self: *Played, id: u64) void {
+        var kept: usize = 0;
+        for (self.ids[0..self.count]) |seen| {
+            if (seen == id) continue;
+            self.ids[kept] = seen;
+            kept += 1;
+        }
+        self.count = kept;
+
+        if (self.count == limit) {
+            std.mem.copyForwards(u64, self.ids[0 .. limit - 1], self.ids[1..limit]);
+            self.count = limit - 1;
+        }
+
+        self.ids[self.count] = id;
+        self.count += 1;
+    }
+
+    pub fn items(self: *const Played) []const u64 {
+        return self.ids[0..self.count];
+    }
+};
+
 /// Pressing a mode's chip runs it; pressing the one already running stops it,
 /// and pressing the other swaps instead of stopping.
 fn pressed(current: Dmt, choice: Dmt) Dmt {
@@ -136,12 +177,13 @@ pub const App = struct {
     block_rects: [256]hit.Rect = undefined,
     block_count: usize = 0,
     lane_right: f32 = 0,
-    /// First lane of the four-lane group global play/stop acts on.
-    group_start: usize = 0,
+    /// Tracks that started lately; the transport button replays them.
+    played: Played = .{},
+    /// A text field held the keyboard last frame, so space is a space.
+    typing: bool = false,
     /// A preview waiting for the next master bar so it lands in sync.
     preview_pending: ?Track = null,
     preview_at_ns: i128 = 0,
-    group: [4]usize = undefined,
 
     query: std.ArrayList(u8) = .empty,
     found: []const Track = &.{},
@@ -362,7 +404,8 @@ pub const App = struct {
 
         // The pointer pass reads the map the previous frame drew, then the map
         // is rebuilt from this frame's layout.
-        self.handlePointer();
+        self.handleEvents();
+        self.typing = false;
         self.syncGrid();
 
         self.hit_map.reset();
@@ -750,7 +793,6 @@ pub const App = struct {
         }
 
         self.grid_dirty = true;
-        self.group_start = 0;
         if (self.selected_playlist) |old| {
             if (old.len > 0) self.allocator.free(old);
         }
@@ -1045,6 +1087,7 @@ pub const App = struct {
             .color_text = .{ .color = Palette.ink },
             .font = bodyFont(),
         });
+        self.noteTyping(entry.data().id);
         const typed = entry.text_changed;
         entry.deinit();
         if (typed) self.refresh() catch {};
@@ -1079,6 +1122,7 @@ pub const App = struct {
             .font = metaFont(),
             .id_extra = 7101,
         });
+        self.noteTyping(entry.data().id);
         const changed = entry.text_changed;
         entry.deinit();
 
@@ -1213,8 +1257,6 @@ pub const App = struct {
             if (self.crate.transition(index)) |step| connector(self.allocator, index, step);
         }
 
-        self.drawGroupBrace();
-
         // Scroll room past the last block: dropping at the end should not need
         // the pointer on the very last block.
         var tail = dvui.box(@src(), .{ .dir = .vertical }, .{
@@ -1268,38 +1310,58 @@ pub const App = struct {
     }
 
     /// One pass over the frame's events, before any widget can take them.
-    fn handlePointer(self: *App) void {
+    /// One pass over the frame's events, before any widget can take them.
+    fn handleEvents(self: *App) void {
         for (dvui.events()) |*event| {
-            if (event.evt != .mouse) continue;
-            const mouse = event.evt.mouse;
-            const p = self.pointed(pointFrom(mouse.p));
-
-            switch (mouse.action) {
-                .press => {
-                    if (!mouse.button.pointer()) continue;
-                    const target = self.hit_map.hit(p) orelse continue;
-                    self.last_point = p;
-                    self.apply(self.drag.press(target, p, mouse.mod.shift()));
-                    switch (target) {
-                        .lane => |index| {
-                            if (self.transport.isPlaying(index)) self.transport.jogPause(index, .now);
-                        },
-                        else => {},
-                    }
-                },
-                .motion => {
-                    if (self.drag.motion(p, 6 * self.scale_hint, self.canvas, self.block_rects[0..self.block_count])) {
-                        dvui.refresh(null, @src(), null);
-                    }
-                    if (self.drag.pull(p)) |pull| self.applyPull(pull);
-                },
-                .release => {
-                    if (!mouse.button.pointer()) continue;
-                    self.apply(self.drag.release());
-                    self.transport.jogResume();
+            switch (event.evt) {
+                .mouse => self.handleMouse(event),
+                .key => |key| {
+                    if (key.action != .down or key.code != .space) continue;
+                    // A text field owns the keyboard: space types there.
+                    if (self.typing) continue;
+                    self.apply(.toggle_transport);
+                    event.handled = true;
                 },
                 else => {},
             }
+        }
+    }
+
+    /// A text field owns the keyboard this frame, so the next frame's keys are
+    /// typing, not shortcuts.
+    fn noteTyping(self: *App, id: dvui.Id) void {
+        if (dvui.focusedWidgetIdInCurrentSubwindow() == id) self.typing = true;
+    }
+
+    fn handleMouse(self: *App, event: *dvui.Event) void {
+        const mouse = event.evt.mouse;
+        const p = self.pointed(pointFrom(mouse.p));
+
+        switch (mouse.action) {
+            .press => {
+                if (!mouse.button.pointer()) return;
+                const target = self.hit_map.hit(p) orelse return;
+                self.last_point = p;
+                self.apply(self.drag.press(target, p, mouse.mod.shift()));
+                switch (target) {
+                    .lane => |index| {
+                        if (self.transport.isPlaying(index)) self.transport.jogPause(index, .now);
+                    },
+                    else => {},
+                }
+            },
+            .motion => {
+                if (self.drag.motion(p, 6 * self.scale_hint, self.canvas, self.block_rects[0..self.block_count])) {
+                    dvui.refresh(null, @src(), null);
+                }
+                if (self.drag.pull(p)) |pull| self.applyPull(pull);
+            },
+            .release => {
+                if (!mouse.button.pointer()) return;
+                self.apply(self.drag.release());
+                self.transport.jogResume();
+            },
+            else => {},
         }
     }
 
@@ -1358,13 +1420,11 @@ pub const App = struct {
                 dvui.refresh(null, @src(), null);
             },
             .toggle_transport => {
-                // Stop is global; play starts only the braced four lanes.
+                // Stop is global; play replays the tracks that ran last.
                 if (self.transport.anyPlaying()) {
                     self.transport.stopAll();
-                } else if (!self.transport.startGroup(self.transportGroup())) {
-                    // The brace may sit on tracks that cannot start; never
-                    // leave the transport button dead.
-                    self.transport.startAll();
+                } else {
+                    self.replayPlayed();
                 }
                 dvui.refresh(null, @src(), null);
             },
@@ -1393,6 +1453,7 @@ pub const App = struct {
                     self.transport.stop(index);
                 } else {
                     self.transport.start(index, .next_bar);
+                    self.played.remember(self.grid.items[index].track_id);
                 }
                 dvui.refresh(null, @src(), null);
             },
@@ -1590,6 +1651,7 @@ pub const App = struct {
             .font = metaFont(),
             .id_extra = 70,
         });
+        self.noteTyping(entry.data().id);
         const enter = entry.enter_pressed;
         const focused = dvui.focusedWidgetId() == entry.data().id;
         entry.deinit();
@@ -1743,7 +1805,6 @@ pub const App = struct {
             if (id.len > 0) self.allocator.free(id);
         }
         self.selected_playlist = null;
-        self.group_start = 0;
         self.open_count = 0;
         self.selected.clearRetainingCapacity();
         self.query.clearRetainingCapacity();
@@ -1778,16 +1839,6 @@ pub const App = struct {
                 if (self.transport.isPlaying(slot)) self.transport.jogPause(slot, .bar);
                 self.transport.dragBar(slot, delta);
                 dvui.refresh(null, @src(), null);
-            },
-            .group => {
-                if (self.crate.len() <= 4 or self.lane_count == 0) return;
-                for (0..self.lane_count) |index| {
-                    const rect = self.lane_rects[index];
-                    if (pull.p.y < rect.y or pull.p.y >= rect.y + rect.h) continue;
-                    self.group_start = @min(index, self.crate.len() - 4);
-                    dvui.refresh(null, @src(), null);
-                    return;
-                }
             },
             .eq_node => |at| {
                 if (at.lane >= self.grid.items.len) return;
@@ -1969,51 +2020,6 @@ pub const App = struct {
         self.lane_right = @max(self.lane_right, rect.x + rect.w);
     }
 
-    /// Draws the brace marking the group global play/stop acts on.
-    fn groupStart(self: *const App) usize {
-        const total = self.crate.len();
-        if (total <= 4) return 0;
-        return @min(self.group_start, total - 4);
-    }
-
-    fn drawGroupBrace(self: *App) void {
-        const total = self.crate.len();
-        if (total <= 4) return;
-        const start = self.groupStart();
-        if (start + 3 >= self.lane_count) return;
-        if (!self.lane_drawn[start] or !self.lane_drawn[start + 3]) return;
-
-        const top = self.lane_rects[start].y + 3;
-        const bottom = self.lane_rects[start + 3].y + self.lane_rects[start + 3].h - 3;
-        if (bottom - top < 12) return;
-
-        var builder = dvui.Path.Builder.init(self.allocator);
-        defer builder.deinit();
-        // Clear of the trim bar, and thick enough to grab. The clamp keeps it
-        // inside the canvas instead of under the playlist column.
-        const x = @min(self.lane_right + 90, self.canvas.x + self.canvas.w - 70);
-        const mid = (top + bottom) / 2;
-        const thickness: f32 = 11;
-        const color: dvui.Color = .{ .r = 0xbd, .g = 0x93, .b = 0xf9, .a = 0xff };
-
-        fillRectInto(&builder, x, top, thickness, mid - top - 8, color);
-        fillRectInto(&builder, x, mid + 8, thickness, bottom - mid - 8, color);
-        fillRectInto(&builder, x - 8, top, 8 + thickness, thickness, color);
-        fillRectInto(&builder, x - 8, bottom - thickness, 8 + thickness, thickness, color);
-        fillRectInto(&builder, x + thickness, mid - 8, 4, thickness, color);
-        fillRectInto(&builder, x + thickness + 3, mid - 5, 4, thickness, color);
-        fillRectInto(&builder, x + thickness + 5, mid - thickness / 2, 5, thickness, color);
-        fillRectInto(&builder, x + thickness + 3, mid + 2, 4, thickness, color);
-        fillRectInto(&builder, x + thickness, mid + 5, 4, thickness, color);
-
-        self.hit_map.append(.{
-            .x = x - 18,
-            .y = top,
-            .w = 48,
-            .h = bottom - top,
-        }, .group);
-    }
-
     fn preview(self: *App, track: Track) void {
         const tempo: f32 = if (track.bpm > 0) self.masterBpm() / @as(f32, @floatCast(track.bpm)) else 1;
         if (self.player.holds(track.id)) {
@@ -2035,15 +2041,26 @@ pub const App = struct {
         self.player.toggle(track, tempo);
     }
 
-    fn transportGroup(self: *App) []const usize {
-        const total = self.crate.len();
-        if (total <= 4) {
-            for (0..@min(total, self.group.len)) |index| self.group[index] = index;
-            return self.group[0..@min(total, self.group.len)];
+    /// Play: start the remembered tracks together. With nothing playable
+    /// remembered, start every lane and remember what started.
+    fn replayPlayed(self: *App) void {
+        var lanes: [256]u64 = undefined;
+        const lane_count = @min(self.grid.items.len, lanes.len);
+        for (self.grid.items[0..lane_count], 0..) |lane, at| lanes[at] = lane.track_id;
+
+        var indices: [Played.limit]usize = undefined;
+        const count = rememberedLanes(self.played.items(), lanes[0..lane_count], &indices);
+        if (count > 0 and self.transport.startGroup(indices[0..count])) return;
+
+        self.transport.startAll();
+        self.rememberPlaying();
+    }
+
+    /// Every lane now running joins the history, in crate order.
+    fn rememberPlaying(self: *App) void {
+        for (self.grid.items, 0..) |lane, index| {
+            if (self.transport.isPlaying(index)) self.played.remember(lane.track_id);
         }
-        const start = self.groupStart();
-        for (0..4) |offset| self.group[offset] = start + offset;
-        return self.group[0..4];
     }
 
     /// Spectrum bars under the EQ curve, with one draggable node per band.
@@ -2968,4 +2985,30 @@ test "a mode chip runs itself and stops only itself" {
     try std.testing.expectEqual(Dmt.off, pressed(.b, .b));
     try std.testing.expectEqual(Dmt.a, pressed(.b, .a));
     try std.testing.expectEqual(Dmt.b, pressed(.a, .b));
+}
+
+test "the play history keeps four tracks, newest last" {
+    var played: Played = .{};
+    for ([_]u64{ 1, 2, 3, 4 }) |id| played.remember(id);
+    try std.testing.expectEqualSlices(u64, &.{ 1, 2, 3, 4 }, played.items());
+
+    // A fifth track pushes the oldest out.
+    played.remember(5);
+    try std.testing.expectEqualSlices(u64, &.{ 2, 3, 4, 5 }, played.items());
+
+    // Replaying a remembered track moves it to the newest slot.
+    played.remember(3);
+    try std.testing.expectEqualSlices(u64, &.{ 2, 4, 5, 3 }, played.items());
+}
+
+test "replay skips tracks the crate no longer holds" {
+    const lanes = [_]u64{ 7, 9, 11 };
+    var out: [Played.limit]usize = undefined;
+
+    try std.testing.expectEqual(@as(usize, 3), rememberedLanes(&.{ 9, 7, 11 }, &lanes, &out));
+    try std.testing.expectEqualSlices(usize, &.{ 1, 0, 2 }, out[0..3]);
+
+    // Removed tracks drop out, the rest keep their order.
+    try std.testing.expectEqual(@as(usize, 1), rememberedLanes(&.{ 5, 7, 6 }, &lanes, &out));
+    try std.testing.expectEqualSlices(usize, &.{0}, out[0..1]);
 }
