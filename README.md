@@ -48,11 +48,15 @@ at the far right doubles as a level meter;
 sets the waveform span (16, 32 or 64 beats), next to the master BPM. The
 waveform is tinted by rekordbox's three bands: kick red, mid green, high blue.
 
-The mushroom chip runs the same drift field at 0.45 strength with the same
-colour fringe and no flare, under an ASCII undergrowth: mushrooms pop and grow,
-big ones rise slower, rain falls and rings where it lands. A plant grows at the
-left edge while music plays; pressing it sends insects in from both sides and
-floats hearts up to pop.
+`🍄` runs the same drift field at 0.45 strength with the same colour fringe and
+no flare, under an ASCII undergrowth: small ASCII mushrooms pop and grow, big
+ones rise slower, rain falls and rings where it lands. A seedling at the left
+edge grows into a tree while music plays; pressing it sends a ladybird, a
+cricket and a bee in from both sides, and floats hearts up to pop.
+
+The emoji glyphs come from `assets/NotoEmoji.ttf` (SIL OFL, licence beside it).
+The system emoji font is a colour bitmap, which the text rasteriser cannot read,
+so the app loads this one at startup and falls back to ASCII art without it.
 
 `space`, or the footer's `play`, starts the last four tracks that played,
 together; `stop` stops every lane. The history holds the four most recent
