@@ -21,8 +21,8 @@ const heart_slots = 10;
 /// Seconds of playback a plant takes to reach full height.
 const season: f32 = 90;
 /// The plant sits here, as a fraction of the window.
-const plant_x: f32 = 0.075;
-const plant_base: f32 = 0.88;
+const plant_x: f32 = 0.76;
+const plant_base: f32 = 0.92;
 /// Seconds a mushroom takes to reach its cap.
 const grow: f64 = 2.4;
 /// Seconds a mushroom stands before it is replaced elsewhere.
@@ -215,7 +215,6 @@ pub fn draw(
     time: f64,
     size: dvui.Size.Physical,
     still: []const dvui.Rect.Physical,
-    emoji: ?dvui.Font,
 ) !void {
     if (size.w <= 0 or size.h <= 0) return;
     const bounds = dvui.Rect.Physical{ .x = 0, .y = 0, .w = size.w, .h = size.h };
@@ -230,30 +229,30 @@ pub fn draw(
     }
 
     try dvui.renderTriangles(try lsd.wash(arena, time, size, shimmer), null);
-    try undergrowth(state, time, size, emoji);
+    try undergrowth(state, time, size);
     try geom.repaint(arena, still, size, texture);
 }
 
 /// Where the plant grows, and where a press on it lands.
 pub fn plantRect(size: dvui.Size.Physical) dvui.Rect.Physical {
     return .{
-        .x = 0,
-        .y = size.h * 0.64,
-        .w = size.w * 0.17,
-        .h = size.h * 0.32,
+        .x = size.w * 0.66,
+        .y = size.h * 0.58,
+        .w = size.w * 0.26,
+        .h = size.h * 0.38,
     };
 }
 
-fn undergrowth(state: *const State, now: f64, size: dvui.Size.Physical, emoji: ?dvui.Font) !void {
+fn undergrowth(state: *const State, now: f64, size: dvui.Size.Physical) !void {
     const font_px = @max(10, @min(size.h, size.w) * 0.013);
     const font = dvui.themeGet().font_body.withSize(font_px);
     // Monospaced: one glyph is one cell, so the stem lines up under the cap.
     const cell = font.textSize("M").w;
 
-    try bigMushrooms(state, now, size, font, emoji);
-    try drawPlant(state.grown, size, font, emoji);
-    try insectSwarm(state, now, size, font, emoji);
-    try heartBubbles(state, now, size, font, emoji);
+    try bigMushrooms(state, now, size, font);
+    try drawPlant(state.grown, size, font);
+    try insectSwarm(state, now, size, font);
+    try heartBubbles(state, now, size, font);
 
     for (state.mushrooms) |plant| {
         const age = now - plant.born;
@@ -290,22 +289,14 @@ fn undergrowth(state: *const State, now: f64, size: dvui.Size.Physical, emoji: ?
     }
 }
 
-fn bigMushrooms(state: *const State, now: f64, size: dvui.Size.Physical, font_in: dvui.Font, emoji: ?dvui.Font) !void {
+fn bigMushrooms(state: *const State, now: f64, size: dvui.Size.Physical, font_in: dvui.Font) !void {
     const font = font_in.withSize(font_in.size * 1.7);
-    const art = if (emoji != null) emoji.?.withSize(font_in.size * 3.2) else font;
 
     for (state.big) |bush| {
         const age = now - bush.born;
         if (age < 0) continue;
         const at = dvui.Point.Physical{ .x = bush.x * size.w, .y = bush.y * size.h };
         const fade: u8 = @intFromFloat(@min(1, age / 0.6) * 235);
-
-        if (emoji != null) {
-            // The emoji is the mushroom people know: round cap, white spots.
-            const size_px = art.size * (0.6 + @min(1, @as(f32, @floatCast(age / 2.4))) * 0.4);
-            try put(art.withSize(size_px), "🍄", at, pink(fade));
-            continue;
-        }
 
         // A rounded cap with spots, then a stalk: read at a glance as a mushroom.
         const lines: []const []const u8 = if (age < 1.2)
@@ -320,40 +311,22 @@ fn bigMushrooms(state: *const State, now: f64, size: dvui.Size.Physical, font_in
 }
 
 /// The plant: a sprout from the first moment, ending as a tree.
-/// The glyph and size a plant shows at this growth.
-pub const PlantArt = struct {
-    glyph: []const u8,
-    px: f32,
-};
-
-pub fn plantArt(grown: f32, base_px: f32) PlantArt {
-    const glyph: []const u8 = if (grown < 0.4) "🌱" else if (grown < 0.8) "🌿" else "🌳";
-    return .{ .glyph = glyph, .px = base_px * (0.9 + grown * 2.6) };
-}
-
-fn drawPlant(grown: f32, size: dvui.Size.Physical, font_in: dvui.Font, emoji: ?dvui.Font) !void {
-    if (emoji) |font| {
-        const base = dvui.Point.Physical{ .x = plant_x * size.w, .y = plant_base * size.h };
-        const art = plantArt(grown, font.size);
-        try put(font.withSize(art.px), art.glyph, .{ .x = base.x - art.px * 0.5, .y = base.y - art.px * 0.9 }, leaf());
-        return;
-    }
+fn drawPlant(grown: f32, size: dvui.Size.Physical, font_in: dvui.Font) !void {
 
     const base = dvui.Point.Physical{ .x = plant_x * size.w, .y = plant_base * size.h };
-    const font = font_in.withSize(font_in.size * (1 + grown * 0.8));
+    const font = font_in.withSize(font_in.size * (1.4 + grown * 1.8));
 
-    const lines: []const []const u8 = if (grown < 0.05)
-        &.{"Y"}
-    else if (grown < 0.15)
+    // Two leaves and a stem at the smallest: still a plant.
+    const lines: []const []const u8 = if (grown < 0.2)
         &.{ "\\|/", " |" }
-    else if (grown < 0.3)
+    else if (grown < 0.4)
         &.{ "\\|/", "-+-", " |" }
-    else if (grown < 0.5)
+    else if (grown < 0.6)
         &.{ " \\|/ ", "--|--", "  |  " }
-    else if (grown < 0.75)
-        &.{ "  _  ", " / \\ ", "|   |", " \\_/ ", "  |  ", "  |  " }
+    else if (grown < 0.85)
+        &.{ "  ___  ", " /   \\ ", " \\___/ ", "   |   ", "   |   " }
     else
-        &.{ "   ___   ", "  /   \\  ", " / o o \\ ", "| o   o |", " \\  o  / ", "  \\___/  ", "    ||   ", "    ||   " };
+        &.{ "    ___    ", "   /   \\   ", "  / o o \\  ", " | o   o | ", "  \\  o  /  ", "   \\___/   ", "     ||    ", "     ||    " };
 
     try stack(font, lines, base, leaf());
 }
@@ -365,9 +338,8 @@ const bug_art = [3][]const []const u8{
     &.{ "\\~/", "-o-", " \\ " },
 };
 
-fn insectSwarm(state: *const State, now: f64, size: dvui.Size.Physical, font_in: dvui.Font, emoji: ?dvui.Font) !void {
+fn insectSwarm(state: *const State, now: f64, size: dvui.Size.Physical, font_in: dvui.Font) !void {
     const font = font_in.withSize(font_in.size * 0.95);
-    const marks = [_][]const u8{ "🐞", "🦗", "🐝" };
 
     for (state.insects) |insect| {
         const age = now - insect.born;
@@ -375,16 +347,11 @@ fn insectSwarm(state: *const State, now: f64, size: dvui.Size.Physical, font_in:
         if (age > 2.6) continue;
         const fade: u8 = @intFromFloat((1 - age / 2.6) * 235);
         const at = dvui.Point.Physical{ .x = insect.x * size.w, .y = insect.y * size.h };
-
-        if (emoji) |glyph_font| {
-            try put(glyph_font.withSize(font_in.size * 1.5), marks[insect.glyph], at, bug(fade));
-        } else {
-            try stack(font, bug_art[insect.glyph], at, bug(fade));
-        }
+        try stack(font, bug_art[insect.glyph], at, bug(fade));
     }
 }
 
-fn heartBubbles(state: *const State, now: f64, size: dvui.Size.Physical, font: dvui.Font, emoji: ?dvui.Font) !void {
+fn heartBubbles(state: *const State, now: f64, size: dvui.Size.Physical, font: dvui.Font) !void {
     for (state.hearts) |heart| {
         const age = now - heart.born;
         if (age < 0) continue;
@@ -393,11 +360,7 @@ fn heartBubbles(state: *const State, now: f64, size: dvui.Size.Physical, font: d
 
         if (age < heart_life - 0.8) {
             const fade: u8 = @intFromFloat(@min(1, age / 0.3) * 235);
-            if (emoji) |glyph_font| {
-                try put(glyph_font.withSize(font.size * 1.2), "❤", at, heart_colour(fade));
-            } else {
-                try put(font, "<3", at, heart_colour(fade));
-            }
+            try put(font, "<3", at, heart_colour(fade));
         } else {
             // The bubble pops: a ring of rings that fades as it widens.
             const burst: f32 = @floatCast((age - (heart_life - 0.8)) / 0.8);
@@ -545,13 +508,6 @@ test "the plant grows with playing time and stops at full" {
     try std.testing.expect(state.grown > 0.49 and state.grown < 0.51);
     state.grow(100);
     try std.testing.expectEqual(@as(f32, 1), state.grown);
-}
-
-test "the plant picks a glyph and grows with its age" {
-    try std.testing.expectEqualStrings("🌱", plantArt(0, 24).glyph);
-    try std.testing.expectEqualStrings("🌿", plantArt(0.5, 24).glyph);
-    try std.testing.expectEqualStrings("🌳", plantArt(0.9, 24).glyph);
-    try std.testing.expect(plantArt(0.9, 24).px > plantArt(0, 24).px * 2);
 }
 
 test "every insect carries a real glyph index" {
