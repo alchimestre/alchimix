@@ -21,7 +21,7 @@ const heart_slots = 10;
 /// Seconds of playback a plant takes to reach full height.
 const season: f32 = 90;
 /// The plant sits here, as a fraction of the window.
-const plant_x: f32 = 0.76;
+const plant_x: f32 = 0.58;
 const plant_base: f32 = 0.92;
 /// Seconds a mushroom takes to reach its cap.
 const grow: f64 = 2.4;
@@ -241,6 +241,7 @@ pub fn draw(
     time: f64,
     size: dvui.Size.Physical,
     still: []const dvui.Rect.Physical,
+    ascii: dvui.Font,
 ) !void {
     if (size.w <= 0 or size.h <= 0) return;
     const bounds = dvui.Rect.Physical{ .x = 0, .y = 0, .w = size.w, .h = size.h };
@@ -255,24 +256,26 @@ pub fn draw(
     }
 
     try dvui.renderTriangles(try lsd.wash(arena, time, size, shimmer), null);
-    try undergrowth(state, time, size);
+    try undergrowth(state, time, size, ascii);
     try geom.repaint(arena, still, size, texture);
 }
 
 /// Where the plant grows, and where a press on it lands.
 pub fn plantRect(size: dvui.Size.Physical) dvui.Rect.Physical {
     return .{
-        .x = size.w * 0.66,
+        .x = size.w * 0.46,
         .y = size.h * 0.58,
         .w = size.w * 0.26,
         .h = size.h * 0.38,
     };
 }
 
-fn undergrowth(state: *const State, now: f64, size: dvui.Size.Physical) !void {
-    const font_px = @max(10, @min(size.h, size.w) * 0.013);
-    const font = dvui.themeGet().font_body.withSize(font_px);
-    // Monospaced: one glyph is one cell, so the stem lines up under the cap.
+fn undergrowth(state: *const State, now: f64, size: dvui.Size.Physical, ascii: dvui.Font) !void {
+    // A fixed cell: scaled to the window, the sprites stop reading as art.
+    const font_px: f32 = 20;
+    // ASCII art is a grid: in a proportional face every space collapses and the
+    // sprite falls apart, so the garden always draws in the mono font.
+    const font = ascii.withSize(font_px);
     const cell = font.textSize("M").w;
 
     try bigMushrooms(state, now, size, font);
@@ -372,7 +375,7 @@ fn drawWizard(state: *const State, now: f64, size: dvui.Size.Physical, font_in: 
 
     const font = font_in.withSize(font_in.size * 1.1);
     const step = font.size * 1.05;
-    const base = dvui.Point.Physical{ .x = size.w * 0.68, .y = size.h * 0.90 };
+    const base = dvui.Point.Physical{ .x = size.w * 0.50, .y = size.h * 0.90 };
 
     const art = [_]struct { text: []const u8, colour: dvui.Color }{
         .{ .text = "  /\\  ", .colour = wizard_red(235) },
@@ -468,32 +471,46 @@ fn ripple(ring: Ripple, radius: f32, size: dvui.Size.Physical, font: dvui.Font, 
     }
 }
 
-/// Draws rows of ASCII centred on `centre`, stacked upward from the last row.
+/// Draws rows of ASCII as one block: every row starts at the same left edge, so
+/// the art's own leading spaces do the shaping. The block is centred on `centre`.
 fn stack(font: dvui.Font, lines: []const []const u8, centre: dvui.Point.Physical, colour: dvui.Color) !void {
     const cell = font.textSize("M").w;
     const step = font.size * 1.05;
+
+    var widest: usize = 0;
+    for (lines) |line| widest = @max(widest, line.len);
+
+    const left = centre.x - @as(f32, @floatFromInt(widest)) * cell * 0.5;
     const top = centre.y - @as(f32, @floatFromInt(lines.len - 1)) * step;
 
     for (lines, 0..) |line, row| {
-        const width = @as(f32, @floatFromInt(line.len)) * cell;
         try put(font, line, .{
-            .x = centre.x - width / 2,
+            .x = left,
             .y = top + @as(f32, @floatFromInt(row)) * step,
         }, colour);
     }
 }
 
 fn put(font: dvui.Font, text: []const u8, at: dvui.Point.Physical, colour: dvui.Color) !void {
-    try dvui.renderText(.{
-        .font = font,
-        .text = text,
-        .rs = .{
-            .r = .{ .x = at.x - 2, .y = at.y - 2, .w = font.size * 4, .h = font.size * 3 },
-            .s = 1,
-        },
-        .p = at,
-        .color = colour,
-    });
+    // Drawn twice, a hair apart: one pass leaves the strokes too thin to read as
+    // ASCII art against the dark frame.
+    for ([_]f32{ 0, 0.7 }) |nudge| {
+        try dvui.renderText(.{
+            .font = font,
+            .text = text,
+            .rs = .{
+                .r = .{
+                    .x = at.x - 2,
+                    .y = at.y - font.size,
+                    .w = @as(f32, @floatFromInt(text.len + 2)) * font.size,
+                    .h = font.size * 3.5,
+                },
+                .s = 1,
+            },
+            .p = .{ .x = at.x + nudge, .y = at.y },
+            .color = colour,
+        });
+    }
 }
 
 fn pink(fade: u8) dvui.Color {

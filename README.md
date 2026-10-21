@@ -55,6 +55,10 @@ few insects walk about. A shamrock grows, leaf by leaf, into a small flowering
 tree while music plays, watered now and then by a human figure in a red pointed
 hat and a blue robe; pressing it floats hearts up to pop.
 
+The undergrowth is drawn in Courier New (falling back to Andale Mono, then the
+theme mono): the art is a character grid, and a proportional or round face pulls
+the rows apart.
+
 The emoji glyphs come from `assets/NotoEmoji.ttf` (SIL OFL, licence beside it).
 The system emoji font is a colour bitmap, which the text rasteriser cannot read,
 so the app loads this one at startup and falls back to ASCII art without it.
