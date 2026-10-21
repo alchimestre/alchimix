@@ -13,7 +13,7 @@ pub const reach: f32 = 0.45;
 const shimmer: f32 = 18;
 
 const mushroom_slots = 40;
-const big_slots = 4;
+const big_slots = 12;
 const drop_slots = 18;
 const ripple_slots = 18;
 const insect_slots = 3;
@@ -344,7 +344,7 @@ const mushroom_stout = [_][]const u8{
 };
 
 fn bigMushrooms(state: *const State, now: f64, size: dvui.Size.Physical, font_in: dvui.Font) !void {
-    const font = font_in.withSize(font_in.size * 1.2);
+    const font = font_in.withSize(font_in.size * 0.8);
 
     for (state.big, 0..) |bush, slot| {
         const age = now - bush.born;
@@ -353,8 +353,16 @@ fn bigMushrooms(state: *const State, now: f64, size: dvui.Size.Physical, font_in
         const fade: u8 = @intFromFloat(@min(1, age / 0.9) * 235);
         const tint = caps[slot % caps.len];
 
-        const art: []const []const u8 = if (slot % 2 == 0) &mushroom_tall else &mushroom_stout;
-        try stack(font, art, at, tint(fade));
+        const full: []const []const u8 = if (slot % 2 == 0) &mushroom_tall else &mushroom_stout;
+        // Three phases: a tip, then the cap, then the whole thing.
+        const lines: []const []const u8 = if (age < 0.8)
+            full[0..1]
+        else if (age < 1.8)
+            full[0..@max(1, full.len / 2)]
+        else
+            full;
+
+        try stack(font, lines, at, tint(fade));
     }
 }
 
@@ -368,22 +376,27 @@ const tree_art = [_][]const u8{
     "   ###  ",
 };
 
-/// The wizard: a plain human figure first — head, arms, legs — with a pointed
-/// hat on top, in red and blue.
+/// The wizard, after the reference: tall pointed hat with a brim, a face, and a
+/// cloak — red hat, cream face, blue robe.
 fn drawWizard(state: *const State, now: f64, size: dvui.Size.Physical, font_in: dvui.Font) !void {
     if (now >= state.water_until) return;
 
-    const font = font_in.withSize(font_in.size * 1.1);
+    const font = font_in.withSize(font_in.size * 0.85);
     const step = font.size * 1.05;
     const base = dvui.Point.Physical{ .x = size.w * 0.50, .y = size.h * 0.90 };
 
     const art = [_]struct { text: []const u8, colour: dvui.Color }{
-        .{ .text = "  /\\  ", .colour = wizard_red(235) },
-        .{ .text = " /  \\ ", .colour = wizard_red(235) },
-        .{ .text = "/____\\", .colour = wizard_red(235) },
-        .{ .text = "  o   ", .colour = skin(235) },
-        .{ .text = " /|\\  ", .colour = wizard_blue(235) },
-        .{ .text = " / \\  ", .colour = wizard_blue(235) },
+        .{ .text = "     /\\    ", .colour = wizard_red(235) },
+        .{ .text = "    /  \\   ", .colour = wizard_red(235) },
+        .{ .text = "   /    \\  ", .colour = wizard_red(235) },
+        .{ .text = "  /______\\ ", .colour = wizard_red(235) },
+        .{ .text = "   | .. |   ", .colour = skin(235) },
+        .{ .text = "   | .. |   ", .colour = skin(235) },
+        .{ .text = "  /|    |\\  ", .colour = wizard_blue(235) },
+        .{ .text = " / |    | \\ ", .colour = wizard_blue(235) },
+        .{ .text = "/  |    |  \\", .colour = wizard_blue(235) },
+        .{ .text = "   |    |   ", .colour = wizard_blue(235) },
+        .{ .text = "  /|    |\\  ", .colour = wizard_blue(235) },
     };
 
     for (art, 0..) |line, row| {
@@ -391,9 +404,9 @@ fn drawWizard(state: *const State, now: f64, size: dvui.Size.Physical, font_in: 
         try put(font, line.text, .{ .x = base.x, .y = base.y - up * step }, line.colour);
     }
 
-    for (0..4) |drop| {
-        const spread = @as(f32, @floatFromInt(drop)) * font.size * 1.4;
-        try put(font, "'", .{ .x = base.x + font.size * 2.2 + spread, .y = base.y - font.size * 2 + spread * 0.6 }, rain(200));
+    for (0..5) |drop| {
+        const spread = @as(f32, @floatFromInt(drop)) * font.size * 1.3;
+        try put(font, "'", .{ .x = base.x + font.size * 5.2 + spread * 0.3, .y = base.y - font.size * 3 - spread }, rain(200));
     }
 }
 
