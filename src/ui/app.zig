@@ -282,9 +282,9 @@ pub const App = struct {
     /// Every visible row is a real widget, so the list is capped.
     const visible_rows = 60;
     const lane_panel_width: f32 = 380;
-    /// Toolbar plus footer, measured once and fixed: reading them back made a
-    /// resize lag a frame and flicker.
-    const chrome_height: f32 = 104;
+    /// Toolbar, the speed row under the chips, and the footer. Measured once and
+    /// fixed: reading them back made a resize lag a frame and flicker.
+    const chrome_height: f32 = 138;
 
     pub fn init(allocator: std.mem.Allocator, library: pl.library.Library, io: std.Io) !App {
         const mixer = try allocator.create(pl.mixer.Mixer);

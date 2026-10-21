@@ -16,7 +16,7 @@ const mushroom_slots = 40;
 const big_slots = 4;
 const drop_slots = 18;
 const ripple_slots = 18;
-const insect_slots = 14;
+const insect_slots = 3;
 const heart_slots = 10;
 /// Seconds of playback a plant takes to reach full height.
 const season: f32 = 90;
@@ -62,7 +62,7 @@ const Insect = struct {
     y: f32,
     vx: f32,
     vy: f32,
-    born: f64,
+    turn: f64,
     glyph: u2,
 };
 
@@ -80,10 +80,14 @@ pub const State = struct {
     drops: [drop_slots]Drop = @splat(.{ .x = 0.5, .y = -0.2, .fall = 0.4, .land = 0.6 }),
     ripples: [ripple_slots]Ripple = @splat(.{ .x = 0.5, .y = 0.5, .born = -1 }),
     big: [big_slots]Big = @splat(.{ .x = 0.5, .y = 0.5, .born = -1 }),
-    insects: [insect_slots]Insect = @splat(.{ .x = -1, .y = -1, .vx = 0, .vy = 0, .born = -1, .glyph = 0 }),
+    insects: [insect_slots]Insect = @splat(.{ .x = -1, .y = -1, .vx = 0, .vy = 0, .turn = 0, .glyph = 0 }),
     hearts: [heart_slots]Heart = @splat(.{ .x = -1, .y = -1, .born = -1 }),
     /// Growth of the plant, zero to one, earned by playing music.
     grown: f32 = 0,
+    /// When the wizard next walks over with the watering can, and until when
+    /// he stays.
+    water_at: f64 = 8,
+    water_until: f64 = -1,
     seeded: bool = false,
 
     /// Spawns, lands and retires. `now` is effect seconds.
@@ -92,12 +96,24 @@ pub const State = struct {
 
         if (!self.seeded) {
             self.seeded = true;
-            for (&self.mushrooms) |*plant| {
+            if (now > self.water_at) self.water(now);
+
+        for (&self.mushrooms) |*plant| {
                 plant.* = .{
                     .x = 0.04 + random.float(f32) * 0.92,
                     .y = 0.08 + random.float(f32) * 0.84,
                     // Staggered, so they do not all pop at once.
                     .born = now - random.float(f64) * life,
+                };
+            }
+            for (&self.insects) |*insect| {
+                insect.* = .{
+                    .x = random.float(f32),
+                    .y = 0.15 + random.float(f32) * 0.7,
+                    .vx = (random.float(f32) - 0.5) * 0.05,
+                    .vy = (random.float(f32) - 0.5) * 0.03,
+                    .turn = now,
+                    .glyph = 0,
                 };
             }
             for (&self.big) |*bush| {
@@ -125,6 +141,8 @@ pub const State = struct {
                 .born = now,
             };
         }
+        if (now > self.water_at) self.water(now);
+
         for (&self.mushrooms) |*plant| {
             if (now - plant.born <= life) continue;
             plant.* = .{
@@ -140,10 +158,19 @@ pub const State = struct {
         const random = self.rng.random();
         const step: f32 = @floatCast(seconds);
 
-        for (&self.insects) |*insect| {
-            if (now - insect.born > 2.6) continue;
+        for (&self.insects, 0..) |*insect, at| {
+            insect.glyph = @intCast(at % bug_art.len);
+            if (now > insect.turn) {
+                insect.vx = (random.float(f32) - 0.5) * 0.05;
+                insect.vy = (random.float(f32) - 0.5) * 0.03;
+                insect.turn = now + 1 + random.float(f64) * 2.5;
+            }
             insect.x += insect.vx * step;
             insect.y += insect.vy * step;
+            if (insect.x < 0.01) insect.x = 0.99;
+            if (insect.x > 0.99) insect.x = 0.01;
+            if (insect.y < 0.05) insect.y = 0.95;
+            if (insect.y > 0.95) insect.y = 0.05;
         }
         for (&self.hearts) |*heart| {
             if (heart.born > now or now - heart.born > heart_life) continue;
@@ -169,19 +196,18 @@ pub const State = struct {
     }
 
     /// A press on the plant: insects pour in from both sides, hearts rise.
+    /// Sprinkles the plant: the wizard waters for a few seconds.
+    pub fn water(self: *State, now: f64) void {
+        self.water_until = now + 6;
+        self.water_at = now + 20 + self.rng.random().float(f64) * 12;
+    }
+
     pub fn poke(self: *State, now: f64) void {
         const random = self.rng.random();
 
-        for (&self.insects, 0..) |*insect, at| {
-            const from_left = at % 2 == 0;
-            insect.* = .{
-                .x = if (from_left) -0.02 else 1.02,
-                .y = plant_base + random.float(f32) * 0.14 - 0.07,
-                .vx = if (from_left) 0.12 + random.float(f32) * 0.1 else -(0.12 + random.float(f32) * 0.1),
-                .vy = (random.float(f32) - 0.5) * 0.05,
-                .born = now,
-                .glyph = @intCast(at % bug_art.len),
-            };
+        // The insects keep walking; a press only nudges the nearest one.
+        for (&self.insects) |*insect| {
+            insect.turn = now + 1;
         }
 
         for (&self.hearts, 0..) |*heart, at| {
@@ -251,6 +277,7 @@ fn undergrowth(state: *const State, now: f64, size: dvui.Size.Physical) !void {
 
     try bigMushrooms(state, now, size, font);
     try drawPlant(state.grown, size, font);
+    try drawWizard(state, now, size, font);
     try insectSwarm(state, now, size, font);
     try heartBubbles(state, now, size, font);
 
@@ -292,41 +319,94 @@ fn undergrowth(state: *const State, now: f64, size: dvui.Size.Physical) !void {
 fn bigMushrooms(state: *const State, now: f64, size: dvui.Size.Physical, font_in: dvui.Font) !void {
     const font = font_in.withSize(font_in.size * 1.7);
 
-    for (state.big) |bush| {
+    for (state.big, 0..) |bush, slot| {
         const age = now - bush.born;
         if (age < 0) continue;
         const at = dvui.Point.Physical{ .x = bush.x * size.w, .y = bush.y * size.h };
         const fade: u8 = @intFromFloat(@min(1, age / 0.6) * 235);
+        const tint = caps[slot % caps.len];
 
         // A rounded cap with spots, then a stalk: read at a glance as a mushroom.
         const lines: []const []const u8 = if (age < 1.2)
             &.{"o"}
         else if (age < 2.4)
-            &.{ ".-.", "(o)" }
+            &.{ " .-. ", "/ o \\", " \\_/ " }
         else
-            &.{ " .---. ", "/ o o \\", "(o o o)", " \\___/ ", "   ||  " };
+            &.{ "  _.-\"-._  ", " /  o o  \\ ", "| o   o   |", " \\  o o  / ", "  '-...-'  ", "     |||   " };
 
-        try stack(font, lines, at, pink(fade));
+        try stack(font, lines, at, tint(fade));
     }
 }
 
-/// The plant: a sprout from the first moment, ending as a tree.
+/// The full-grown plant.
+const tree_art = [_][]const u8{
+    "              * *    ",
+    "           *    *  *",
+    "      *  *    *     *  *",
+    "     *     *    *  *    *",
+    " * *   *    *    *    *   *",
+    " *     *  *    * * .#  *   *",
+    " *   *     * #.  .# *   *",
+    "  *     \"#.  #: #\" * *    *",
+    " *   * * \"#. ##\"       *",
+    "   *       \"###",
+    "             \"##",
+    "              ##.",
+    "              .##:",
+    "              :###",
+    "              ;###",
+    "            ,####.",
+    "/\\/\\/\\/\\/\\/.######.\\/\\/\\/\\/\\",
+};
+
+/// The wizard walks over with the can every so often.
+fn drawWizard(state: *const State, now: f64, size: dvui.Size.Physical, font_in: dvui.Font) !void {
+    if (now >= state.water_until) return;
+
+    const font = font_in.withSize(font_in.size * 1.1);
+    const step = font.size * 1.05;
+    const base = dvui.Point.Physical{ .x = size.w * 0.68, .y = size.h * 0.90 };
+    const hat = [_][]const u8{ "  /\\  ", " /  \\ ", "/____\\" };
+    const body = [_][]const u8{ " |  | ", " /  \\ " };
+
+    for (hat, 0..) |line, row| {
+        const up = @as(f32, @floatFromInt(hat.len + body.len - 1 - row));
+        try put(font, line, .{ .x = base.x, .y = base.y - up * step }, wizard_red(235));
+    }
+    for (body, 0..) |line, row| {
+        const up = @as(f32, @floatFromInt(body.len - 1 - row));
+        try put(font, line, .{ .x = base.x, .y = base.y - up * step }, wizard_blue(235));
+    }
+
+    for (0..4) |drop| {
+        const spread = @as(f32, @floatFromInt(drop)) * font.size * 1.6;
+        try put(font, "'", .{ .x = base.x + font.size * 2 + spread, .y = base.y - font.size * 2 + spread * 0.6 }, rain(200));
+    }
+}
+
+/// Where the plant grows.
 fn drawPlant(grown: f32, size: dvui.Size.Physical, font_in: dvui.Font) !void {
-
     const base = dvui.Point.Physical{ .x = plant_x * size.w, .y = plant_base * size.h };
-    const font = font_in.withSize(font_in.size * (1.4 + grown * 1.8));
 
-    // Two leaves and a stem at the smallest: still a plant.
+    if (grown >= 0.8) {
+        // The full plant is wide: draw it small and keep it clear of the edge.
+        const font = font_in.withSize(font_in.size * 0.8);
+        const cell = font.textSize("M").w;
+        const widest: f32 = @floatFromInt(tree_art[0].len + 12);
+        try stack(font, &tree_art, .{ .x = size.w - widest * cell * 0.5 - 16, .y = base.y }, leaf());
+        return;
+    }
+
+    const font = font_in.withSize(font_in.size * (1.4 + grown * 1.2));
+    // A shamrock at the smallest: round leaves on a stem.
     const lines: []const []const u8 = if (grown < 0.2)
-        &.{ "\\|/", " |" }
+        &.{ " o o o ", "  \\|/  ", "   |   " }
     else if (grown < 0.4)
         &.{ "\\|/", "-+-", " |" }
     else if (grown < 0.6)
         &.{ " \\|/ ", "--|--", "  |  " }
-    else if (grown < 0.85)
-        &.{ "  ___  ", " /   \\ ", " \\___/ ", "   |   ", "   |   " }
     else
-        &.{ "    ___    ", "   /   \\   ", "  / o o \\  ", " | o   o | ", "  \\  o  /  ", "   \\___/   ", "     ||    ", "     ||    " };
+        &.{ "  ___  ", " /   \\ ", " \\___/ ", "   |   ", "   |   " };
 
     try stack(font, lines, base, leaf());
 }
@@ -341,13 +421,10 @@ const bug_art = [3][]const []const u8{
 fn insectSwarm(state: *const State, now: f64, size: dvui.Size.Physical, font_in: dvui.Font) !void {
     const font = font_in.withSize(font_in.size * 0.95);
 
+    _ = now;
     for (state.insects) |insect| {
-        const age = now - insect.born;
-        if (age < 0) continue;
-        if (age > 2.6) continue;
-        const fade: u8 = @intFromFloat((1 - age / 2.6) * 235);
         const at = dvui.Point.Physical{ .x = insect.x * size.w, .y = insect.y * size.h };
-        try stack(font, bug_art[insect.glyph], at, bug(fade));
+        try stack(font, bug_art[insect.glyph], at, bug(220));
     }
 }
 
@@ -419,12 +496,35 @@ fn pink(fade: u8) dvui.Color {
     return .{ .r = 0xf3, .g = 0x8b, .b = 0xa8, .a = fade };
 }
 
+fn lilac(fade: u8) dvui.Color {
+    return .{ .r = 0xbd, .g = 0x93, .b = 0xf9, .a = fade };
+}
+
+fn sky(fade: u8) dvui.Color {
+    return .{ .r = 0x89, .g = 0xb4, .b = 0xfa, .a = fade };
+}
+
+fn amber(fade: u8) dvui.Color {
+    return .{ .r = 0xfa, .g = 0xb3, .b = 0x87, .a = fade };
+}
+
+/// The caps cycle through these, so the field is not all one colour.
+const caps = [_]*const fn (u8) dvui.Color{ pink, lilac, sky, amber };
+
 fn stem() dvui.Color {
     return .{ .r = 0xd8, .g = 0xd0, .b = 0xc8, .a = 180 };
 }
 
 fn rain(fade: u8) dvui.Color {
     return .{ .r = 0x89, .g = 0xb4, .b = 0xfa, .a = fade };
+}
+
+fn wizard_red(fade: u8) dvui.Color {
+    return .{ .r = 0xe0, .g = 0x5c, .b = 0x5c, .a = fade };
+}
+
+fn wizard_blue(fade: u8) dvui.Color {
+    return .{ .r = 0x6a, .g = 0x9c, .b = 0xf0, .a = fade };
 }
 
 fn leaf() dvui.Color {
@@ -486,20 +586,26 @@ test "rain lands and rings where it lands" {
     }
 }
 
-test "a press on the plant wakes insects and hearts" {
+test "a press on the plant floats hearts" {
     var state: State = .{};
     state.poke(10);
-
-    var left: usize = 0;
-    var right: usize = 0;
-    for (state.insects) |insect| {
-        if (insect.x < 0) left += 1;
-        if (insect.x > 1) right += 1;
-    }
-    try std.testing.expect(left > 0);
-    try std.testing.expect(right > 0);
-
     for (state.hearts) |heart| try std.testing.expect(heart.born >= 10);
+}
+
+test "the insects keep walking and stay in the frame" {
+    var state: State = .{};
+    state.tick(0);
+    var now: f64 = 0;
+    var step: usize = 0;
+    while (step < 400) : (step += 1) {
+        now += 0.1;
+        state.fall(0.1, now);
+    }
+    for (state.insects) |insect| {
+        try std.testing.expect(insect.x >= 0 and insect.x <= 1);
+        try std.testing.expect(insect.y >= 0 and insect.y <= 1);
+        try std.testing.expect(insect.glyph < bug_art.len);
+    }
 }
 
 test "the plant grows with playing time and stops at full" {
@@ -516,4 +622,14 @@ test "every insect carries a real glyph index" {
     for (state.insects) |insect| {
         try std.testing.expect(insect.glyph < bug_art.len);
     }
+}
+
+test "the wizard waters on a timer, then walks on" {
+    var state: State = .{};
+    state.tick(9);
+    try std.testing.expect(state.water_until > 9);
+    try std.testing.expect(state.water_at > 9);
+
+    // The next watering is well after this one ends.
+    try std.testing.expect(state.water_at > state.water_until);
 }

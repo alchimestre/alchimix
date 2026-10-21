@@ -49,10 +49,11 @@ sets the waveform span (16, 32 or 64 beats), next to the master BPM. The
 waveform is tinted by rekordbox's three bands: kick red, mid green, high blue.
 
 `🍄` runs the same drift field at 0.45 strength with the same colour fringe and
-no flare, under an ASCII undergrowth: small ASCII mushrooms pop and grow, big
-ones rise slower, rain falls and rings where it lands. A seedling at the left
-edge grows into a tree while music plays; pressing it sends a ladybird, a
-cricket and a bee in from both sides, and floats hearts up to pop.
+no flare, over an ASCII undergrowth: small mushrooms pop and grow, big ones
+rise slower with domed spotted caps in four colours, rain falls and rings where
+it lands, and a few insects walk about. A shamrock grows into a flowering tree
+while music plays, watered now and then by a small wizard in red and blue;
+pressing it floats hearts up to pop.
 
 The emoji glyphs come from `assets/NotoEmoji.ttf` (SIL OFL, licence beside it).
 The system emoji font is a colour bitmap, which the text rasteriser cannot read,
