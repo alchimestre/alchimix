@@ -16,7 +16,7 @@ const mushroom_slots = 40;
 /// Slots below this are the tall mushrooms, which cluster; the rest are wide
 /// and stand alone.
 const tall_slots = 6;
-const big_slots = 12;
+const big_slots = 10;
 const drop_slots = 18;
 const ripple_slots = 18;
 const insect_slots = 3;
@@ -62,15 +62,6 @@ const Big = struct {
     born: f64,
 };
 
-const Frog = struct {
-    x: f32,
-    y: f32,
-    from_x: f32,
-    from_y: f32,
-    hop: f64,
-    dur: f64,
-    gulp: f64,
-};
 
 const Insect = struct {
     x: f32,
@@ -95,7 +86,6 @@ pub const State = struct {
     drops: [drop_slots]Drop = @splat(.{ .x = 0.5, .y = -0.2, .fall = 0.4, .land = 0.6 }),
     ripples: [ripple_slots]Ripple = @splat(.{ .x = 0.5, .y = 0.5, .born = -1 }),
     big: [big_slots]Big = @splat(.{ .x = 0.5, .y = 0.5, .scale = 1, .born = -1 }),
-    frogs: [2]Frog = @splat(.{ .x = 0.3, .y = 0.75, .from_x = 0.3, .from_y = 0.75, .hop = 0, .dur = 1, .gulp = -1 }),
     insects: [insect_slots]Insect = @splat(.{ .x = -1, .y = -1, .vx = 0, .vy = 0, .turn = 0, .glyph = 0 }),
     hearts: [heart_slots]Heart = @splat(.{ .x = -1, .y = -1, .born = -1 }),
     /// Growth of the plant, zero to one, earned by playing music.
@@ -132,18 +122,6 @@ pub const State = struct {
             }
             for (tall_slots..self.big.len) |slot| {
                 self.placeStout(random, now - random.float(f64) * 20, slot);
-            }
-            for (&self.frogs, 0..) |*frog, at| {
-                const x = 0.2 + random.float(f32) * 0.6;
-                frog.* = .{
-                    .x = x,
-                    .y = 0.55 + random.float(f32) * 0.3 + @as(f32, @floatFromInt(at)) * 0.1,
-                    .from_x = x,
-                    .from_y = 0.7,
-                    .hop = now,
-                    .dur = 1,
-                    .gulp = -1,
-                };
             }
             for (&self.drops) |*drop| {
                 drop.* = .{
@@ -193,26 +171,6 @@ pub const State = struct {
             if (insect.y < 0.05) insect.y = 0.95;
             if (insect.y > 0.95) insect.y = 0.05;
         }
-        for (&self.frogs) |*frog| {
-            if (now - frog.hop < frog.dur) continue;
-
-            // Landed: eat a bug nearby, then pick the next spot.
-            for (&self.insects) |*insect| {
-                if (@abs(insect.x - frog.x) + @abs(insect.y - frog.y) > 0.07) continue;
-                insect.x = random.float(f32);
-                insect.y = 0.15 + random.float(f32) * 0.7;
-                frog.gulp = now;
-                break;
-            }
-
-            frog.from_x = frog.x;
-            frog.from_y = frog.y;
-            frog.hop = now;
-            frog.dur = 0.45 + random.float(f64) * 0.4;
-            frog.x = std.math.clamp(frog.x + (random.float(f32) - 0.5) * 0.3, 0.05, 0.95);
-            frog.y = std.math.clamp(frog.y + (random.float(f32) - 0.5) * 0.2, 0.12, 0.92);
-        }
-
         for (&self.hearts) |*heart| {
             if (heart.born > now or now - heart.born > heart_life) continue;
             heart.y -= 0.035 * step;
@@ -263,33 +221,43 @@ pub const State = struct {
             const slot = first + offset;
             if (slot >= self.big.len) return;
             self.big[slot] = .{
-                .x = std.math.clamp(centre_x + (random.float(f32) - 0.5) * 0.10, 0.04, 0.94),
-                .y = std.math.clamp(centre_y + (random.float(f32) - 0.5) * 0.18, 0.1, 0.9),
+                .x = std.math.clamp(centre_x + (random.float(f32) - 0.5) * 0.05, 0.04, 0.94),
+                .y = std.math.clamp(centre_y + (random.float(f32) - 0.5) * 0.08, 0.1, 0.9),
                 .scale = 0.7 + random.float(f32) * 0.5,
                 .born = born,
             };
         }
     }
 
-    /// The wide mushrooms stand alone: each keeps to its own cell of a coarse
-    /// grid so two never touch.
+    /// The wide mushrooms stand alone: random spots, just far enough apart not
+    /// to touch, so the field does not read as a grid.
     fn placeStout(self: *State, random: std.Random, born: f64, slot: usize) void {
-        const columns = 3;
-        const cell = slot - tall_slots;
-        const column = cell % columns;
-        const row = (cell / columns) % 2;
-        const width: f32 = 0.86;
-        const height: f32 = 0.58;
+        var x: f32 = 0.5;
+        var y: f32 = 0.5;
+
+        var attempt: usize = 0;
+        while (attempt < 16) : (attempt += 1) {
+            x = 0.12 + random.float(f32) * 0.68;
+            y = 0.18 + random.float(f32) * 0.55;
+            var clear = true;
+            for (self.big, 0..) |other, at| {
+                if (at < tall_slots or at == slot or other.born < 0) continue;
+                if (@abs(other.x - x) < 0.10 and @abs(other.y - y) < 0.15) {
+                    clear = false;
+                    break;
+                }
+            }
+            if (clear) break;
+        }
 
         self.big[slot] = .{
-            .x = 0.07 + (@as(f32, @floatFromInt(column)) + 0.5) * (width / columns) +
-                (random.float(f32) - 0.5) * 0.02,
-            .y = 0.18 + (@as(f32, @floatFromInt(row)) + 0.5) * (height / 2) +
-                (random.float(f32) - 0.5) * 0.03,
+            .x = x,
+            .y = y,
             .scale = 0.75 + random.float(f32) * 0.35,
             .born = born,
         };
     }
+
 
     fn ring(self: *State, x: f32, y: f32, now: f64, random: std.Random) void {
         var slot = &self.ripples[0];
@@ -353,7 +321,6 @@ fn undergrowth(state: *const State, now: f64, size: dvui.Size.Physical, ascii: d
     try bigMushrooms(state, now, size, font);
     try drawPlant(state.grown, size, font);
     try insectSwarm(state, now, size, font);
-    try drawFrogs(state, now, size, font);
     try heartBubbles(state, now, size, font);
 
     for (state.mushrooms) |plant| {
@@ -416,7 +383,7 @@ const mushroom_stout = [_][]const u8{
 };
 
 fn bigMushrooms(state: *const State, now: f64, size: dvui.Size.Physical, font_in: dvui.Font) !void {
-    const font = font_in.withSize(font_in.size * 0.8);
+    const font = font_in.withSize(font_in.size * 0.7);
 
     for (state.big, 0..) |bush, slot| {
         const age = now - bush.born;
@@ -476,35 +443,6 @@ const bug_art = [3][]const []const u8{
     &.{ "\\^/", " | ", "/ \\" },
     &.{ "\\~/", "-o-", " \\ " },
 };
-
-/// The frog: front view, big eyes on top, squat body, little feet.
-const frog_art = [_][]const u8{
-    "   _          _   ",
-    "  (o) ------ (o)  ",
-    " (   .      .   ) ",
-    "(                )",
-    "(                )",
-    " \\              / ",
-    "  \\            /  ",
-    "   \\__________/   ",
-    "    ~~  ~~  ~~    ",
-};
-
-fn frogColour(fade: u8) dvui.Color {
-    return .{ .r = 0x8f, .g = 0xd6, .b = 0x7a, .a = fade };
-}
-
-fn drawFrogs(state: *const State, now: f64, size: dvui.Size.Physical, font_in: dvui.Font) !void {
-    const font = font_in.withSize(font_in.size * 0.62);
-
-    for (state.frogs) |frog| {
-        const t = std.math.clamp(@as(f32, @floatCast((now - frog.hop) / frog.dur)), 0, 1);
-        const eased = t * t * (3 - 2 * t);
-        const x = frog.from_x + (frog.x - frog.from_x) * eased;
-        const y = frog.from_y + (frog.y - frog.from_y) * eased - @sin(t * std.math.pi) * 0.06;
-        try stack(font, &frog_art, .{ .x = x * size.w, .y = y * size.h }, frogColour(235));
-    }
-}
 
 fn insectSwarm(state: *const State, now: f64, size: dvui.Size.Physical, font_in: dvui.Font) !void {
     const font = font_in.withSize(font_in.size * 0.95);

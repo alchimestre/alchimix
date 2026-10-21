@@ -49,11 +49,11 @@ sets the waveform span (16, 32 or 64 beats), next to the master BPM. The
 waveform is tinted by rekordbox's three bands: kick red, mid green, high blue.
 
 `🍄` runs the same drift field at 0.45 strength with the same colour fringe and
-no flare, over an ASCII undergrowth: small mushrooms pop and grow, taller ones arrive in
-clusters of three at different heights, rain falls and rings where it lands,
-insects walk about, and frogs hop after them and gulp. A shamrock grows, leaf by
-leaf, into a small flowering tree while music plays; pressing it floats hearts
-up to pop.
+no flare, over an ASCII undergrowth: small mushrooms pop and grow, tall ones arrive in
+tight clusters of three at different heights, wide ones stand alone, rain falls
+and rings where it lands, and insects walk about. A shamrock grows, leaf by leaf,
+into a small flowering tree while music plays; pressing it floats hearts up to
+pop.
 
 The undergrowth is drawn in Courier New (falling back to Andale Mono, then the
 theme mono): the art is a character grid, and a proportional or round face pulls
