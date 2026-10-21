@@ -13,6 +13,9 @@ pub const reach: f32 = 0.45;
 const shimmer: f32 = 18;
 
 const mushroom_slots = 40;
+/// Slots below this are the tall mushrooms, which cluster; the rest are wide
+/// and stand alone.
+const tall_slots = 6;
 const big_slots = 12;
 const drop_slots = 18;
 const ripple_slots = 18;
@@ -21,7 +24,7 @@ const heart_slots = 10;
 /// Seconds of playback a plant takes to reach full height.
 const season: f32 = 90;
 /// The plant sits here, as a fraction of the window.
-const plant_x: f32 = 0.58;
+const plant_x: f32 = 0.70;
 const plant_base: f32 = 0.92;
 /// Seconds a mushroom takes to reach its cap.
 const grow: f64 = 2.4;
@@ -124,8 +127,11 @@ pub const State = struct {
                 };
             }
             var cluster: usize = 0;
-            while (cluster * 3 < self.big.len) : (cluster += 1) {
+            while (cluster * 3 < tall_slots) : (cluster += 1) {
                 self.placeCluster(random, now - random.float(f64) * 20, cluster * 3);
+            }
+            for (tall_slots..self.big.len) |slot| {
+                self.placeStout(random, now - random.float(f64) * 20, slot);
             }
             for (&self.frogs, 0..) |*frog, at| {
                 const x = 0.2 + random.float(f32) * 0.6;
@@ -151,8 +157,12 @@ pub const State = struct {
 
         for (self.big, 0..) |bush, slot| {
             if (now - bush.born <= 30) continue;
-            // A cluster replaces itself whole, so the field keeps its groupings.
-            self.placeCluster(random, now, slot - slot % 3);
+            if (slot < tall_slots) {
+                // A cluster replaces itself whole, so the field keeps its groupings.
+                self.placeCluster(random, now, slot - slot % 3);
+            } else {
+                self.placeStout(random, now, slot);
+            }
         }
         for (&self.mushrooms) |*plant| {
             if (now - plant.born <= life) continue;
@@ -253,12 +263,32 @@ pub const State = struct {
             const slot = first + offset;
             if (slot >= self.big.len) return;
             self.big[slot] = .{
-                .x = std.math.clamp(centre_x + (random.float(f32) - 0.5) * 0.07, 0.04, 0.94),
-                .y = std.math.clamp(centre_y + (random.float(f32) - 0.5) * 0.12, 0.1, 0.9),
+                .x = std.math.clamp(centre_x + (random.float(f32) - 0.5) * 0.10, 0.04, 0.94),
+                .y = std.math.clamp(centre_y + (random.float(f32) - 0.5) * 0.18, 0.1, 0.9),
                 .scale = 0.7 + random.float(f32) * 0.5,
                 .born = born,
             };
         }
+    }
+
+    /// The wide mushrooms stand alone: each keeps to its own cell of a coarse
+    /// grid so two never touch.
+    fn placeStout(self: *State, random: std.Random, born: f64, slot: usize) void {
+        const columns = 3;
+        const cell = slot - tall_slots;
+        const column = cell % columns;
+        const row = (cell / columns) % 2;
+        const width: f32 = 0.86;
+        const height: f32 = 0.58;
+
+        self.big[slot] = .{
+            .x = 0.07 + (@as(f32, @floatFromInt(column)) + 0.5) * (width / columns) +
+                (random.float(f32) - 0.5) * 0.02,
+            .y = 0.18 + (@as(f32, @floatFromInt(row)) + 0.5) * (height / 2) +
+                (random.float(f32) - 0.5) * 0.03,
+            .scale = 0.75 + random.float(f32) * 0.35,
+            .born = born,
+        };
     }
 
     fn ring(self: *State, x: f32, y: f32, now: f64, random: std.Random) void {
@@ -395,7 +425,7 @@ fn bigMushrooms(state: *const State, now: f64, size: dvui.Size.Physical, font_in
         const fade: u8 = @intFromFloat(@min(1, age / 0.9) * 235);
         const tint = caps[slot % caps.len];
 
-        const full: []const []const u8 = if (slot % 2 == 0) &mushroom_tall else &mushroom_stout;
+        const full: []const []const u8 = if (slot < tall_slots) &mushroom_tall else &mushroom_stout;
         // Three phases: a tip, then the cap, then the whole thing.
         const lines: []const []const u8 = if (age < 0.8)
             full[0..1]
@@ -449,14 +479,15 @@ const bug_art = [3][]const []const u8{
 
 /// The frog: front view, big eyes on top, squat body, little feet.
 const frog_art = [_][]const u8{
-    "  _      _  ",
-    " (o) -- (o) ",
-    "(   .  .   )",
-    "(          )",
-    " \\        / ",
-    "  \\      /  ",
-    "   \\____/   ",
-    "   ~~ ~~ ~~  ",
+    "   _          _   ",
+    "  (o) ------ (o)  ",
+    " (   .      .   ) ",
+    "(                )",
+    "(                )",
+    " \\              / ",
+    "  \\            /  ",
+    "   \\__________/   ",
+    "    ~~  ~~  ~~    ",
 };
 
 fn frogColour(fade: u8) dvui.Color {
