@@ -48,6 +48,11 @@ at the far right doubles as a level meter;
 sets the waveform span (16, 32 or 64 beats), next to the master BPM. The
 waveform is tinted by rekordbox's three bands: kick red, mid green, high blue.
 
+`space`, or the footer's `play`, starts the last four tracks that played,
+together; `stop` stops every lane. The history holds the four most recent
+tracks to start, so a lane begun from its own `▶` joins it too. With nothing
+remembered yet, play starts every lane and remembers what started.
+
 The right column lists rekordbox playlists and folders. Picking a playlist
 loads its tracks into the crate in playlist order, ready to rearrange; `save
 crate` writes the current crate as a new playlist. Intelligent playlists are
