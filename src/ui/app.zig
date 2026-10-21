@@ -166,10 +166,14 @@ pub const App = struct {
     effect_target: ?dvui.Texture.Target = null,
     /// LSD's output while DMT folds it. Only allocated when both run.
     lsd_target: ?dvui.Texture.Target = null,
-    /// Effect seconds: wall seconds scaled by tempo, shared by both modes.
+    /// Effect seconds: wall seconds scaled by tempo and the speed slider. LSD
+    /// reads it straight; DMT integrates it through its mood.
     effect_time: f64 = 0,
     effect_last_ns: i128 = 0,
-    stills: [2]dvui.Rect.Physical = .{ .{}, .{} },
+    effect_clock: dmt.Clock = .{},
+    /// Shared effect speed multiplier, under both mode chips.
+    effect_speed: f32 = 1,
+    stills: [3]dvui.Rect.Physical = .{ .{}, .{}, .{} },
     still_count: usize = 0,
 
     /// Tempo window for suggestions, as a percentage of the seed's BPM.
@@ -432,7 +436,7 @@ pub const App = struct {
         }
 
         if (self.effect.dmt) {
-            try dmt.draw(source, arena, self.effect_time, size, stills);
+            try dmt.draw(source, arena, self.effect_clock, size, stills);
         }
     }
 
@@ -479,24 +483,75 @@ pub const App = struct {
         return self.stills[0..self.still_count];
     }
 
-    fn frameToolbar(self: *App) void {
-        var bar = dvui.box(@src(), .{ .dir = .horizontal }, .{
-            .expand = .horizontal,
-            .padding = .{ .x = 16, .y = 8 },
-            .background = true,
-            .color_fill = .{ .color = Palette.background },
-        });
-        defer bar.deinit();
+    /// Keeps a rect out of the effect, with a pixel of margin so its border is
+    /// not pulled either.
+    fn still(self: *App, rect: hit.Rect) void {
+        if (self.still_count >= self.stills.len) return;
+        self.stills[self.still_count] = .{
+            .x = rect.x - 1,
+            .y = rect.y - 1,
+            .w = rect.w + 2,
+            .h = rect.h + 2,
+        };
+        self.still_count += 1;
+    }
 
-        labelStyled(@src(), "alchimix", .{
-            .font = titleFont(),
-            .color_text = .{ .color = Palette.purple },
+    fn frameToolbar(self: *App) void {
+        {
+            var bar = dvui.box(@src(), .{ .dir = .horizontal }, .{
+                .expand = .horizontal,
+                .padding = .{ .x = 16, .y = 8 },
+                .background = true,
+                .color_fill = .{ .color = Palette.background },
+            });
+            defer bar.deinit();
+
+            labelStyled(@src(), "alchimix", .{
+                .font = titleFont(),
+                .color_text = .{ .color = Palette.purple },
+                .margin = .{ .x = 4 },
+            });
+
+            self.still_count = 0;
+            self.effectChip("LSD", .lsd, .lsd, 7120);
+            self.effectChip("DMT", .dmt, .dmt, 7130);
+        }
+
+        self.effectSpeed();
+    }
+
+    /// Speed for both effects. One multiplier, one clock, on its own row
+    /// under the chips.
+    fn effectSpeed(self: *App) void {
+        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{
+            .expand = .horizontal,
+            .padding = .{ .x = 16, .y = 0 },
+        });
+        defer row.deinit();
+
+        _ = dvui.spacer(@src(), .{ .expand = .horizontal });
+
+        labelStyled(@src(), "speed", .{
+            .font = metaFont(),
+            .color_text = .{ .color = Palette.muted },
+            .gravity_y = 0.5,
             .margin = .{ .x = 4 },
         });
 
-        self.still_count = 0;
-        self.effectChip("LSD", .lsd, .lsd, 7120);
-        self.effectChip("DMT", .dmt, .dmt, 7130);
+        var cluster = dvui.box(@src(), .{ .dir = .horizontal }, .{ .gravity_x = 1 });
+        defer cluster.deinit();
+
+        var fraction = dmt.speedFraction(self.effect_speed);
+        if (dvui.slider(@src(), .{ .fraction = &fraction }, .{
+            .gravity_y = 0.5,
+            .min_size_content = .{ .w = 120, .h = 8 },
+            .max_size_content = .{ .w = 120, .h = 8 },
+        })) {
+            self.effect_speed = dmt.speedAt(fraction);
+            dvui.refresh(null, @src(), null);
+        }
+
+        self.still(rectFrom(cluster.data().rectScaleFromParent().r));
     }
 
     /// A mode switch. `paint` reads the chip's rect back and keeps that patch of
@@ -527,15 +582,7 @@ pub const App = struct {
         });
 
         const rect = rectFrom(chip.data().rectScaleFromParent().r);
-        if (self.still_count < self.stills.len) {
-            self.stills[self.still_count] = .{
-                .x = rect.x - 1,
-                .y = rect.y - 1,
-                .w = rect.w + 2,
-                .h = rect.h + 2,
-            };
-            self.still_count += 1;
-        }
+        self.still(rect);
         self.hit_map.append(rect, target);
     }
 
@@ -1152,7 +1199,9 @@ pub const App = struct {
         if (!self.effect.any() or last == 0 or now <= last) return;
 
         const elapsed = @as(f64, @floatFromInt(now - last)) * 1e-9;
-        self.effect_time += dmt.tempoStep(elapsed, self.masterBpm());
+        const step = dmt.tempoStep(elapsed, self.masterBpm()) * self.effect_speed;
+        self.effect_time += step;
+        self.effect_clock.advance(step, dmt.mood(self.effect_time));
     }
 
     /// An effect changes which texel sits under the cursor, so the pointer runs
@@ -1166,7 +1215,7 @@ pub const App = struct {
         // DMT runs on top of LSD, so a press follows the tunnel first and the
         // drift underneath it second.
         var shown = dvui.Point.Physical{ .x = p.x, .y = p.y };
-        if (self.effect.dmt) shown = dmt.fold(shown, self.effect_time, size, stills);
+        if (self.effect.dmt) shown = dmt.fold(shown, self.effect_clock, size, stills);
         if (self.effect.lsd) shown = lsd.sample(shown, self.effect_time, size, stills);
         return .{ .x = shown.x, .y = shown.y };
     }

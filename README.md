@@ -74,6 +74,10 @@ The effect clock runs at the master tempo over 128, so a 140 BPM track moves the
 drift and the funnel faster than a 90 BPM one. 128 is the default when no track
 has set the tempo.
 
+`DMT` speed wanders on seeded sines and the turn flips direction every 6.5
+seconds, so the motion never settles into a loop. A speed slider under the mode
+chips scales both effects.
+
 Both effects can run at once. `DMT` folds the frame `LSD` has already drifted,
 and both chips stay live.
 
