@@ -156,6 +156,9 @@ fn pressed(current: Dmt, choice: Dmt) Dmt {
 
 pub const EffectMode = enum { lsd, mushroom, dmt, dmt_a, dmt_b, dmt_og };
 
+/// The bundled emoji family, loaded at startup.
+pub const emoji_family = "noto emoji";
+
 pub const App = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -188,6 +191,8 @@ pub const App = struct {
     mushroom: mushroom.State = .{},
     /// A text field held the keyboard last frame, so space is a space.
     typing: bool = false,
+    /// The bundled emoji font loaded, so the garden can draw real glyphs.
+    emoji_font: bool = false,
     /// A preview waiting for the next master bar so it lands in sync.
     preview_pending: ?Track = null,
     preview_at_ns: i128 = 0,
@@ -518,7 +523,7 @@ pub const App = struct {
     fn drawLook(self: *App, texture: dvui.Texture, arena: std.mem.Allocator, size: dvui.Size.Physical, stills: []const dvui.Rect.Physical) !void {
         switch (self.effect.look) {
             .drift => try lsd.draw(texture, arena, self.effect_time, size, stills),
-            .mushroom => try mushroom.draw(texture, arena, &self.mushroom, self.effect_time, size, stills),
+            .mushroom => try mushroom.draw(texture, arena, &self.mushroom, self.effect_time, size, stills, if (self.emoji_font) self.emojiType(24) else null),
             .none => {},
         }
     }
@@ -620,7 +625,7 @@ pub const App = struct {
 
             self.still_count = 0;
             self.effectChip("LSD", .lsd, .lsd, 7120);
-            self.effectChip(".-.", .mushroom, .mushroom, 7122);
+            self.effectChip(if (self.emoji_font) "🍄" else ".-.", .mushroom, .mushroom, 7122);
             self.effectChip("DMT", .dmt, .dmt, 7125);
             self.effectChip("DMT A", .dmt_a, .dmt_a, 7130);
             self.effectChip("DMT B", .dmt_b, .dmt_b, 7140);
@@ -690,7 +695,7 @@ pub const App = struct {
         labelStyled(@src(), text, .{
             .gravity_y = 0.5,
             .color_text = .{ .color = if (on) Palette.background else Palette.muted },
-            .font = metaFont(),
+            .font = if (self.emoji_font and which == .mushroom) self.emojiType(20) else metaFont(),
             .id_extra = id + 1,
         });
 
@@ -1357,6 +1362,12 @@ pub const App = struct {
                 else => {},
             }
         }
+    }
+
+    /// The bundled emoji family at a size, or the body font when it did not load.
+    fn emojiType(self: *const App, px: f32) dvui.Font {
+        const body = dvui.themeGet().font_body;
+        return if (self.emoji_font) body.withFamily(emoji_family).withSize(px) else body.withSize(px);
     }
 
     fn onPlant(at: dvui.Point.Physical) bool {

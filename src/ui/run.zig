@@ -8,6 +8,10 @@ const Demo = @import("demo.zig").Demo;
 
 const font_family = "caskaydia";
 const font_file = "CaskaydiaCoveNerdFont-Regular.ttf";
+/// Bundled monochrome emoji: the system emoji font is a colour bitmap, which the
+/// rasteriser cannot read.
+const emoji_family = @import("app.zig").emoji_family;
+const emoji_file = "assets/NotoEmoji.ttf";
 
 pub fn run(init: std.process.Init, app: *App) !void {
     var backend = try SDLBackend.initWindow(.{
@@ -47,6 +51,7 @@ pub fn run(init: std.process.Init, app: *App) !void {
                 applyNerdFont();
                 app.arrow_font = true;
             }
+            app.emoji_font = loadEmojiFont(init);
         }
 
         if (!app.frame()) break;
@@ -109,6 +114,25 @@ fn applyNerdFont() void {
 /// The bundled font has no arrow glyph, and a Nerd Font is already installed on
 /// most machines that would run this. It is read at runtime rather than
 /// embedded, so the repository stays small.
+fn loadEmojiFont(init: std.process.Init) bool {
+    const bytes = std.Io.Dir.cwd().readFileAlloc(
+        init.io,
+        emoji_file,
+        init.gpa,
+        .limited(4 * 1024 * 1024),
+    ) catch |err| {
+        std.debug.print("emoji font not loaded ({s}); the garden falls back to ASCII\n", .{@errorName(err)});
+        return false;
+    };
+
+    dvui.addFont(emoji_family, bytes, init.gpa) catch |err| {
+        std.debug.print("emoji font rejected ({s}); the garden falls back to ASCII\n", .{@errorName(err)});
+        init.gpa.free(bytes);
+        return false;
+    };
+    return true;
+}
+
 fn loadNerdFont(init: std.process.Init) bool {
     const home = init.environ_map.get("HOME") orelse return false;
 
