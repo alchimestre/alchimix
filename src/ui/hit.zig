@@ -93,7 +93,9 @@ pub const Target = union(enum) {
     sort_bpm,
     /// Drifts the window, or stops it drifting.
     lsd,
-    /// Folds the window into a mandala, dimmed throughout.
+    /// Folds the window into a mandala at full brightness.
+    dmt,
+    /// Folds it, dimmed throughout.
     dmt_a,
     /// Folds it, then paints the coloured fills back at full strength.
     dmt_b,
@@ -273,6 +275,7 @@ pub const Drag = struct {
         clear_all,
         toggle_sort_bpm,
         toggle_lsd,
+        toggle_dmt,
         toggle_dmt_a,
         toggle_dmt_b,
         select_playlist: usize,
@@ -309,6 +312,7 @@ pub const Drag = struct {
             .clear => .clear_all,
             .sort_bpm => .toggle_sort_bpm,
             .lsd => .toggle_lsd,
+            .dmt => .toggle_dmt,
             .dmt_a => .toggle_dmt_a,
             .dmt_b => .toggle_dmt_b,
             .playlist => |index| .{ .select_playlist = index },
@@ -376,7 +380,7 @@ pub const Drag = struct {
     pub fn motion(self: *Drag, p: Point, threshold: f32, canvas: Rect, rows: []const Rect) bool {
         const pressed = self.pressed orelse return false;
         switch (pressed) {
-            .lane, .nav, .eq_node, .eq_plot, .eq_preset, .trim, .clear, .playlist, .playlist_toggle, .save_playlist, .group, .sort_bpm, .lsd, .dmt_a, .dmt_b => return false,
+            .lane, .nav, .eq_node, .eq_plot, .eq_preset, .trim, .clear, .playlist, .playlist_toggle, .save_playlist, .group, .sort_bpm, .lsd, .dmt, .dmt_a, .dmt_b => return false,
             else => {},
         }
         if (self.carrying == null) {
@@ -397,7 +401,7 @@ pub const Drag = struct {
         return switch (target) {
             .block => |from| .{ .move_block = .{ .from = from, .gap = to } },
             .row => |track| .{ .drop_track = .{ .gap = to, .track = track } },
-            .toggle, .notation, .lane, .nav, .eq_node, .eq_plot, .eq_preset, .trim, .transport, .clear, .playlist, .playlist_toggle, .save_playlist, .group, .sort_bpm, .lsd, .dmt_a, .dmt_b, .master_lock, .pitch_lock, .lane_play, .lane_mute, .width => .none,
+            .toggle, .notation, .lane, .nav, .eq_node, .eq_plot, .eq_preset, .trim, .transport, .clear, .playlist, .playlist_toggle, .save_playlist, .group, .sort_bpm, .lsd, .dmt, .dmt_a, .dmt_b, .master_lock, .pitch_lock, .lane_play, .lane_mute, .width => .none,
         };
     }
 

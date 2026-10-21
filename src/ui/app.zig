@@ -90,11 +90,17 @@ pub const Effect = struct {
     pub fn any(self: Effect) bool {
         return self.lsd or self.dmt != .off;
     }
+
+    /// Only the colour-weighted variants lift the waveform; the plain funnel
+    /// and the drift leave it alone.
+    pub fn liftsColour(self: Effect) bool {
+        return self.dmt == .a or self.dmt == .b;
+    }
 };
 
-/// Two ways to keep colour in the picture: A dims the whole fold, B dims it and
-/// paints the coloured fills back at full strength.
-pub const Dmt = enum { off, a, b };
+/// `plain` is the funnel as it was: the frame at full brightness. `a` dims the
+/// whole fold; `b` dims it and paints the coloured fills back at full strength.
+pub const Dmt = enum { off, plain, a, b };
 
 /// Pressing a mode's chip runs it; pressing the one already running stops it,
 /// and pressing the other swaps instead of stopping.
@@ -102,7 +108,7 @@ fn pressed(current: Dmt, choice: Dmt) Dmt {
     return if (current == choice) .off else choice;
 }
 
-pub const EffectMode = enum { lsd, dmt_a, dmt_b };
+pub const EffectMode = enum { lsd, dmt, dmt_a, dmt_b };
 
 pub const App = struct {
     allocator: std.mem.Allocator,
@@ -187,7 +193,7 @@ pub const App = struct {
     effect_clock: dmt.Clock = .{},
     /// Shared effect speed multiplier, under both mode chips.
     effect_speed: f32 = 1,
-    stills: [4]dvui.Rect.Physical = .{ .{}, .{}, .{}, .{} },
+    stills: [5]dvui.Rect.Physical = .{ .{}, .{}, .{}, .{}, .{} },
     still_count: usize = 0,
 
     /// Tempo window for suggestions, as a percentage of the seed's BPM.
@@ -451,7 +457,8 @@ pub const App = struct {
         }
 
         if (self.effect.dmt != .off) {
-            try dmt.draw(source, arena, self.effect_clock, size, stills, dmt.damp);
+            const shade: f32 = if (self.effect.dmt == .plain) 1 else dmt.damp;
+            try dmt.draw(source, arena, self.effect_clock, size, stills, shade);
             if (self.effect.dmt == .b) try self.paintColours(arena, screen, size);
         }
     }
@@ -500,6 +507,7 @@ pub const App = struct {
     fn toggleEffect(self: *App, which: EffectMode) void {
         switch (which) {
             .lsd => self.effect.lsd = !self.effect.lsd,
+            .dmt => self.effect.dmt = pressed(self.effect.dmt, .plain),
             .dmt_a => self.effect.dmt = pressed(self.effect.dmt, .a),
             .dmt_b => self.effect.dmt = pressed(self.effect.dmt, .b),
         }
@@ -550,6 +558,7 @@ pub const App = struct {
 
             self.still_count = 0;
             self.effectChip("LSD", .lsd, .lsd, 7120);
+            self.effectChip("DMT", .dmt, .dmt, 7125);
             self.effectChip("DMT A", .dmt_a, .dmt_a, 7130);
             self.effectChip("DMT B", .dmt_b, .dmt_b, 7140);
         }
@@ -596,6 +605,7 @@ pub const App = struct {
     fn effectChip(self: *App, text: []const u8, which: EffectMode, target: hit.Target, id: u32) void {
         const on = switch (which) {
             .lsd => self.effect.lsd,
+            .dmt => self.effect.dmt == .plain,
             .dmt_a => self.effect.dmt == .a,
             .dmt_b => self.effect.dmt == .b,
         };
@@ -1365,6 +1375,7 @@ pub const App = struct {
                 dvui.refresh(null, @src(), null);
             },
             .toggle_lsd => self.toggleEffect(.lsd),
+            .toggle_dmt => self.toggleEffect(.dmt),
             .toggle_dmt_a => self.toggleEffect(.dmt_a),
             .toggle_dmt_b => self.toggleEffect(.dmt_b),
             .select_playlist => |index| {
@@ -2624,7 +2635,7 @@ fn drawPauseBars(allocator: std.mem.Allocator, cx: f32, cy: f32, size: f32) void
 /// Waveform colour held against the fold's dampening: the grey chrome dims,
 /// the heat map keeps its weight.
 fn lifted(effect: Effect, colour: dvui.Color) dvui.Color {
-    if (!effect.any()) return colour;
+    if (!effect.liftsColour()) return colour;
 
     const red: f32 = @floatFromInt(colour.r);
     const green: f32 = @floatFromInt(colour.g);
@@ -2941,9 +2952,16 @@ test "waveform colour survives the fold" {
 
     const shown = lifted(.{ .dmt = .a }, plain);
     try std.testing.expect(shown.r < plain.r and shown.g >= plain.g);
+
+    // The plain funnel is the reference look: colour comes through untouched.
+    try std.testing.expectEqual(plain, lifted(.{ .dmt = .plain }, plain));
+    try std.testing.expectEqual(plain, lifted(.{ .lsd = true }, plain));
 }
 
 test "a mode chip runs itself and stops only itself" {
+    try std.testing.expectEqual(Dmt.plain, pressed(.off, .plain));
+    try std.testing.expectEqual(Dmt.off, pressed(.plain, .plain));
+    try std.testing.expectEqual(Dmt.plain, pressed(.a, .plain));
     try std.testing.expectEqual(Dmt.a, pressed(.off, .a));
     try std.testing.expectEqual(Dmt.b, pressed(.off, .b));
     try std.testing.expectEqual(Dmt.off, pressed(.a, .a));
