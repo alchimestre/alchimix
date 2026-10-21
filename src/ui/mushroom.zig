@@ -328,85 +328,72 @@ fn bigMushrooms(state: *const State, now: f64, size: dvui.Size.Physical, font_in
 
         // A rounded cap with spots, then a stalk: read at a glance as a mushroom.
         const lines: []const []const u8 = if (age < 1.2)
-            &.{"o"}
+            &.{"x"}
         else if (age < 2.4)
-            &.{ " .-. ", "/ o \\", " \\_/ " }
+            &.{ " ,xXx, ", "XXXXXXX", " '\\\"X\\\"' ", "   X   " }
         else
-            &.{ "  _.-\"-._  ", " /  o o  \\ ", "| o   o   |", " \\  o o  / ", "  '-...-'  ", "     |||   " };
+            &.{ "  ,xXXXx, ", " ,XXXXXX, ", " XXXXXXXX ", " `\"\"XX\"\"` ", "     XX    ", "     XX    " };
 
         try stack(font, lines, at, tint(fade));
     }
 }
 
-/// The full-grown plant.
+/// The full-grown plant: a flowering tree at the app's scale.
 const tree_art = [_][]const u8{
-    "              * *    ",
-    "           *    *  *",
-    "      *  *    *     *  *",
-    "     *     *    *  *    *",
-    " * *   *    *    *    *   *",
-    " *     *  *    * * .#  *   *",
-    " *   *     * #.  .# *   *",
-    "  *     \"#.  #: #\" * *    *",
-    " *   * * \"#. ##\"       *",
-    "   *       \"###",
-    "             \"##",
-    "              ##.",
-    "              .##:",
-    "              :###",
-    "              ;###",
-    "            ,####.",
-    "/\\/\\/\\/\\/\\/.######.\\/\\/\\/\\/\\",
+    "  * . * ",
+    " . * * .",
+    "* . | . *",
+    " .-\\|/-. ",
+    "   ###  ",
+    "   ###  ",
 };
 
-/// The wizard walks over with the can every so often.
+/// The wizard: a plain human figure first — head, arms, legs — with a pointed
+/// hat on top, in red and blue.
 fn drawWizard(state: *const State, now: f64, size: dvui.Size.Physical, font_in: dvui.Font) !void {
     if (now >= state.water_until) return;
 
     const font = font_in.withSize(font_in.size * 1.1);
     const step = font.size * 1.05;
     const base = dvui.Point.Physical{ .x = size.w * 0.68, .y = size.h * 0.90 };
-    const hat = [_][]const u8{ "  /\\  ", " /  \\ ", "/____\\" };
-    const body = [_][]const u8{ " |  | ", " /  \\ " };
 
-    for (hat, 0..) |line, row| {
-        const up = @as(f32, @floatFromInt(hat.len + body.len - 1 - row));
-        try put(font, line, .{ .x = base.x, .y = base.y - up * step }, wizard_red(235));
-    }
-    for (body, 0..) |line, row| {
-        const up = @as(f32, @floatFromInt(body.len - 1 - row));
-        try put(font, line, .{ .x = base.x, .y = base.y - up * step }, wizard_blue(235));
+    const art = [_]struct { text: []const u8, colour: dvui.Color }{
+        .{ .text = "  /\\  ", .colour = wizard_red(235) },
+        .{ .text = " /  \\ ", .colour = wizard_red(235) },
+        .{ .text = "/____\\", .colour = wizard_red(235) },
+        .{ .text = "  o   ", .colour = skin(235) },
+        .{ .text = " /|\\  ", .colour = wizard_blue(235) },
+        .{ .text = " / \\  ", .colour = wizard_blue(235) },
+    };
+
+    for (art, 0..) |line, row| {
+        const up = @as(f32, @floatFromInt(art.len - 1 - row));
+        try put(font, line.text, .{ .x = base.x, .y = base.y - up * step }, line.colour);
     }
 
     for (0..4) |drop| {
-        const spread = @as(f32, @floatFromInt(drop)) * font.size * 1.6;
-        try put(font, "'", .{ .x = base.x + font.size * 2 + spread, .y = base.y - font.size * 2 + spread * 0.6 }, rain(200));
+        const spread = @as(f32, @floatFromInt(drop)) * font.size * 1.4;
+        try put(font, "'", .{ .x = base.x + font.size * 2.2 + spread, .y = base.y - font.size * 2 + spread * 0.6 }, rain(200));
     }
 }
 
 /// Where the plant grows.
 fn drawPlant(grown: f32, size: dvui.Size.Physical, font_in: dvui.Font) !void {
     const base = dvui.Point.Physical{ .x = plant_x * size.w, .y = plant_base * size.h };
+    const font = font_in.withSize(font_in.size * (1.3 + grown * 1.1));
 
-    if (grown >= 0.8) {
-        // The full plant is wide: draw it small and keep it clear of the edge.
-        const font = font_in.withSize(font_in.size * 0.8);
-        const cell = font.textSize("M").w;
-        const widest: f32 = @floatFromInt(tree_art[0].len + 12);
-        try stack(font, &tree_art, .{ .x = size.w - widest * cell * 0.5 - 16, .y = base.y }, leaf());
-        return;
-    }
-
-    const font = font_in.withSize(font_in.size * (1.4 + grown * 1.2));
-    // A shamrock at the smallest: round leaves on a stem.
-    const lines: []const []const u8 = if (grown < 0.2)
+    const lines: []const []const u8 = if (grown < 0.15)
         &.{ " o o o ", "  \\|/  ", "   |   " }
-    else if (grown < 0.4)
+    else if (grown < 0.3)
         &.{ "\\|/", "-+-", " |" }
-    else if (grown < 0.6)
+    else if (grown < 0.5)
         &.{ " \\|/ ", "--|--", "  |  " }
+    else if (grown < 0.7)
+        &.{ " * . * ", "  \\|/  ", "--|--", "  |  " }
+    else if (grown < 0.88)
+        &.{ "  * *  ", " . * . ", "  \\|/  ", "--|--", "  |  " }
     else
-        &.{ "  ___  ", " /   \\ ", " \\___/ ", "   |   ", "   |   " };
+        &tree_art;
 
     try stack(font, lines, base, leaf());
 }
@@ -517,6 +504,10 @@ fn stem() dvui.Color {
 
 fn rain(fade: u8) dvui.Color {
     return .{ .r = 0x89, .g = 0xb4, .b = 0xfa, .a = fade };
+}
+
+fn skin(fade: u8) dvui.Color {
+    return .{ .r = 0xf5, .g = 0xd6, .b = 0xb8, .a = fade };
 }
 
 fn wizard_red(fade: u8) dvui.Color {
