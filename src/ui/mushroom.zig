@@ -316,25 +316,42 @@ fn undergrowth(state: *const State, now: f64, size: dvui.Size.Physical) !void {
     }
 }
 
+/// The two sprinkled mushrooms, as drawn in the reference set.
+const mushroom_tall = [_][]const u8{
+    "  n",
+    " / `\\",
+    "(___:)",
+    " \"\"\"\"",
+    "  ||",
+    "  ||",
+    "  ))",
+    " //",
+    "((",
+    " \\",
+    "  ))",
+    "  ||",
+};
+
+const mushroom_stout = [_][]const u8{
+    "  .-\"\"\"-.",
+    " /* * * *\\",
+    ":_.-:`:-._;",
+    "    (_)",
+    " \\|/(_)\\|/",
+};
+
 fn bigMushrooms(state: *const State, now: f64, size: dvui.Size.Physical, font_in: dvui.Font) !void {
-    const font = font_in.withSize(font_in.size * 1.7);
+    const font = font_in.withSize(font_in.size * 1.2);
 
     for (state.big, 0..) |bush, slot| {
         const age = now - bush.born;
         if (age < 0) continue;
         const at = dvui.Point.Physical{ .x = bush.x * size.w, .y = bush.y * size.h };
-        const fade: u8 = @intFromFloat(@min(1, age / 0.6) * 235);
+        const fade: u8 = @intFromFloat(@min(1, age / 0.9) * 235);
         const tint = caps[slot % caps.len];
 
-        // A rounded cap with spots, then a stalk: read at a glance as a mushroom.
-        const lines: []const []const u8 = if (age < 1.2)
-            &.{"x"}
-        else if (age < 2.4)
-            &.{ " ,xXx, ", "XXXXXXX", " '\\\"X\\\"' ", "   X   " }
-        else
-            &.{ "  ,xXXXx, ", " ,XXXXXX, ", " XXXXXXXX ", " `\"\"XX\"\"` ", "     XX    ", "     XX    " };
-
-        try stack(font, lines, at, tint(fade));
+        const art: []const []const u8 = if (slot % 2 == 0) &mushroom_tall else &mushroom_stout;
+        try stack(font, art, at, tint(fade));
     }
 }
 
