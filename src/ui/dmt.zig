@@ -24,6 +24,9 @@ const rush: f32 = 0.9;
 const twist: f32 = 0.55;
 /// Effect speed against the tempo clock. The shared slider scales this.
 const speed: f32 = 1.6;
+/// Fold brightness. The frame is mostly grey chrome, so the fold is damped and
+/// the coloured content carries the picture instead.
+pub const damp: f32 = 0.55;
 /// Pixels between a still rect and the full fold around it.
 const calm: f32 = 18;
 /// Vertex every this many physical pixels. Mirror seams are sharp, so the grid
@@ -146,6 +149,7 @@ pub fn mesh(
     clock: Clock,
     size: dvui.Size.Physical,
     stills: []const dvui.Rect.Physical,
+    shade: f32,
 ) !geom.Mesh {
     const shape = gridShape(size);
     const across = shape.columns + 1;
@@ -153,6 +157,7 @@ pub fn mesh(
     const right = @as(f32, @floatFromInt(shape.columns));
 
     const vertexes = try arena.alloc(dvui.Vertex, across * (shape.rows + 1));
+    const tint = shadeColour(shade);
     var at: usize = 0;
     for (0..shape.rows + 1) |row| {
         const y = size.h * @as(f32, @floatFromInt(row)) / down;
@@ -161,7 +166,7 @@ pub fn mesh(
             const source = fold(.{ .x = x, .y = y }, clock, size, stills);
             vertexes[at] = .{
                 .pos = .{ .x = x, .y = y },
-                .col = .white,
+                .col = tint,
                 .uv = .{ geom.sampleUV(source.x, size.w), geom.sampleUV(source.y, size.h) },
             };
             at += 1;
@@ -193,11 +198,12 @@ pub fn draw(
     clock: Clock,
     size: dvui.Size.Physical,
     stills: []const dvui.Rect.Physical,
+    shade: f32,
 ) !void {
     if (size.w <= 0 or size.h <= 0) return;
     const bounds = dvui.Rect.Physical{ .x = 0, .y = 0, .w = size.w, .h = size.h };
 
-    const grid = try mesh(arena, clock, size, stills);
+    const grid = try mesh(arena, clock, size, stills, shade);
 
     try dvui.renderTriangles(.{
         .vertexes = grid.vertexes,
@@ -226,6 +232,12 @@ pub fn speedAt(fraction: f32) f32 {
 /// defaults to 128 when no track has set the tempo.
 pub fn tempoStep(elapsed: f64, bpm: f32) f64 {
     return elapsed * @as(f64, @floatCast(bpm)) / 128.0;
+}
+
+/// Vertex colour for a fold drawn at `shade` brightness.
+fn shadeColour(shade: f32) dvui.Color.PMA {
+    const level: u8 = @intFromFloat(@round(std.math.clamp(shade, 0, 1) * 255));
+    return .{ .r = level, .g = level, .b = level };
 }
 
 /// Zero inside a still rect, one everywhere else.
@@ -363,4 +375,12 @@ test "the grid fits one index buffer at any window size" {
         const shape = gridShape(size);
         try std.testing.expect((shape.columns + 1) * (shape.rows + 1) <= 65535);
     }
+}
+
+test "the fold is drawn at the shade it is given" {
+    try std.testing.expectEqual(@as(u8, 255), shadeColour(1).r);
+    try std.testing.expectEqual(@as(u8, 140), shadeColour(damp).r);
+    try std.testing.expectEqual(@as(u8, 0), shadeColour(0).r);
+    try std.testing.expectEqual(@as(u8, 140), shadeColour(damp).g);
+    try std.testing.expectEqual(@as(u8, 255), shadeColour(damp).a);
 }
