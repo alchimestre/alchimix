@@ -449,8 +449,8 @@ fn halos(
             // Centre of the two-row sprite: the middle of ".-." across, and
             // half a row step down between cap and stem.
             const at = dvui.Point.Physical{
-                .x = plant.x * size.w + cell * 1.5,
-                .y = plant.y * size.h + cell * 1.15 * 0.5,
+                .x = plant.x * size.w + cell * 2.8,
+                .y = plant.y * size.h + cell * 1.65,
             };
             try glow.disc(at, bloom, bloom, .{
                 .r = @intFromFloat(105 * fade),
