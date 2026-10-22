@@ -93,6 +93,37 @@ pub fn fold(
     stills: []const dvui.Rect.Physical,
     border: f32,
 ) dvui.Point.Physical {
+    return foldBack(p, clock, size, stills, border, null);
+}
+
+/// Which part of the frame is backdrop, and how far in it is pulled. The
+/// backdrop reads smaller than the controls drawn over it.
+pub const Backdrop = struct {
+    rects: []const dvui.Rect.Physical,
+    pull: f32,
+};
+
+/// Sample a backdrop rect wider than it is drawn, so its own content shrinks
+/// toward the rect's middle while everything outside keeps its size.
+pub fn squeeze(p: dvui.Point.Physical, back: ?Backdrop) dvui.Point.Physical {
+    const b = back orelse return p;
+    for (b.rects) |r| {
+        if (p.x < r.x or p.y < r.y or p.x > r.x + r.w or p.y > r.y + r.h) continue;
+        const mid = dvui.Point.Physical{ .x = r.x + r.w / 2, .y = r.y + r.h / 2 };
+        const wide = 1 + b.pull;
+        return .{ .x = mid.x + (p.x - mid.x) * wide, .y = mid.y + (p.y - mid.y) * wide };
+    }
+    return p;
+}
+
+pub fn foldBack(
+    p: dvui.Point.Physical,
+    clock: Clock,
+    size: dvui.Size.Physical,
+    stills: []const dvui.Rect.Physical,
+    border: f32,
+    back: ?Backdrop,
+) dvui.Point.Physical {
     if (size.w <= 0 or size.h <= 0) return p;
     const strength = clean(p.x, p.y, size, stills, border);
     if (strength <= 0) return p;
@@ -101,7 +132,8 @@ pub fn fold(
     const turn_phase: f32 = @floatCast(clock.turn * speed);
     const half = @min(size.w, size.h) / 2;
     const centre = dvui.Point.Physical{ .x = size.w / 2, .y = size.h / 2 };
-    const q = dvui.Point.Physical{ .x = p.x - centre.x, .y = p.y - centre.y };
+    const sample = squeeze(p, back);
+    const q = dvui.Point.Physical{ .x = sample.x - centre.x, .y = sample.y - centre.y };
     const radius = @sqrt(q.x * q.x + q.y * q.y);
 
     // Tunnel: the log radius picks the ring, and the phase pushes every ring
@@ -154,6 +186,7 @@ pub fn mesh(
     stills: []const dvui.Rect.Physical,
     shade: f32,
     border: f32,
+    back: ?Backdrop,
 ) !geom.Mesh {
     const shape = gridShape(size);
     const across = shape.columns + 1;
@@ -167,7 +200,7 @@ pub fn mesh(
         const y = size.h * @as(f32, @floatFromInt(row)) / down;
         for (0..across) |column| {
             const x = size.w * @as(f32, @floatFromInt(column)) / right;
-            const source = fold(.{ .x = x, .y = y }, clock, size, stills, border);
+            const source = foldBack(.{ .x = x, .y = y }, clock, size, stills, border, back);
             vertexes[at] = .{
                 .pos = .{ .x = x, .y = y },
                 .col = tint,
@@ -204,11 +237,12 @@ pub fn draw(
     stills: []const dvui.Rect.Physical,
     shade: f32,
     border: f32,
+    back: ?Backdrop,
 ) !void {
     if (size.w <= 0 or size.h <= 0) return;
     const bounds = dvui.Rect.Physical{ .x = 0, .y = 0, .w = size.w, .h = size.h };
 
-    const grid = try mesh(arena, clock, size, stills, shade, border);
+    const grid = try mesh(arena, clock, size, stills, shade, border, back);
 
     try dvui.renderTriangles(.{
         .vertexes = grid.vertexes,
@@ -392,6 +426,23 @@ test "the fold is drawn at the shade it is given" {
     try std.testing.expectEqual(@as(u8, 0), shadeColour(0).r);
     try std.testing.expectEqual(@as(u8, 140), shadeColour(damp).g);
     try std.testing.expectEqual(@as(u8, 255), shadeColour(damp).a);
+}
+
+test "the backdrop is sampled wider than it is drawn" {
+    const back = Backdrop{
+        .rects = &[_]dvui.Rect.Physical{.{ .x = 0, .y = 0, .w = 200, .h = 100 }},
+        .pull = 0.5,
+    };
+
+    const mid = dvui.Point.Physical{ .x = 100, .y = 50 };
+    try std.testing.expectEqual(mid.x, squeeze(mid, back).x);
+
+    const inside = dvui.Point.Physical{ .x = 150, .y = 50 };
+    try std.testing.expectEqual(@as(f32, 175), squeeze(inside, back).x);
+
+    const outside = dvui.Point.Physical{ .x = 400, .y = 50 };
+    try std.testing.expectEqual(outside.x, squeeze(outside, back).x);
+    try std.testing.expectEqual(outside.x, squeeze(outside, null).x);
 }
 
 test "the pinned look holds the window border still" {
