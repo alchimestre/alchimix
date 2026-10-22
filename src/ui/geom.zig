@@ -183,6 +183,23 @@ pub const Glow = struct {
         try self.indices.appendSlice(self.arena, &fan);
     }
 
+    /// A filled convex polygon, fanned from its first point.
+    pub fn polygon(self: *Glow, points: []const dvui.Point.Physical, colour: dvui.Color.PMA) !void {
+        if (points.len < 3) return;
+        const first: dvui.Vertex.Index = @intCast(self.vertexes.items.len);
+        for (points) |point| {
+            try self.vertexes.append(self.arena, .{ .pos = point, .col = colour });
+        }
+        for (1..points.len - 1) |step| {
+            const fan = [_]dvui.Vertex.Index{
+                first,
+                first + @as(dvui.Vertex.Index, @intCast(step)),
+                first + @as(dvui.Vertex.Index, @intCast(step + 1)),
+            };
+            try self.indices.appendSlice(self.arena, &fan);
+        }
+    }
+
     /// A limb from `from` to `to`, `width` pixels either side of the line.
     pub fn limb(
         self: *Glow,
