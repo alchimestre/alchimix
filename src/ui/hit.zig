@@ -81,6 +81,8 @@ pub const Target = union(enum) {
     transport,
     /// Empties the crate and returns to the starting state.
     clear,
+    /// Advances the garden's plant by one stage, for trying the growth halos.
+    grow_plant,
     /// A playlist row: selecting it filters suggestions.
     playlist: usize,
     /// A playlist folder: opens or closes its children.
@@ -276,6 +278,8 @@ pub const Drag = struct {
         toggle_transport,
         clear_all,
         toggle_sort_bpm,
+    /// Advances the garden one stage.
+    grow_plant,
         toggle_lsd,
         toggle_mushroom,
         toggle_dmt,
@@ -315,6 +319,7 @@ pub const Drag = struct {
             .transport => .toggle_transport,
             .clear => .clear_all,
             .sort_bpm => .toggle_sort_bpm,
+            .grow_plant => .grow_plant,
             .lsd => .toggle_lsd,
             .mushroom => .toggle_mushroom,
             .dmt => .toggle_dmt,
@@ -403,7 +408,7 @@ pub const Drag = struct {
         return switch (target) {
             .block => |from| .{ .move_block = .{ .from = from, .gap = to } },
             .row => |track| .{ .drop_track = .{ .gap = to, .track = track } },
-            .toggle, .notation, .lane, .nav, .eq_node, .eq_plot, .eq_preset, .trim, .transport, .clear, .playlist, .playlist_toggle, .save_playlist, .sort_bpm, .lsd, .mushroom, .dmt, .dmt_a, .dmt_b, .dmt_og, .master_lock, .pitch_lock, .lane_play, .lane_mute, .width => .none,
+            .toggle, .notation, .lane, .nav, .eq_node, .eq_plot, .eq_preset, .trim, .transport, .clear, .playlist, .playlist_toggle, .save_playlist, .sort_bpm, .lsd, .mushroom, .dmt, .dmt_a, .dmt_b, .dmt_og, .master_lock, .pitch_lock, .lane_play, .lane_mute, .width, .grow_plant => .none,
         };
     }
 

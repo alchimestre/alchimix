@@ -636,9 +636,37 @@ pub const App = struct {
             self.effectChip("DMT A", .dmt_a, .dmt_a, 7130);
             self.effectChip("DMT B", .dmt_b, .dmt_b, 7140);
             self.effectChip("OG DMT", .dmt_og, .dmt_og, 7150);
+            if (self.effect.look == .mushroom) self.growChip();
         }
 
         self.effectSpeed();
+    }
+
+    /// One press grows the plant a stage, so the growth halos can be watched
+    /// without waiting out a season.
+    fn growChip(self: *App) void {
+        var chip = dvui.box(@src(), .{ .dir = .horizontal }, .{
+            .gravity_y = 0.5,
+            .margin = .{ .x = 3 },
+            .padding = .{ .x = 8, .y = 0 },
+            .min_size_content = .{ .h = 24 },
+            .background = true,
+            .color_fill = .{ .color = Palette.field },
+            .corners = square,
+            .id_extra = 7160,
+        });
+        defer chip.deinit();
+
+        labelStyled(@src(), "grow", .{
+            .gravity_y = 0.5,
+            .color_text = .{ .color = Palette.heat4 },
+            .font = metaFont(),
+            .id_extra = 7161,
+        });
+
+        const rect = rectFrom(chip.data().contentRectScale().r);
+        self.still(rect);
+        self.hit_map.append(rect, .grow_plant);
     }
 
     /// Speed for both effects. One multiplier, one clock, on its own row
@@ -1523,6 +1551,10 @@ pub const App = struct {
                 self.toggleFolder(self.playlists[index].id);
             },
             .save_playlist => self.saveCratePlaylist(),
+            .grow_plant => {
+                self.mushroom.stepGrowth(self.effect_time, self.masterBpm());
+                dvui.refresh(null, @src(), null);
+            },
             .toggle_lane_play => |index| {
                 if (index >= self.grid.items.len) return;
                 if (self.transport.isPlaying(index)) {

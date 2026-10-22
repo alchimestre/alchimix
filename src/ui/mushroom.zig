@@ -238,11 +238,18 @@ pub const State = struct {
         self.haloSweep(now, bpm);
     }
 
+    /// One press of the growth chip: a stage forward, or back to the start once
+    /// the plant is full, so the sweep can be watched on demand.
+    pub fn stepGrowth(self: *State, now: f64, bpm: f32) void {
+        if (self.grown >= 1) self.grown = 0;
+        self.grow(season * 0.21, now, bpm);
+    }
+
     /// Lights every mushroom once, in a random order, three to a beat.
     fn haloSweep(self: *State, now: f64, bpm: f32) void {
         const random = self.rng.random();
         const beat = 60 / @max(1, bpm);
-        const spacing = beat / 3;
+        const spacing = beat / 6;
 
         var order: [big_slots + mushroom_slots]f32 = undefined;
         var count: usize = 0;
@@ -256,7 +263,8 @@ pub const State = struct {
             bush.halo = now + order[slot] * @as(f32, @floatFromInt(count)) * spacing;
         }
         for (&self.mushrooms, 0..) |*plant, slot| {
-            plant.halo = now + order[self.big.len + slot] * @as(f32, @floatFromInt(count)) * spacing;
+            const jitter = (random.float(f32) - 0.5) * 0.25;
+            plant.halo = now + order[self.big.len + slot] * @as(f32, @floatFromInt(count)) * spacing + jitter;
         }
     }
 
@@ -707,17 +715,35 @@ fn ripple(ring: Ripple, radius: f32, size: dvui.Size.Physical, font: dvui.Font, 
 fn lightHalo(at: dvui.Point.Physical, age: f64, cell: f32, width: f32, font: dvui.Font) !void {
     if (age < 0 or age > halo_life) return;
     const t: f32 = @floatCast(age / halo_life);
-    const fade: u8 = @intFromFloat((1 - t) * 210);
-    const spread = cell * (1 + t * 1.4);
+    const fade: u8 = @intFromFloat((1 - t) * (1 - t) * 255);
 
-    try put(font, "o", .{ .x = at.x - spread, .y = at.y }, halo_colour(fade));
-    try put(font, "o", .{ .x = at.x + width + spread, .y = at.y }, halo_colour(fade));
-    try put(font, ".", .{ .x = at.x + width * 0.5, .y = at.y - spread }, halo_colour(fade));
-    try put(font, ".", .{ .x = at.x + width * 0.5, .y = at.y + cell * 3 }, halo_colour(fade));
+    const centre = dvui.Point.Physical{ .x = at.x + width * 0.5, .y = at.y };
+    const span = cell * (1.4 + t * 2.6);
+    const rays = [_][]const u8{ "*", "|", "*", "-", "*", "|", "*", "-" };
+
+    // A starburst of rays, gold, with a white core: the halo of a shrine.
+    for (rays, 0..) |ray, step| {
+        const turn = std.math.pi * 2 * @as(f32, @floatFromInt(step)) / 8 - std.math.pi * 0.5;
+        try put(font, ray, .{
+            .x = centre.x + @cos(turn) * span * 1.25 - cell * 0.5,
+            .y = centre.y + @sin(turn) * span * 0.75 - cell * 0.5,
+        }, halo_colour(fade));
+
+        try put(font, ".", .{
+            .x = centre.x + @cos(turn) * span * 2.1 - cell * 0.5,
+            .y = centre.y + @sin(turn) * span * 1.2 - cell * 0.5,
+        }, halo_colour(fade / 3));
+    }
+
+    try put(font, "*", .{ .x = centre.x - cell * 0.5, .y = centre.y - span * 0.55 }, halo_core(fade));
+}
+
+fn halo_core(fade: u8) dvui.Color {
+    return .{ .r = 0xff, .g = 0xfd, .b = 0xf0, .a = fade };
 }
 
 fn halo_colour(fade: u8) dvui.Color {
-    return .{ .r = 0xff, .g = 0xf1, .b = 0xc4, .a = fade };
+    return .{ .r = 0xff, .g = 0xd7, .b = 0x5e, .a = fade };
 }
 
 fn stack(font: dvui.Font, lines: []const []const u8, centre: dvui.Point.Physical, colour: dvui.Color) !void {
