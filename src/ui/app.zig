@@ -1725,6 +1725,19 @@ pub const App = struct {
     }
 
     fn masterBpm(self: *const App) f32 {
+        // Autoplay hands the tempo to the track it is playing.
+        if (self.autoplay_on) {
+            if (self.autoplayLane()) |index| {
+                if (index < self.grid.items.len) {
+                    if (self.grid.items[index].analysis) |*analysis| {
+                        if (analysis.bpm() > 0) return analysis.bpm();
+                    }
+                }
+                if (self.crate.at(index)) |track| {
+                    if (track.bpm > 0) return @floatCast(track.bpm);
+                }
+            }
+        }
         if (!self.master_locked) return self.master_bpm;
         // The grid is the tempo the audio actually follows, so the clock must
         // use it: a tag that disagrees would make every bar drift.
@@ -1860,7 +1873,7 @@ pub const App = struct {
             .margin = .{ .x = 8, .y = 0 },
         });
 
-        if (self.master_locked) {
+        if (self.master_locked or self.autoplay_on) {
             var buffer: [8]u8 = undefined;
             const text = std.fmt.bufPrint(&buffer, "{d:.0}", .{self.masterBpm()}) catch "";
             if (!std.mem.eql(u8, self.master_text.items, text)) {
