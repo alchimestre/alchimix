@@ -250,6 +250,10 @@ pub const App = struct {
     effect_speed: f32 = 1,
     /// Rings per e-fold of radius: how many lanes the tunnel shows.
     lane_rings: f32 = dmt.rings_default,
+    /// How far the fold leans on colour rather than the frame: the shade it
+    /// dims to, the wash under the lanes, the share of the fills painted back
+    /// and the chroma they are pushed to all follow it.
+    lane_colour: f32 = 0.6,
     // Six effect chips, the speed slider, the garden panel and its chrome all
     // want a slot, so the list is sized for the panel too.
     stills: [24]dvui.Rect.Physical = @splat(.{}),
@@ -517,7 +521,7 @@ pub const App = struct {
         }
 
         if (self.effect.dmt != .off) {
-            try dmt.draw(source, arena, self.effect_clock, size, stills, dmt_shade, 0, self.lane_rings);
+            try dmt.draw(source, arena, self.effect_clock, size, stills, self.foldShade(), 0, self.lane_rings);
             try self.paintColours(arena, screen, size);
             // The colour pass folds the whole layer, so the stills have to come
             // back over it or the controls are painted with lane colour.
@@ -684,6 +688,11 @@ pub const App = struct {
         if (self.effect.dmt != .off) {
             if (self.sliderRow("lanes", dmt.ringsFraction(self.lane_rings), 7250)) |fraction| {
                 self.lane_rings = dmt.ringsAt(fraction);
+                dvui.refresh(null, @src(), null);
+            }
+
+            if (self.sliderRow("colour", self.lane_colour, 7260)) |fraction| {
+                self.lane_colour = fraction;
                 dvui.refresh(null, @src(), null);
             }
         }
@@ -2326,7 +2335,7 @@ pub const App = struct {
     fn waveWash(self: *App, rect: hit.Rect, colour: dvui.Color) void {
         if (self.effect.dmt == .off) return;
 
-        const wash = saturated(opposite(colour));
+        const wash = saturated(opposite(colour), self.chromaAmount());
         const tick: u64 = @intFromFloat(@floor(self.effect_time * 1.5));
         const cell_w = rect.w / @as(f32, @floatFromInt(wash_columns));
         const cell_h = rect.h / @as(f32, @floatFromInt(wash_rows));
@@ -2339,7 +2348,7 @@ pub const App = struct {
             var column: usize = 0;
             while (column < wash_columns) : (column += 1) {
                 const cell = grain(tick *% 131 +% column *% 17 +% row *% 7);
-                const alpha = dmt_wash * (0.08 + 2.1 * cell) * (0.25 + 1.05 * depth);
+                const alpha = self.washStrength() * (0.08 + 2.1 * cell) * (0.25 + 1.05 * depth);
                 const patch = dvui.Rect.Physical{
                     .x = rect.x + cell_w * @as(f32, @floatFromInt(column)),
                     .y = rect.y + cell_h * @as(f32, @floatFromInt(row)),
@@ -2364,10 +2373,23 @@ pub const App = struct {
         }) catch return;
     }
 
-    /// How much of the waveform colour DMT paints back through the fold. The
-    /// fold is dimmed by `dmt_shade` first, so the colour has room to show.
-    const dmt_colour_share: f32 = 1;
-    const dmt_shade: f32 = 0.65;
+    /// What the colour slider means: the fold dims further, the wash and the
+    /// fills come back stronger, and the chroma opens up as it rises.
+    fn foldShade(self: *const App) f32 {
+        return 1 - 0.6 * self.lane_colour;
+    }
+
+    fn colourShare(self: *const App) f32 {
+        return @min(1, 1.2 * self.lane_colour);
+    }
+
+    fn washStrength(self: *const App) f32 {
+        return 0.85 * self.lane_colour;
+    }
+
+    fn chromaAmount(self: *const App) f32 {
+        return 1 + 0.5 * self.lane_colour;
+    }
 
     /// A waveform column: drawn now, and kept while DMT runs, which paints the
     /// coloured fills again through the fold.
@@ -2376,7 +2398,7 @@ pub const App = struct {
         if (self.effect.dmt == .off) return;
         self.colours.append(self.allocator, .{
             .rect = .{ .x = x, .y = y, .w = w, .h = h },
-            .colour = faded(saturated(colour), dmt_colour_share),
+            .colour = faded(saturated(colour, self.chromaAmount()), self.colourShare()),
         }) catch return;
     }
 
@@ -2900,12 +2922,8 @@ fn rectFrom(rect: dvui.Rect.Physical) hit.Rect {
     return .{ .x = rect.x, .y = rect.y, .w = rect.w, .h = rect.h };
 }
 
-/// How far the folded colours are pushed past their own grey.
-const dmt_chroma: f32 = 1.3;
-
-/// How strongly the lane colour fills the stretch around its waveform, and the
-/// grid the wash is broken into so it moves and carries its own aberrations.
-const dmt_wash: f32 = 0.5;
+/// The grid the wash is broken into, so it moves and carries its own
+/// aberrations.
 const wash_columns: usize = 16;
 const wash_rows: usize = 3;
 
@@ -2972,21 +2990,21 @@ fn opposite(colour: dvui.Color) dvui.Color {
 
 /// Pushes a colour away from its own grey, so the coloured fills keep their
 /// chroma while the rest of the folded frame goes dark.
-fn saturated(colour: dvui.Color) dvui.Color {
+fn saturated(colour: dvui.Color, amount: f32) dvui.Color {
     const red: f32 = @floatFromInt(colour.r);
     const green: f32 = @floatFromInt(colour.g);
     const blue: f32 = @floatFromInt(colour.b);
     const grey = 0.29 * red + 0.59 * green + 0.11 * blue;
     return .{
-        .r = chroma(red, grey),
-        .g = chroma(green, grey),
-        .b = chroma(blue, grey),
+        .r = chroma(red, grey, amount),
+        .g = chroma(green, grey, amount),
+        .b = chroma(blue, grey, amount),
         .a = colour.a,
     };
 }
 
-fn chroma(value: f32, grey: f32) u8 {
-    const wide = grey + (value - grey) * dmt_chroma;
+fn chroma(value: f32, grey: f32, amount: f32) u8 {
+    const wide = grey + (value - grey) * amount;
     return @intFromFloat(std.math.clamp(wide, 0, 255));
 }
 
@@ -3249,19 +3267,19 @@ test "the wash takes the hue opposite the lane" {
 
 test "the fold keeps its colours and leaves grey grey" {
     const grey = dvui.Color{ .r = 0x40, .g = 0x40, .b = 0x40, .a = 0xff };
-    const kept = saturated(grey);
+    const kept = saturated(grey, 1.3);
     try std.testing.expectEqual(grey.r, kept.r);
     try std.testing.expectEqual(grey.g, kept.g);
     try std.testing.expectEqual(grey.b, kept.b);
 
     const purple = dvui.Color{ .r = 0xbd, .g = 0x93, .b = 0xf9, .a = 0xff };
-    const wide = saturated(purple);
+    const wide = saturated(purple, 1.3);
     try std.testing.expect(wide.b > purple.b);
     try std.testing.expect(wide.g < wide.b);
 
     const full = dvui.Color{ .r = 0xff, .g = 0x00, .b = 0x00, .a = 0xff };
-    try std.testing.expectEqual(@as(u8, 0xff), saturated(full).r);
-    try std.testing.expectEqual(@as(u8, 0x00), saturated(full).g);
+    try std.testing.expectEqual(@as(u8, 0xff), saturated(full, 1.3).r);
+    try std.testing.expectEqual(@as(u8, 0x00), saturated(full, 1.3).g);
 
     try std.testing.expectEqual(purple, faded(purple, 1));
 }
