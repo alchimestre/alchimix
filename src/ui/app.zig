@@ -538,7 +538,12 @@ pub const App = struct {
         // last frame that reached it.
         errdefer _ = dvui.RenderTarget.setAsCurrent(screen);
 
-        const quads = try geom.solidQuads(arena, self.colours.items);
+        const grown_quads = try arena.alloc(geom.Quad, self.colours.items.len);
+        for (self.colours.items, grown_quads) |quad, *out| {
+            out.* = grown(quad, size.w / 2, size.h / 2, dmt_colour_zoom);
+        }
+
+        const quads = try geom.solidQuads(arena, grown_quads);
         try dvui.renderTriangles(.{
             .vertexes = quads.vertexes,
             .indices = quads.indices,
@@ -2829,6 +2834,23 @@ fn rectFrom(rect: dvui.Rect.Physical) hit.Rect {
 /// How far the folded colours are pushed past their own grey.
 const dmt_chroma: f32 = 1.3;
 
+/// How much larger the coloured fills are drawn than the frame they came from,
+/// so they cover more of the fold than the grey chrome.
+const dmt_colour_zoom: f32 = 1.35;
+
+/// Enlarges a quad about a centre.
+fn grown(quad: geom.Quad, mid_x: f32, mid_y: f32, zoom: f32) geom.Quad {
+    return .{
+        .rect = .{
+            .x = mid_x + (quad.rect.x - mid_x) * zoom,
+            .y = mid_y + (quad.rect.y - mid_y) * zoom,
+            .w = quad.rect.w * zoom,
+            .h = quad.rect.h * zoom,
+        },
+        .colour = quad.colour,
+    };
+}
+
 /// Pushes a colour away from its own grey, so the coloured fills keep their
 /// chroma while the rest of the folded frame goes dark.
 fn saturated(colour: dvui.Color) dvui.Color {
@@ -3077,6 +3099,19 @@ pub const Palette = struct {
     pub const purple = dvui.Color{ .r = 0xbd, .g = 0x93, .b = 0xf9, .a = 0xff };
     pub const red = dvui.Color{ .r = 0xff, .g = 0x55, .b = 0x55, .a = 0xff };
 };
+
+test "the coloured fills grow about the middle of the frame" {
+    const quad = geom.Quad{
+        .rect = .{ .x = 40, .y = 10, .w = 10, .h = 20 },
+        .colour = .{ .r = 1, .g = 2, .b = 3, .a = 255 },
+    };
+    const wide = grown(quad, 100, 50, 2);
+    try std.testing.expectEqual(@as(f32, -20), wide.rect.x);
+    try std.testing.expectEqual(@as(f32, -30), wide.rect.y);
+    try std.testing.expectEqual(@as(f32, 20), wide.rect.w);
+    try std.testing.expectEqual(@as(f32, 40), wide.rect.h);
+    try std.testing.expectEqual(quad.colour, wide.colour);
+}
 
 test "the fold keeps its colours and leaves grey grey" {
     const grey = dvui.Color{ .r = 0x40, .g = 0x40, .b = 0x40, .a = 0xff };
