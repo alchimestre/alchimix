@@ -2298,9 +2298,42 @@ pub const App = struct {
     /// a lane carries colour instead of reading as flat grey in the fold.
     fn waveWash(self: *App, rect: hit.Rect, colour: dvui.Color) void {
         if (self.effect.dmt == .off) return;
+
+        const wash = saturated(opposite(colour));
+        const tick: u64 = @intFromFloat(@floor(self.effect_time * 1.5));
+        const cell_w = rect.w / @as(f32, @floatFromInt(wash_columns));
+        const cell_h = rect.h / @as(f32, @floatFromInt(wash_rows));
+
+        var row: usize = 0;
+        while (row < wash_rows) : (row += 1) {
+            // The bars sit at the bottom of the lane, so the wash is deepest
+            // there and thins out towards the top.
+            const depth = @as(f32, @floatFromInt(wash_rows - row)) / @as(f32, @floatFromInt(wash_rows));
+            var column: usize = 0;
+            while (column < wash_columns) : (column += 1) {
+                const cell = grain(tick *% 131 +% column *% 17 +% row *% 7);
+                const alpha = dmt_wash * (0.3 + 1.2 * cell) * (0.35 + 0.9 * depth);
+                const patch = dvui.Rect.Physical{
+                    .x = rect.x + cell_w * @as(f32, @floatFromInt(column)),
+                    .y = rect.y + cell_h * @as(f32, @floatFromInt(row)),
+                    .w = cell_w + 1,
+                    .h = cell_h + 1,
+                };
+                const split = 1 + 3.5 * cell;
+                self.shiftWash(patch, -split, 0, faded(aberration_red, alpha * 0.45));
+                self.shiftWash(patch, split, 0, faded(aberration_blue, alpha * 0.45));
+                self.colours.append(self.allocator, .{
+                    .rect = patch,
+                    .colour = faded(wash, alpha),
+                }) catch return;
+            }
+        }
+    }
+
+    fn shiftWash(self: *App, patch: dvui.Rect.Physical, dx: f32, dy: f32, colour: dvui.Color) void {
         self.colours.append(self.allocator, .{
-            .rect = .{ .x = rect.x, .y = rect.y, .w = rect.w, .h = rect.h },
-            .colour = faded(saturated(colour), dmt_wash),
+            .rect = .{ .x = patch.x + dx, .y = patch.y + dy, .w = patch.w, .h = patch.h },
+            .colour = colour,
         }) catch return;
     }
 
@@ -2843,8 +2876,25 @@ fn rectFrom(rect: dvui.Rect.Physical) hit.Rect {
 /// How far the folded colours are pushed past their own grey.
 const dmt_chroma: f32 = 1.3;
 
-/// How strongly the lane colour fills the stretch around its waveform.
+/// How strongly the lane colour fills the stretch around its waveform, and the
+/// grid the wash is broken into so it moves and carries its own aberrations.
 const dmt_wash: f32 = 0.5;
+const wash_columns: usize = 16;
+const wash_rows: usize = 3;
+
+/// The two channels the wash splits into, so its grain reads as colour fringing.
+const aberration_red = dvui.Color{ .r = 0xff, .g = 0x2a, .b = 0x38, .a = 0xff };
+const aberration_blue = dvui.Color{ .r = 0x2e, .g = 0x6a, .b = 0xff, .a = 0xff };
+
+/// White noise in `[0, 1)`, from a counter, so a wash can be redrawn each frame
+/// without carrying state.
+fn grain(seed: u64) f32 {
+    var hash = seed *% 0x9e37_79b9_7f4a_7c15;
+    hash ^= hash >> 31;
+    hash *%= 0xbf58_476d_1ce4_e5b9;
+    hash ^= hash >> 27;
+    return @as(f32, @floatFromInt(hash >> 40)) / @as(f32, @floatFromInt(@as(u64, 1) << 24));
+}
 
 /// The hue half a turn away from `colour`, so a lane's wash contrasts its
 /// waveform instead of blurring into it.
@@ -3141,6 +3191,21 @@ pub const Palette = struct {
     pub const purple = dvui.Color{ .r = 0xbd, .g = 0x93, .b = 0xf9, .a = 0xff };
     pub const red = dvui.Color{ .r = 0xff, .g = 0x55, .b = 0x55, .a = 0xff };
 };
+
+test "the wash grain stays in range and moves with the counter" {
+    var low: f32 = 1;
+    var high: f32 = 0;
+    for (0..512) |step| {
+        const value = grain(step);
+        try std.testing.expect(value >= 0 and value < 1);
+        low = @min(low, value);
+        high = @max(high, value);
+    }
+    // The band is spread across the whole range, not clustered.
+    try std.testing.expect(low < 0.1);
+    try std.testing.expect(high > 0.9);
+    try std.testing.expect(grain(7) != grain(8));
+}
 
 test "the wash takes the hue opposite the lane" {
     const blue = dvui.Color{ .r = 0x20, .g = 0x60, .b = 0xf0, .a = 0xff };
