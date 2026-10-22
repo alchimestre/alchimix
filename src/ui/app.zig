@@ -518,7 +518,7 @@ pub const App = struct {
 
         if (self.effect.dmt != .off) {
             try dmt.draw(source, arena, self.effect_clock, size, stills, dmt_shade, 0, self.lane_rings);
-            try self.paintColours(arena, screen, size, stills);
+            try self.paintColours(arena, screen, size);
             // The colour pass folds the whole layer, so the stills have to come
             // back over it or the controls are painted with lane colour.
             try geom.repaint(arena, stills, size, texture);
@@ -535,7 +535,7 @@ pub const App = struct {
 
     /// The coloured fills the frame kept, folded through the same map at half
     /// strength, so the funnel keeps their weight without drowning the type.
-    fn paintColours(self: *App, arena: std.mem.Allocator, screen: dvui.RenderTarget, size: dvui.Size.Physical, stills: []const dvui.Rect.Physical) !void {
+    fn paintColours(self: *App, arena: std.mem.Allocator, screen: dvui.RenderTarget, size: dvui.Size.Physical) !void {
         if (self.colours.items.len == 0) return;
 
         const layer = try sizedTarget(&self.colour_target, size);
@@ -554,7 +554,7 @@ pub const App = struct {
 
         _ = dvui.RenderTarget.setAsCurrent(screen);
         const layer_texture = try dvui.textureFromTarget(layer);
-        try dmt.draw(layer_texture, arena, self.effect_clock, size, stills, 1, 0, self.lane_rings);
+        try dmt.draw(layer_texture, arena, self.effect_clock, size, &.{}, 1, 0, self.lane_rings);
     }
 
     /// LSD's output copy, kept for as long as both modes run.
@@ -684,7 +684,15 @@ pub const App = struct {
             }
         }
 
-        self.still(rectFrom(column.data().borderRectScale().r));
+        // The whole chrome strip stays unfolded: the tunnel's outer rings
+        // magnify whatever sits here into wide bands.
+        const block = rectFrom(column.data().borderRectScale().r);
+        self.still(.{
+            .x = 0,
+            .y = 0,
+            .w = dvui.currentWindow().rect_pixels.w,
+            .h = block.y + block.h + 2,
+        });
     }
 
     /// A label with a slider hard against the right edge. Returns the new
