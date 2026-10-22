@@ -234,11 +234,6 @@ pub const App = struct {
     effect_target: ?dvui.Texture.Target = null,
     /// LSD's output while DMT folds it. Only allocated when both run.
     lsd_target: ?dvui.Texture.Target = null,
-    /// Picks the aberrations, figures and flares DMT seeds its source frame
-    /// with.
-    seed: u64 = 0,
-    /// Shows the seeded scene on the plain window, with no fold over it.
-    seed_preview: bool = false,
     /// The frame's coloured fills, kept while DMT runs.
     colours: std.ArrayListUnmanaged(geom.Quad) = .empty,
     colour_target: ?dvui.Texture.Target = null,
@@ -313,7 +308,6 @@ pub const App = struct {
             .crate = pl.crate.Crate.init(allocator),
             .hit_map = hit.HitMap.init(allocator),
         };
-        app.seed = freshSeed(io);
         app.playlists = library.playlists() catch &.{};
         return app;
     }
@@ -433,7 +427,6 @@ pub const App = struct {
         self.frameBody();
         frameFooter(self);
         self.drawGhost();
-        if (self.effect.dmt != .off or self.seed_preview) self.seedFrame();
 
         if (self.pending_select) |index| {
             self.pending_select = null;
@@ -575,7 +568,6 @@ pub const App = struct {
     }
 
     fn toggleEffect(self: *App, which: EffectMode) void {
-        self.seed_preview = false;
         switch (which) {
             .lsd => self.effect.look = if (self.effect.look == .drift) .none else .drift,
             .mushroom => self.effect.look = if (self.effect.look == .mushroom) .none else .mushroom,
@@ -630,38 +622,10 @@ pub const App = struct {
             self.effectChip("LSD", .lsd, .lsd, 7120);
             self.effectChip(if (self.emoji_font) "🍄" else ".-.", .mushroom, .mushroom, 7122);
             self.effectChip("DMT", .dmt, .dmt, 7125);
-            self.seedChip();
             if (self.effect.look == .mushroom) self.growChip();
         }
 
         self.effectSpeed();
-    }
-
-    /// Redraws the seeded decoration on the spot, so a seed can be judged
-    /// without waiting for the fold to drift.
-    fn seedChip(self: *App) void {
-        var chip = dvui.box(@src(), .{ .dir = .horizontal }, .{
-            .gravity_y = 0.5,
-            .margin = .{ .x = 3 },
-            .padding = .{ .x = 8, .y = 0 },
-            .min_size_content = .{ .h = 24 },
-            .background = true,
-            .color_fill = .{ .color = if (self.seed_preview) Palette.selection else Palette.field },
-            .corners = square,
-            .id_extra = 7170,
-        });
-        defer chip.deinit();
-
-        labelStyled(@src(), "seed", .{
-            .gravity_y = 0.5,
-            .color_text = .{ .color = Palette.heat4 },
-            .font = metaFont(),
-            .id_extra = 7171,
-        });
-
-        const rect = rectFrom(chip.data().contentRectScale().r);
-        self.still(rect);
-        self.hit_map.append(rect, .reseed);
     }
 
     /// One press grows the plant a stage, so the growth halos can be watched
@@ -1556,13 +1520,6 @@ pub const App = struct {
             .toggle_lsd => self.toggleEffect(.lsd),
             .toggle_mushroom => self.toggleEffect(.mushroom),
             .toggle_dmt => self.toggleEffect(.dmt),
-            .reseed => {
-                self.effect.look = .none;
-                self.effect.dmt = .off;
-                self.seed_preview = !self.seed_preview;
-                if (self.seed_preview) self.seed = freshSeed(self.io);
-                dvui.refresh(null, @src(), null);
-            },
             .select_playlist => |index| {
                 if (index >= self.playlists.len) return;
                 self.selectPlaylist(index);
@@ -2335,8 +2292,8 @@ pub const App = struct {
 
     /// How much of the waveform colour DMT paints back through the fold. The
     /// fold is dimmed by `dmt_shade` first, so the colour has room to show.
-    const dmt_colour_share: f32 = 0.95;
-    const dmt_shade: f32 = 0.62;
+    const dmt_colour_share: f32 = 1;
+    const dmt_shade: f32 = 0.65;
 
     /// A waveform column: drawn now, and kept while DMT runs, which paints the
     /// coloured fills again through the fold.
@@ -2345,7 +2302,7 @@ pub const App = struct {
         if (self.effect.dmt == .off) return;
         self.colours.append(self.allocator, .{
             .rect = .{ .x = x, .y = y, .w = w, .h = h },
-            .colour = faded(colour, dmt_colour_share),
+            .colour = faded(saturated(colour), dmt_colour_share),
         }) catch return;
     }
 
@@ -2404,15 +2361,6 @@ pub const App = struct {
 
     /// The dragged block, translucent under the pointer, so the thing in hand is
     /// visible rather than only implied by the drop line.
-    /// Paints the seeded aberrations into the frame the fold is about to
-    /// capture, so the tunnel repeats them.
-    fn seedFrame(self: *App) void {
-        const window = dvui.currentWindow();
-        const rect = window.rect_pixels;
-        const tris = dmt.decorate(window.arena(), self.seed, .{ .w = rect.w, .h = rect.h }) catch return;
-        dvui.renderTriangles(tris, null) catch return;
-    }
-
     fn drawGhost(self: *App) void {
         const track = self.drag.carriedTrack() orelse
             if (self.drag.carriedBlock()) |index|
@@ -2878,12 +2826,27 @@ fn rectFrom(rect: dvui.Rect.Physical) hit.Rect {
     return .{ .x = rect.x, .y = rect.y, .w = rect.w, .h = rect.h };
 }
 
-/// A new seed per launch and per press. The awake clock is enough: the
-/// decoration needs to differ, not to be unpredictable.
-fn freshSeed(io: std.Io) u64 {
-    const nanos = std.Io.Timestamp.now(io, .awake).nanoseconds;
-    const ticks: u64 = @truncate(@as(u96, @bitCast(nanos)));
-    return ticks *% 0x9e37_79b9_7f4a_7c15;
+/// How far the folded colours are pushed past their own grey.
+const dmt_chroma: f32 = 1.3;
+
+/// Pushes a colour away from its own grey, so the coloured fills keep their
+/// chroma while the rest of the folded frame goes dark.
+fn saturated(colour: dvui.Color) dvui.Color {
+    const red: f32 = @floatFromInt(colour.r);
+    const green: f32 = @floatFromInt(colour.g);
+    const blue: f32 = @floatFromInt(colour.b);
+    const grey = 0.29 * red + 0.59 * green + 0.11 * blue;
+    return .{
+        .r = chroma(red, grey),
+        .g = chroma(green, grey),
+        .b = chroma(blue, grey),
+        .a = colour.a,
+    };
+}
+
+fn chroma(value: f32, grey: f32) u8 {
+    const wide = grey + (value - grey) * dmt_chroma;
+    return @intFromFloat(std.math.clamp(wide, 0, 255));
 }
 
 fn faded(colour: dvui.Color, amount: f32) dvui.Color {
@@ -3114,6 +3077,25 @@ pub const Palette = struct {
     pub const purple = dvui.Color{ .r = 0xbd, .g = 0x93, .b = 0xf9, .a = 0xff };
     pub const red = dvui.Color{ .r = 0xff, .g = 0x55, .b = 0x55, .a = 0xff };
 };
+
+test "the fold keeps its colours and leaves grey grey" {
+    const grey = dvui.Color{ .r = 0x40, .g = 0x40, .b = 0x40, .a = 0xff };
+    const kept = saturated(grey);
+    try std.testing.expectEqual(grey.r, kept.r);
+    try std.testing.expectEqual(grey.g, kept.g);
+    try std.testing.expectEqual(grey.b, kept.b);
+
+    const purple = dvui.Color{ .r = 0xbd, .g = 0x93, .b = 0xf9, .a = 0xff };
+    const wide = saturated(purple);
+    try std.testing.expect(wide.b > purple.b);
+    try std.testing.expect(wide.g < wide.b);
+
+    const full = dvui.Color{ .r = 0xff, .g = 0x00, .b = 0x00, .a = 0xff };
+    try std.testing.expectEqual(@as(u8, 0xff), saturated(full).r);
+    try std.testing.expectEqual(@as(u8, 0x00), saturated(full).g);
+
+    try std.testing.expectEqual(purple, faded(purple, 1));
+}
 
 test "a mode chip runs itself and stops only itself" {
     try std.testing.expectEqual(Dmt.plain, pressed(.off, .plain));

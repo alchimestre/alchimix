@@ -26,9 +26,6 @@ const twist: f32 = 0.55;
 const speed: f32 = 1.6;
 /// The pinned look: the window border never samples outside the frame.
 pub const border_px: f32 = 26;
-/// Fold brightness. The frame is mostly grey chrome, so the fold is damped and
-/// the coloured content carries the picture instead.
-pub const damp: f32 = 0.55;
 /// Pixels between a still rect and the full fold around it.
 const calm: f32 = 18;
 /// Vertex every this many physical pixels. Mirror seams are sharp, so the grid
@@ -219,93 +216,6 @@ pub fn draw(
     try geom.repaint(arena, stills, size, texture);
 }
 
-/// Filled figures and flares, seeded so one number redraws the same frame. They
-/// are laid out on a jittered grid, so the window is covered evenly, and drawn
-/// into the capture before the fold, so the tunnel repeats them.
-pub fn decorate(arena: std.mem.Allocator, seed: u64, size: dvui.Size.Physical) !dvui.Triangles {
-    var glow = geom.Glow{ .arena = arena };
-    const bounds = dvui.Rect.Physical{ .x = 0, .y = 0, .w = size.w, .h = size.h };
-    if (size.w <= 0 or size.h <= 0) return glow.triangles(bounds);
-
-    var gen = std.Random.DefaultPrng.init(seed);
-    const random = gen.random();
-    const span = @min(size.w, size.h);
-    const across: u32 = 7;
-    const down: u32 = 5;
-    const gap_x: f32 = size.w / @as(f32, @floatFromInt(across));
-    const gap_y: f32 = size.h / @as(f32, @floatFromInt(down));
-
-    var row: u32 = 0;
-    while (row < down) : (row += 1) {
-        var column: u32 = 0;
-        while (column < across) : (column += 1) {
-            const inset = span * 0.06;
-            const slot = dvui.Point.Physical{
-                .x = std.math.clamp((gap_x * @as(f32, @floatFromInt(column)) + gap_x / 2) + (random.float(f32) - 0.5) * gap_x * 0.6, inset, size.w - inset),
-                .y = std.math.clamp((gap_y * @as(f32, @floatFromInt(row)) + gap_y / 2) + (random.float(f32) - 0.5) * gap_y * 0.6, inset, size.h - inset),
-            };
-            if (random.float(f32) < 0.25) continue;
-
-            if (random.float(f32) < 0.3) {
-                const radius = span * (0.03 + 0.03 * random.float(f32));
-                glow.disc(slot, radius, radius * (0.7 + 0.6 * random.float(f32)), lit(0xff, 0xd7, 0x5e, 0.55)) catch {};
-                continue;
-            }
-
-            const sides = 3 + random.uintLessThan(usize, 3);
-            const radius = span * (0.018 + 0.022 * random.float(f32));
-            const shape = figure(&random, slot, radius, sides);
-            const colour = switch (random.uintLessThan(u8, 4)) {
-                0 => lit(0xbd, 0x93, 0xf9, 0.90),
-                1 => lit(0x50, 0xfa, 0x7b, 0.86),
-                2 => lit(0xff, 0xb8, 0x6c, 0.88),
-                else => lit(0xff, 0x55, 0x55, 0.84),
-            };
-            const red = offset(shape, -2);
-            const blue = offset(shape, 2);
-            glow.polygon(red[0..shape.count], lit(0xff, 0x20, 0x30, 0.60)) catch {};
-            glow.polygon(blue[0..shape.count], lit(0x20, 0x60, 0xff, 0.62)) catch {};
-            glow.polygon(shape.points[0..shape.count], colour) catch {};
-        }
-    }
-
-    return glow.triangles(bounds);
-}
-
-fn lit(r: u8, g: u8, b: u8, alpha: f32) dvui.Color.PMA {
-    return .{
-        .r = @intFromFloat(@as(f32, @floatFromInt(r)) * alpha),
-        .g = @intFromFloat(@as(f32, @floatFromInt(g)) * alpha),
-        .b = @intFromFloat(@as(f32, @floatFromInt(b)) * alpha),
-        .a = @intFromFloat(alpha * 255),
-    };
-}
-
-const Figure = struct { points: [6]dvui.Point.Physical, count: usize };
-
-/// A regular polygon with a fixed radius, squashed on each axis. The fan that
-/// fills it needs a convex outline, so the corners keep their distance.
-fn figure(random: *const std.Random, centre: dvui.Point.Physical, radius: f32, sides: usize) Figure {
-    var shape = Figure{ .points = undefined, .count = @min(sides, 6) };
-    const angle: f32 = random.float(f32) * std.math.tau;
-    const squash_x = 0.6 + 0.5 * random.float(f32);
-    const squash_y = 0.6 + 0.5 * random.float(f32);
-    for (shape.points[0..shape.count], 0..) |*point, corner| {
-        const turn = angle + @as(f32, @floatFromInt(corner)) / @as(f32, @floatFromInt(shape.count)) * std.math.tau;
-        point.* = .{
-            .x = centre.x + @cos(turn) * radius * squash_x,
-            .y = centre.y + @sin(turn) * radius * squash_y,
-        };
-    }
-    return shape;
-}
-
-fn offset(source: Figure, by: f32) [6]dvui.Point.Physical {
-    var moved: [6]dvui.Point.Physical = undefined;
-    for (source.points, 0..) |point, at| moved[at] = .{ .x = point.x + by, .y = point.y };
-    return moved;
-}
-
 /// Shared effect-speed range, driven by the slider under the mode chips.
 pub const min_speed: f32 = 0.2;
 pub const max_speed: f32 = 2;
@@ -475,50 +385,10 @@ test "the grid fits one index buffer at any window size" {
 
 test "the fold is drawn at the shade it is given" {
     try std.testing.expectEqual(@as(u8, 255), shadeColour(1).r);
-    try std.testing.expectEqual(@as(u8, 140), shadeColour(damp).r);
+    try std.testing.expectEqual(@as(u8, 140), shadeColour(0.55).r);
     try std.testing.expectEqual(@as(u8, 0), shadeColour(0).r);
-    try std.testing.expectEqual(@as(u8, 140), shadeColour(damp).g);
-    try std.testing.expectEqual(@as(u8, 255), shadeColour(damp).a);
-}
-
-test "the seeded figures stay inside the frame and keep their distance" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-
-    const size = dvui.Size.Physical{ .w = 1180, .h = 720 };
-    var seed: u64 = 1;
-    while (seed <= 8) : (seed += 1) {
-        const shown = try decorate(arena.allocator(), seed, size);
-        try std.testing.expect(shown.vertexes.len > 0);
-        for (shown.vertexes) |vertex| {
-            try std.testing.expect(vertex.pos.x >= -4 and vertex.pos.x <= size.w + 4);
-            try std.testing.expect(vertex.pos.y >= -4 and vertex.pos.y <= size.h + 4);
-        }
-    }
-}
-
-test "the seeded decoration repeats for one seed and moves for another" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-
-    const size = dvui.Size.Physical{ .w = 800, .h = 600 };
-    const first = try decorate(arena.allocator(), 7, size);
-    const again = try decorate(arena.allocator(), 7, size);
-    const other = try decorate(arena.allocator(), 8, size);
-
-    try std.testing.expect(first.vertexes.len > 0);
-    try std.testing.expectEqual(first.vertexes.len, again.vertexes.len);
-    for (first.vertexes, again.vertexes) |shown, repeat| {
-        try std.testing.expectEqual(shown.pos.x, repeat.pos.x);
-        try std.testing.expectEqual(shown.pos.y, repeat.pos.y);
-    }
-
-    const shared = @min(first.vertexes.len, other.vertexes.len);
-    var moved = first.vertexes.len != other.vertexes.len;
-    for (first.vertexes[0..shared], other.vertexes[0..shared]) |shown, fresh| {
-        if (shown.pos.x != fresh.pos.x or shown.pos.y != fresh.pos.y) moved = true;
-    }
-    try std.testing.expect(moved);
+    try std.testing.expectEqual(@as(u8, 140), shadeColour(0.55).g);
+    try std.testing.expectEqual(@as(u8, 255), shadeColour(0.55).a);
 }
 
 test "the pinned look holds the window border still" {
