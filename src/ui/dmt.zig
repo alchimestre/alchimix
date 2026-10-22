@@ -16,6 +16,10 @@ const dvui = @import("dvui");
 const geom = @import("geom.zig");
 
 /// Rings between the centre and the rim.
+/// How far one kick pushes the rings outward, in ring widths. A beat swells
+/// the lanes and the gap between beats lets them settle back.
+const kick_push: f32 = 0.35;
+
 /// Rings per e-fold of radius: the default granularity of the tunnel.
 pub const rings_default: f32 = 2.2;
 
@@ -96,6 +100,7 @@ pub fn fold(
     stills: []const dvui.Rect.Physical,
     border: f32,
     rings: f32,
+    heart: f32,
 ) dvui.Point.Physical {
     if (size.w <= 0 or size.h <= 0) return p;
     const strength = clean(p.x, p.y, size, stills, border);
@@ -110,7 +115,7 @@ pub fn fold(
 
     // Tunnel: the log radius picks the ring, and the phase pushes every ring
     // outward, so the frame is always leaving the fulcrum.
-    const depth = @log(radius / half + 0.01) * rings - rush_phase;
+    const depth = @log(radius / half + 0.01) * rings - rush_phase - heart * kick_push;
     const level = @floor(depth);
     const band = depth - level;
 
@@ -159,6 +164,7 @@ pub fn mesh(
     shade: f32,
     border: f32,
     rings: f32,
+    heart: f32,
 ) !geom.Mesh {
     const shape = gridShape(size);
     const across = shape.columns + 1;
@@ -172,7 +178,7 @@ pub fn mesh(
         const y = size.h * @as(f32, @floatFromInt(row)) / down;
         for (0..across) |column| {
             const x = size.w * @as(f32, @floatFromInt(column)) / right;
-            const source = fold(.{ .x = x, .y = y }, clock, size, stills, border, rings);
+            const source = fold(.{ .x = x, .y = y }, clock, size, stills, border, rings, heart);
             vertexes[at] = .{
                 .pos = .{ .x = x, .y = y },
                 .col = tint,
@@ -210,11 +216,12 @@ pub fn draw(
     shade: f32,
     border: f32,
     rings: f32,
+    heart: f32,
 ) !void {
     if (size.w <= 0 or size.h <= 0) return;
     const bounds = dvui.Rect.Physical{ .x = 0, .y = 0, .w = size.w, .h = size.h };
 
-    const grid = try mesh(arena, clock, size, stills, shade, border, rings);
+    const grid = try mesh(arena, clock, size, stills, shade, border, rings, heart);
 
     try dvui.renderTriangles(.{
         .vertexes = grid.vertexes,
@@ -279,7 +286,7 @@ const chips = [_]dvui.Rect.Physical{
 test "the chips do not move" {
     const middle = dvui.Point.Physical{ .x = 1062, .y = 26 };
     for (0..40) |step| {
-        const shown = fold(middle, .{ .rush = @as(f64, @floatFromInt(step)) * 0.6 }, framesize, &chips, 0, rings_default);
+        const shown = fold(middle, .{ .rush = @as(f64, @floatFromInt(step)) * 0.6 }, framesize, &chips, 0, rings_default, 0);
         try std.testing.expectEqual(@as(f32, 1062), shown.x);
         try std.testing.expectEqual(@as(f32, 26), shown.y);
     }
@@ -293,7 +300,7 @@ test "everything outside the stills is transformed" {
             .x = @as(f32, @floatFromInt(step)) * 59,
             .y = 4,
         };
-        const shown = fold(p, .{ .rush = 2.5 }, framesize, &chips, 0, rings_default);
+        const shown = fold(p, .{ .rush = 2.5 }, framesize, &chips, 0, rings_default, 0);
         if (@abs(shown.x - p.x) + @abs(shown.y - p.y) > 5) moved += 1;
     }
     try std.testing.expect(moved > 10);
@@ -307,7 +314,7 @@ test "the fold always samples inside the frame" {
                 .x = @as(f32, @floatFromInt(column)) * 29.5,
                 .y = @as(f32, @floatFromInt(row)) * 18.0,
             };
-            const shown = fold(p, .{ .rush = time }, framesize, &chips, 0, rings_default);
+            const shown = fold(p, .{ .rush = time }, framesize, &chips, 0, rings_default, 0);
             try std.testing.expect(shown.x >= 0 and shown.x <= framesize.w);
             try std.testing.expect(shown.y >= 0 and shown.y <= framesize.h);
         }
@@ -325,7 +332,7 @@ test "the frame is folded, not copied" {
                 .x = 60 + @as(f32, @floatFromInt(column)) * 55,
                 .y = 60 + @as(f32, @floatFromInt(row)) * 32,
             };
-            const shown = fold(p, .{ .rush = time }, framesize, &chips, 0, rings_default);
+            const shown = fold(p, .{ .rush = time }, framesize, &chips, 0, rings_default, 0);
             if (@abs(shown.x - p.x) + @abs(shown.y - p.y) > 20) folded += 1;
         }
     }
@@ -334,8 +341,8 @@ test "the frame is folded, not copied" {
 
 test "the mirror axes turn with the clock" {
     const p = dvui.Point.Physical{ .x = 700, .y = 300 };
-    const before = fold(p, .{ .rush = 0 }, framesize, &chips, 0, rings_default);
-    const after = fold(p, .{ .rush = 1 }, framesize, &chips, 0, rings_default);
+    const before = fold(p, .{ .rush = 0 }, framesize, &chips, 0, rings_default, 0);
+    const after = fold(p, .{ .rush = 1 }, framesize, &chips, 0, rings_default, 0);
     try std.testing.expect(@abs(before.x - after.x) + @abs(before.y - after.y) > 0.5);
 }
 
@@ -425,12 +432,12 @@ test "the pinned look holds the window border still" {
     const clock = Clock{ .rush = 40, .turn = 7 };
 
     const edge = dvui.Point.Physical{ .x = 0, .y = 360 };
-    const shown = fold(edge, clock, framesize, &chips, border_px, rings_default);
+    const shown = fold(edge, clock, framesize, &chips, border_px, rings_default, 0);
     try std.testing.expectEqual(edge.x, shown.x);
     try std.testing.expectEqual(edge.y, shown.y);
 
     // Past the border the fold runs again.
     const inside = dvui.Point.Physical{ .x = 200, .y = 360 };
-    const moved = fold(inside, clock, framesize, &chips, border_px, rings_default);
+    const moved = fold(inside, clock, framesize, &chips, border_px, rings_default, 0);
     try std.testing.expect(@abs(moved.x - inside.x) + @abs(moved.y - inside.y) > 1);
 }

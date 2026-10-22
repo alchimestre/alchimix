@@ -254,6 +254,9 @@ pub const App = struct {
     /// dims to, the wash under the lanes, the share of the fills painted back
     /// and the chroma they are pushed to all follow it.
     lane_colour: f32 = 0.6,
+    /// The kick driving the lane pulse, and the follower that shapes it.
+    heartbeat: bool = true,
+    beat_power: f32 = 0,
     // Six effect chips, the speed slider, the garden panel and its chrome all
     // want a slot, so the list is sized for the panel too.
     stills: [24]dvui.Rect.Physical = @splat(.{}),
@@ -397,6 +400,7 @@ pub const App = struct {
         // The whole frame has to exist before it can be warped, so while the
         // mode runs it is drawn into an offscreen copy and blitted back.
         self.colours.clearRetainingCapacity();
+        self.pulseKick();
         const previous = self.capture();
 
         var root = dvui.box(@src(), .{ .dir = .vertical }, .{
@@ -521,7 +525,7 @@ pub const App = struct {
         }
 
         if (self.effect.dmt != .off) {
-            try dmt.draw(source, arena, self.effect_clock, size, stills, self.foldShade(), 0, self.lane_rings);
+            try dmt.draw(source, arena, self.effect_clock, size, stills, self.foldShade(), 0, self.lane_rings, self.beat_power);
             try self.paintColours(arena, screen, size);
             // The colour pass folds the whole layer, so the stills have to come
             // back over it or the controls are painted with lane colour.
@@ -561,7 +565,7 @@ pub const App = struct {
 
         _ = dvui.RenderTarget.setAsCurrent(screen);
         const layer_texture = try dvui.textureFromTarget(layer);
-        try dmt.draw(layer_texture, arena, self.effect_clock, size, &.{}, 1, 0, self.lane_rings);
+        try dmt.draw(layer_texture, arena, self.effect_clock, size, &.{}, 1, 0, self.lane_rings, self.beat_power);
     }
 
     /// LSD's output copy, kept for as long as both modes run.
@@ -695,9 +699,52 @@ pub const App = struct {
                 self.lane_colour = fraction;
                 dvui.refresh(null, @src(), null);
             }
+
+            self.heartbeatChip();
         }
 
         self.still(rectFrom(column.data().borderRectScale().r));
+    }
+
+    /// The kick pulse switch, under the colour slider.
+    fn heartbeatChip(self: *App) void {
+        var chip = dvui.box(@src(), .{ .dir = .horizontal }, .{
+            .gravity_x = 1,
+            .margin = .{ .y = 2 },
+            .padding = .{ .x = 8, .y = 2 },
+            .background = true,
+            .color_fill = .{ .color = if (self.heartbeat) Palette.selection else Palette.field },
+            .corners = square,
+            .id_extra = 7270,
+        });
+        defer chip.deinit();
+
+        labelStyled(@src(), "heartbeat", .{
+            .gravity_y = 0.5,
+            .color_text = .{ .color = if (self.heartbeat) Palette.heat4 else Palette.muted },
+            .font = metaFont(),
+            .id_extra = 7271,
+        });
+
+        self.hit_map.append(rectFrom(chip.data().contentRectScale().r), .heartbeat);
+    }
+
+    /// Turns the mix's bass into one pulse: instant attack, a decay of about a
+    /// fifth of a second, and the loudest low band across the lanes.
+    fn pulseKick(self: *App) void {
+        const delta = std.math.clamp(dvui.currentWindow().secs_since_last_frame, 0, 0.25);
+        if (!self.heartbeat) {
+            self.beat_power = 0;
+            return;
+        }
+
+        var spectrum: [pl.mixer.spectrum_bins]f32 = @splat(0);
+        var bass: f32 = 0;
+        for (0..self.lane_count) |index| {
+            self.transport.spectrum(index, &spectrum);
+            for (spectrum[0..kick_bins]) |band| bass = @max(bass, band);
+        }
+        self.beat_power = beatFollow(self.beat_power, bass, delta);
     }
 
     /// A label with a slider hard against the right edge. Returns the new
@@ -1395,7 +1442,7 @@ pub const App = struct {
         // DMT runs on top of LSD, so a press follows the tunnel first and the
         // drift underneath it second.
         var shown = dvui.Point.Physical{ .x = p.x, .y = p.y };
-        if (self.effect.dmt != .off) shown = dmt.fold(shown, self.effect_clock, size, stills, 0, self.lane_rings);
+        if (self.effect.dmt != .off) shown = dmt.fold(shown, self.effect_clock, size, stills, 0, self.lane_rings, self.beat_power);
         switch (self.effect.look) {
             .drift => shown = lsd.sample(shown, self.effect_time, size, stills, 1),
             .mushroom => shown = lsd.sample(shown, self.effect_time, size, stills, mushroom.reach),
@@ -1558,6 +1605,10 @@ pub const App = struct {
             .toggle_lsd => self.toggleEffect(.lsd),
             .toggle_mushroom => self.toggleEffect(.mushroom),
             .toggle_dmt => self.toggleEffect(.dmt),
+            .heartbeat => {
+                self.heartbeat = !self.heartbeat;
+                dvui.refresh(null, @src(), null);
+            },
             .select_playlist => |index| {
                 if (index >= self.playlists.len) return;
                 self.selectPlaylist(index);
@@ -2922,6 +2973,18 @@ fn rectFrom(rect: dvui.Rect.Physical) hit.Rect {
     return .{ .x = rect.x, .y = rect.y, .w = rect.w, .h = rect.h };
 }
 
+/// The kick: the loudest of the lowest bands, once past the floor.
+const kick_bins: usize = 3;
+const kick_floor: f32 = 0.18;
+const kick_fall: f32 = 0.18;
+
+/// One step of the kick follower: the attack is instant, so the frame a kick
+/// lands on already shows it, and the level falls away over `kick_fall`.
+fn beatFollow(previous: f32, bass: f32, delta: f32) f32 {
+    const kick = std.math.clamp((bass - kick_floor) / (1 - kick_floor), 0, 1);
+    return @max(kick, previous * @exp(-@max(delta, 0) / kick_fall));
+}
+
 /// The grid the wash is broken into, so it moves and carries its own
 /// aberrations.
 const wash_columns: usize = 16;
@@ -3250,6 +3313,23 @@ test "the wash grain stays in range and moves with the counter" {
     try std.testing.expect(low < 0.1);
     try std.testing.expect(high > 0.9);
     try std.testing.expect(grain(7) != grain(8));
+}
+
+test "a kick lands at once and fades over its tail" {
+    const loud = beatFollow(0, 0.8, @as(f32, 1) / 60);
+    try std.testing.expect(loud > 0.7);
+
+    // Half a tail later most of it is gone, and none of it comes back.
+    const softened = beatFollow(loud, 0, kick_fall);
+    try std.testing.expect(softened < loud * 0.4);
+    try std.testing.expect(beatFollow(softened, 0, kick_fall) < softened);
+
+    // Silence never lifts the level, and the floor keeps noise quiet.
+    try std.testing.expectEqual(@as(f32, 0), beatFollow(0, 0.15, 0.016));
+    // A quiet frame only lets the kick decay, never cut it short.
+    const after = beatFollow(loud, 0.1, 0.016);
+    try std.testing.expect(after < loud);
+    try std.testing.expect(after > loud * 0.85);
 }
 
 test "the wash takes the hue opposite the lane" {
