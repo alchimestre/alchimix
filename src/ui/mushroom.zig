@@ -420,6 +420,7 @@ pub fn draw(
 
     try dvui.renderTriangles(try lsd.wash(arena, time, size, shimmer), null);
     try undergrowth(state, time, size, still, bpm, ascii);
+    try halos(arena, state, time, size);
     try geom.repaint(arena, still, size, texture);
 }
 
@@ -432,6 +433,65 @@ pub fn plantRect(size: dvui.Size.Physical) dvui.Rect.Physical {
         .w = size.w * 0.20,
         .h = size.h * 0.42,
     };
+}
+
+/// Growth halos are light, not glyphs: two additive discs per mushroom, a wide
+/// soft bloom and a small bright core.
+fn halos(arena: std.mem.Allocator, state: *const State, now: f64, size: dvui.Size.Physical) !void {
+    var glow = geom.Glow{ .arena = arena };
+
+    for (state.big) |bush| {
+        {
+            const t = haloOpen(bush.halo, now) orelse continue;
+            const bloom = size.w * (0.030 + 0.030 * t);
+            const fade = (1 - t) * (1 - t);
+            const at = dvui.Point.Physical{ .x = bush.x * size.w, .y = bush.y * size.h };
+            try glow.disc(at, bloom, bloom * 0.75, .{
+                .r = @intFromFloat(120 * fade),
+                .g = @intFromFloat(96 * fade),
+                .b = @intFromFloat(30 * fade),
+                .a = 0,
+            });
+            try glow.disc(at, bloom * 0.28, bloom * 0.28, .{
+                .r = @intFromFloat(200 * fade),
+                .g = @intFromFloat(180 * fade),
+                .b = @intFromFloat(110 * fade),
+                .a = 0,
+            });
+        }
+    }
+
+    for (state.mushrooms) |plant| {
+        {
+            const t = haloOpen(plant.halo, now) orelse continue;
+            const bloom = size.w * (0.016 + 0.018 * t);
+            const fade = (1 - t) * (1 - t);
+            const at = dvui.Point.Physical{ .x = plant.x * size.w, .y = plant.y * size.h };
+            try glow.disc(at, bloom, bloom, .{
+                .r = @intFromFloat(110 * fade),
+                .g = @intFromFloat(88 * fade),
+                .b = @intFromFloat(28 * fade),
+                .a = 0,
+            });
+            try glow.disc(at, bloom * 0.3, bloom * 0.3, .{
+                .r = @intFromFloat(190 * fade),
+                .g = @intFromFloat(170 * fade),
+                .b = @intFromFloat(100 * fade),
+                .a = 0,
+            });
+        }
+    }
+
+    if (glow.vertexes.items.len == 0) return;
+    const bounds = dvui.Rect.Physical{ .x = 0, .y = 0, .w = size.w, .h = size.h };
+    try dvui.renderTriangles(try glow.triangles(bounds), null);
+}
+
+/// How far through its second a halo is, or null when it is not showing.
+fn haloOpen(start: f64, now: f64) ?f32 {
+    const age = now - start;
+    if (age < 0 or age > halo_life) return null;
+    return @floatCast(age / halo_life);
 }
 
 fn undergrowth(
@@ -579,9 +639,6 @@ fn drawBig(
         full;
 
     try stack(font, lines, at, tint(fade));
-
-    const cell = @max(1, font.textSize("M").w);
-    try lightHalo(at, now - bush.halo, cell, cell * 6, font);
 }
 
 /// One of the small pop-up mushrooms, tinted by its slot.
@@ -614,7 +671,6 @@ fn drawSmall(
         try put(font, stem_glyph, .{ .x = at.x + cell, .y = at.y + cell * 1.15 }, stem());
     }
 
-    try lightHalo(at, now - plant.halo, cell, cell * 3, font);
 }
 
 fn drawPlant(grown: f32, size: dvui.Size.Physical, font_in: dvui.Font) !void {
@@ -712,40 +768,6 @@ fn ripple(ring: Ripple, radius: f32, size: dvui.Size.Physical, font: dvui.Font, 
 /// Draws rows of ASCII as one block: every row starts at the same left edge, so
 /// the art's own leading spaces do the shaping. The block is centred on `centre`.
 /// A growth halo: four marks that widen and fade over a second.
-fn lightHalo(at: dvui.Point.Physical, age: f64, cell: f32, width: f32, font: dvui.Font) !void {
-    if (age < 0 or age > halo_life) return;
-    const t: f32 = @floatCast(age / halo_life);
-    const fade: u8 = @intFromFloat((1 - t) * (1 - t) * 255);
-
-    const centre = dvui.Point.Physical{ .x = at.x + width * 0.5, .y = at.y };
-    const span = cell * (1.4 + t * 2.6);
-    const rays = [_][]const u8{ "*", "|", "*", "-", "*", "|", "*", "-" };
-
-    // A starburst of rays, gold, with a white core: the halo of a shrine.
-    for (rays, 0..) |ray, step| {
-        const turn = std.math.pi * 2 * @as(f32, @floatFromInt(step)) / 8 - std.math.pi * 0.5;
-        try put(font, ray, .{
-            .x = centre.x + @cos(turn) * span * 1.25 - cell * 0.5,
-            .y = centre.y + @sin(turn) * span * 0.75 - cell * 0.5,
-        }, halo_colour(fade));
-
-        try put(font, ".", .{
-            .x = centre.x + @cos(turn) * span * 2.1 - cell * 0.5,
-            .y = centre.y + @sin(turn) * span * 1.2 - cell * 0.5,
-        }, halo_colour(fade / 3));
-    }
-
-    try put(font, "*", .{ .x = centre.x - cell * 0.5, .y = centre.y - span * 0.55 }, halo_core(fade));
-}
-
-fn halo_core(fade: u8) dvui.Color {
-    return .{ .r = 0xff, .g = 0xfd, .b = 0xf0, .a = fade };
-}
-
-fn halo_colour(fade: u8) dvui.Color {
-    return .{ .r = 0xff, .g = 0xd7, .b = 0x5e, .a = fade };
-}
-
 fn stack(font: dvui.Font, lines: []const []const u8, centre: dvui.Point.Physical, colour: dvui.Color) !void {
     const metrics = font.textSize("M");
     const cell = metrics.w;
