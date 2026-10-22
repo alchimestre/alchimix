@@ -98,7 +98,9 @@ pub const Effect = struct {
 
 };
 
-pub const Dmt = enum { off, plain };
+/// `unzoomed` is the same funnel with the coloured fills left at the size they
+/// were drawn, for comparing the two.
+pub const Dmt = enum { off, plain, unzoomed };
 
 /// Lane indices for remembered tracks the crate still holds, oldest first.
 pub fn rememberedLanes(remembered: []const u64, lanes: []const u64, out: *[Played.limit]usize) usize {
@@ -147,7 +149,7 @@ fn pressed(current: Dmt, choice: Dmt) Dmt {
     return if (current == choice) .off else choice;
 }
 
-pub const EffectMode = enum { lsd, mushroom, dmt };
+pub const EffectMode = enum { lsd, mushroom, dmt, dmt_unzoomed };
 
 /// The bundled emoji family, loaded at startup.
 pub const emoji_family = "noto emoji";
@@ -544,8 +546,9 @@ pub const App = struct {
 
         const quads_kept = try arena.alloc(geom.Quad, self.washes.items.len + self.colours.items.len);
         @memcpy(quads_kept[0..self.washes.items.len], self.washes.items);
+        const zoom = if (self.effect.dmt == .unzoomed) 1 else dmt_colour_zoom;
         for (self.colours.items, quads_kept[self.washes.items.len..]) |quad, *out| {
-            out.* = grown(quad, size.w / 2, size.h / 2, dmt_colour_zoom);
+            out.* = grown(quad, size.w / 2, size.h / 2, zoom);
         }
 
         const quads = try geom.solidQuads(arena, quads_kept);
@@ -582,6 +585,7 @@ pub const App = struct {
             .lsd => self.effect.look = if (self.effect.look == .drift) .none else .drift,
             .mushroom => self.effect.look = if (self.effect.look == .mushroom) .none else .mushroom,
             .dmt => self.effect.dmt = pressed(self.effect.dmt, .plain),
+            .dmt_unzoomed => self.effect.dmt = pressed(self.effect.dmt, .unzoomed),
         }
         if (!self.effect.any()) {
             self.dropEffects();
@@ -632,6 +636,7 @@ pub const App = struct {
             self.effectChip("LSD", .lsd, .lsd, 7120);
             self.effectChip(if (self.emoji_font) "🍄" else ".-.", .mushroom, .mushroom, 7122);
             self.effectChip("DMT", .dmt, .dmt, 7125);
+            self.effectChip("DMT UNZOOMED", .dmt_unzoomed, .dmt_unzoomed, 7127);
             if (self.effect.look == .mushroom) self.growChip();
         }
 
@@ -706,6 +711,7 @@ pub const App = struct {
             .lsd => self.effect.look == .drift,
             .mushroom => self.effect.look == .mushroom,
             .dmt => self.effect.dmt == .plain,
+            .dmt_unzoomed => self.effect.dmt == .unzoomed,
         };
         var chip = dvui.box(@src(), .{ .dir = .horizontal }, .{
             .gravity_y = 0.5,
@@ -1530,6 +1536,7 @@ pub const App = struct {
             .toggle_lsd => self.toggleEffect(.lsd),
             .toggle_mushroom => self.toggleEffect(.mushroom),
             .toggle_dmt => self.toggleEffect(.dmt),
+            .toggle_dmt_unzoomed => self.toggleEffect(.dmt_unzoomed),
             .select_playlist => |index| {
                 if (index >= self.playlists.len) return;
                 self.selectPlaylist(index);
@@ -3161,6 +3168,8 @@ test "the fold keeps its colours and leaves grey grey" {
 test "a mode chip runs itself and stops only itself" {
     try std.testing.expectEqual(Dmt.plain, pressed(.off, .plain));
     try std.testing.expectEqual(Dmt.off, pressed(.plain, .plain));
+    try std.testing.expectEqual(Dmt.unzoomed, pressed(.plain, .unzoomed));
+    try std.testing.expectEqual(Dmt.off, pressed(.unzoomed, .unzoomed));
 
 }
 
