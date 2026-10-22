@@ -2088,7 +2088,7 @@ pub const App = struct {
 
                 const view = self.laneStart(index);
                 if (lane.analysis) |*analysis| {
-                    self.paintWave(analysis, wave_rect, view, analysis.downbeatOffset());
+                    self.paintWave(analysis, wave_rect, view, analysis.downbeatOffset(), index);
                 } else {
                     labelStyled(@src(), "no analysis", .{
                         .color_text = .{ .color = Palette.muted },
@@ -2331,7 +2331,7 @@ pub const App = struct {
     }
 
     /// Waveform and beat lines, drawn straight into the lane's rectangle.
-    fn paintWave(self: *App, analysis: *const pl.analysis.Analysis, rect: hit.Rect, start_beat: f32, beat_offset: f32) void {
+    fn paintWave(self: *App, analysis: *const pl.analysis.Analysis, rect: hit.Rect, start_beat: f32, beat_offset: f32, slot: usize) void {
         if (rect.w <= 0 or rect.h <= 0) return;
         fillRect(self.allocator, rect.x, rect.y, rect.w, rect.h, Palette.field);
 
@@ -2358,7 +2358,7 @@ pub const App = struct {
         // shimmered on the coloured waveform.
         self.paintBeats(rect, start_beat, beat_offset);
         const wash = if (has_bands) waveColor(wave_colour.tintBands(0.7, analysis.bands)) else bandColor(0.45);
-        self.waveWash(rect, opposite(wash));
+        self.waveWash(rect, wash, slot);
 
         var a: usize = origin;
         while (a < analysis.waveform.len) : (a += bucket) {
@@ -2383,10 +2383,10 @@ pub const App = struct {
 
     /// The lane's own colour, laid under its waveform, so the empty stretch of
     /// a lane carries colour instead of reading as flat grey in the fold.
-    fn waveWash(self: *App, rect: hit.Rect, colour: dvui.Color) void {
+    fn waveWash(self: *App, rect: hit.Rect, colour: dvui.Color, slot: usize) void {
         if (self.effect.dmt == .off) return;
 
-        const wash = saturated(opposite(colour), self.chromaAmount());
+        const wash = saturated(opposite(colour, slot), self.chromaAmount());
         const tick: u64 = @intFromFloat(@floor(self.effect_time * 1.5));
         const cell_w = rect.w / @as(f32, @floatFromInt(wash_columns));
         const cell_h = rect.h / @as(f32, @floatFromInt(wash_rows));
@@ -3004,9 +3004,11 @@ fn grain(seed: u64) f32 {
     return @as(f32, @floatFromInt(hash >> 40)) / @as(f32, @floatFromInt(@as(u64, 1) << 24));
 }
 
-/// The hue half a turn away from `colour`, so a lane's wash contrasts its
-/// waveform instead of blurring into it.
-fn opposite(colour: dvui.Color) dvui.Color {
+/// The hue turned away from `colour` by the lane's place in the row. The
+/// waveforms all land near red, so a plain opposite would make every wash the
+/// same colour: the turns alternate either side of half a turn, which spreads
+/// the lanes across the wheel and still keeps each wash clear of its own lane.
+fn opposite(colour: dvui.Color, slot: usize) dvui.Color {
     const red: f32 = @floatFromInt(colour.r);
     const green: f32 = @floatFromInt(colour.g);
     const blue: f32 = @floatFromInt(colour.b);
@@ -3026,7 +3028,8 @@ fn opposite(colour: dvui.Color) dvui.Color {
         }
         hue /= 6;
     }
-    hue = @mod(hue + 0.5, 1);
+    const turns = [_]f32{ 0.31, 0.69, 0.39, 0.61, 0.47, 0.55 };
+    hue = @mod(hue + turns[slot % turns.len], 1);
 
     const saturation: f32 = if (high > 0) spread / high else 0;
     const strong = @max(saturation, 0.8);
@@ -3334,14 +3337,14 @@ test "a kick lands at once and fades over its tail" {
 
 test "the wash takes the hue opposite the lane" {
     const blue = dvui.Color{ .r = 0x20, .g = 0x60, .b = 0xf0, .a = 0xff };
-    try std.testing.expect(opposite(blue).r > opposite(blue).b);
+    try std.testing.expect(opposite(blue, 0).r > opposite(blue, 0).b);
 
     const red = dvui.Color{ .r = 0xf0, .g = 0x30, .b = 0x30, .a = 0xff };
-    try std.testing.expect(opposite(red).g > opposite(red).r);
+    try std.testing.expect(opposite(red, 0).g > opposite(red, 0).r);
 
     // Grey has no hue to turn, so the wash keeps a lit channel rather than
     // collapsing to black.
-    const flat = opposite(dvui.Color{ .r = 0x40, .g = 0x40, .b = 0x40, .a = 0xff });
+    const flat = opposite(dvui.Color{ .r = 0x40, .g = 0x40, .b = 0x40, .a = 0xff }, 0);
     try std.testing.expect(@max(flat.r, @max(flat.g, flat.b)) > 0x60);
 }
 
