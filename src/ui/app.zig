@@ -2312,16 +2312,16 @@ pub const App = struct {
             var column: usize = 0;
             while (column < wash_columns) : (column += 1) {
                 const cell = grain(tick *% 131 +% column *% 17 +% row *% 7);
-                const alpha = dmt_wash * (0.3 + 1.2 * cell) * (0.35 + 0.9 * depth);
+                const alpha = dmt_wash * (0.08 + 2.1 * cell) * (0.25 + 1.05 * depth);
                 const patch = dvui.Rect.Physical{
                     .x = rect.x + cell_w * @as(f32, @floatFromInt(column)),
                     .y = rect.y + cell_h * @as(f32, @floatFromInt(row)),
                     .w = cell_w + 1,
                     .h = cell_h + 1,
                 };
-                const split = 1 + 3.5 * cell;
-                self.shiftWash(patch, -split, 0, faded(aberration_red, alpha * 0.45));
-                self.shiftWash(patch, split, 0, faded(aberration_blue, alpha * 0.45));
+                const split = 0.4 + 1.6 * cell;
+                self.shiftWash(patch, -split, 0, faded(aberration_red, alpha * 0.16));
+                self.shiftWash(patch, split, 0, faded(aberration_blue, alpha * 0.16));
                 self.colours.append(self.allocator, .{
                     .rect = patch,
                     .colour = faded(wash, alpha),
