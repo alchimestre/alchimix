@@ -248,6 +248,8 @@ pub const App = struct {
     /// exactly as it was.
     /// Shared effect speed multiplier, under both mode chips.
     effect_speed: f32 = 1,
+    /// Rings per e-fold of radius: how many lanes the tunnel shows.
+    lane_rings: f32 = dmt.rings_default,
     // Six effect chips, the speed slider, the garden panel and its chrome all
     // want a slot, so the list is sized for the panel too.
     stills: [24]dvui.Rect.Physical = @splat(.{}),
@@ -515,7 +517,7 @@ pub const App = struct {
         }
 
         if (self.effect.dmt != .off) {
-            try dmt.draw(source, arena, self.effect_clock, size, stills, dmt_shade, 0);
+            try dmt.draw(source, arena, self.effect_clock, size, stills, dmt_shade, 0, self.lane_rings);
             try self.paintColours(arena, screen, size);
         }
     }
@@ -549,7 +551,7 @@ pub const App = struct {
 
         _ = dvui.RenderTarget.setAsCurrent(screen);
         const layer_texture = try dvui.textureFromTarget(layer);
-        try dmt.draw(layer_texture, arena, self.effect_clock, size, &.{}, 1, 0);
+        try dmt.draw(layer_texture, arena, self.effect_clock, size, &.{}, 1, 0, self.lane_rings);
     }
 
     /// LSD's output copy, kept for as long as both modes run.
@@ -657,8 +659,8 @@ pub const App = struct {
         self.hit_map.append(rect, .grow_plant);
     }
 
-    /// Speed for both effects. One multiplier, one clock, on its own row
-    /// under the chips.
+    /// Speed for both effects on its own row under the chips, with the lane
+    /// count beside it while the fold runs.
     fn effectSpeed(self: *App) void {
         var row = dvui.box(@src(), .{ .dir = .horizontal }, .{
             .expand = .horizontal,
@@ -689,6 +691,30 @@ pub const App = struct {
         }
 
         self.still(rectFrom(cluster.data().rectScaleFromParent().r));
+
+        if (self.effect.dmt == .off) return;
+
+        labelStyled(@src(), "lanes", .{
+            .font = metaFont(),
+            .color_text = .{ .color = Palette.muted },
+            .gravity_y = 0.5,
+            .margin = .{ .x = 4 },
+        });
+
+        var lanes = dvui.box(@src(), .{ .dir = .horizontal }, .{ .gravity_x = 1 });
+        defer lanes.deinit();
+
+        var lane_fraction = dmt.ringsFraction(self.lane_rings);
+        if (dvui.slider(@src(), .{ .fraction = &lane_fraction }, .{
+            .gravity_y = 0.5,
+            .min_size_content = .{ .w = 120, .h = 8 },
+            .max_size_content = .{ .w = 120, .h = 8 },
+        })) {
+            self.lane_rings = dmt.ringsAt(lane_fraction);
+            dvui.refresh(null, @src(), null);
+        }
+
+        self.still(rectFrom(lanes.data().rectScaleFromParent().r));
     }
 
     /// A mode switch. `paint` reads the chip's rect back and keeps that patch of
@@ -1359,7 +1385,7 @@ pub const App = struct {
         // DMT runs on top of LSD, so a press follows the tunnel first and the
         // drift underneath it second.
         var shown = dvui.Point.Physical{ .x = p.x, .y = p.y };
-        if (self.effect.dmt != .off) shown = dmt.fold(shown, self.effect_clock, size, stills, 0);
+        if (self.effect.dmt != .off) shown = dmt.fold(shown, self.effect_clock, size, stills, 0, self.lane_rings);
         switch (self.effect.look) {
             .drift => shown = lsd.sample(shown, self.effect_time, size, stills, 1),
             .mushroom => shown = lsd.sample(shown, self.effect_time, size, stills, mushroom.reach),
