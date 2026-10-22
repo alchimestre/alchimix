@@ -10,7 +10,6 @@ const std = @import("std");
 const dvui = @import("dvui");
 const pl = @import("alchimix");
 const dmt = @import("dmt.zig");
-const eye = @import("eye.zig");
 const geom = @import("geom.zig");
 const hit = @import("hit.zig");
 const lsd = @import("lsd.zig");
@@ -263,9 +262,7 @@ pub const App = struct {
     lane_colour: f32 = 0.6,
     /// How many kaleidoscope facets the tunnel is folded into.
     lane_mirrors: f32 = 4,
-    /// The ball in the middle of the tunnel: its picture, and whether it shows.
-    eye: eye.Eye = undefined,
-    eye_on: bool = false,
+
     /// The kick driving the lane pulse, and the follower that shapes it.
     heartbeat: bool = true,
     beat_power: f32 = 0,
@@ -330,7 +327,6 @@ pub const App = struct {
             ),
             .crate = pl.crate.Crate.init(allocator),
             .hit_map = hit.HitMap.init(allocator),
-            .eye = try eye.Eye.init(allocator),
         };
         app.playlists = library.playlists() catch &.{};
         return app;
@@ -340,7 +336,6 @@ pub const App = struct {
         self.transport.deinit();
         self.mixer.deinit();
         self.allocator.destroy(self.mixer);
-        self.eye.deinit(self.allocator);
         for (self.grid.items) |*lane| {
             if (lane.analysis) |*a| a.deinit(self.allocator);
         }
@@ -544,7 +539,6 @@ pub const App = struct {
             try self.paintColours(arena, screen, size);
             // The colour pass folds the whole layer, so the controls come back
             // over it rather than being painted with lane colour.
-            if (self.eye_on) try self.paintEye(source, arena, size);
             try geom.repaint(arena, stills, size, texture);
 
         }
@@ -721,63 +715,9 @@ pub const App = struct {
             }
 
             self.heartbeatChip();
-            self.eyeChip();
         }
 
         self.still(rectFrom(column.data().borderRectScale().r));
-    }
-
-    /// The eye switch, under the heartbeat.
-    fn eyeChip(self: *App) void {
-        var chip = dvui.box(@src(), .{ .dir = .horizontal }, .{
-            .gravity_x = 1,
-            .margin = .{ .y = 2 },
-            .padding = .{ .x = 8, .y = 2 },
-            .background = true,
-            .color_fill = .{ .color = if (self.eye_on) Palette.selection else Palette.field },
-            .corners = square,
-            .id_extra = 7290,
-        });
-        defer chip.deinit();
-
-        labelStyled(@src(), "eye", .{
-            .gravity_y = 0.5,
-            .color_text = .{ .color = if (self.eye_on) Palette.heat4 else Palette.muted },
-            .font = metaFont(),
-            .id_extra = 7291,
-        });
-
-        self.hit_map.append(rectFrom(chip.data().contentRectScale().r), .eye);
-    }
-
-    /// The ball, drawn over the tunnel: every corner samples the folded frame
-    /// through the iris relief and carries the eye's own colour, so the picture
-    /// wraps the sphere instead of lying on top of it.
-    fn paintEye(self: *App, texture: dvui.Texture, arena: std.mem.Allocator, size: dvui.Size.Physical) !void {
-        const centre = dvui.Point.Physical{ .x = size.w / 2, .y = size.h / 2 };
-        const radius = @min(size.w, size.h) * 0.22;
-        const dome = try self.eye.dome(arena, centre, radius);
-
-        const vertexes = try arena.alloc(dvui.Vertex, dome.len);
-        for (dome, vertexes) |corner, *vertex| {
-            const folded = dmt.fold(corner.sample, self.effect_clock, size, &.{}, 0, self.drawnRings(), self.beat_power, self.lane_mirrors);
-            vertex.* = .{
-                .pos = corner.pos,
-                .col = .{
-                    .r = corner.colour.r,
-                    .g = corner.colour.g,
-                    .b = corner.colour.b,
-                    .a = if (corner.inside) 255 else 0,
-                },
-                .uv = .{ geom.sampleUV(folded.x, size.w), geom.sampleUV(folded.y, size.h) },
-            };
-        }
-
-        try dvui.renderTriangles(.{
-            .vertexes = vertexes,
-            .indices = try eye.quadIndices(arena),
-            .bounds = .{ .x = 0, .y = 0, .w = size.w, .h = size.h },
-        }, texture);
     }
 
     /// The kick pulse switch, under the colour slider.
@@ -1702,10 +1642,7 @@ pub const App = struct {
                 self.heartbeat = !self.heartbeat;
                 dvui.refresh(null, @src(), null);
             },
-            .eye => {
-                self.eye_on = !self.eye_on;
-                dvui.refresh(null, @src(), null);
-            },
+
             .select_playlist => |index| {
                 if (index >= self.playlists.len) return;
                 self.selectPlaylist(index);
