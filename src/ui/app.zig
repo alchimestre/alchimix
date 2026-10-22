@@ -948,15 +948,18 @@ pub const App = struct {
     }
 
     fn framePlaylists(self: *App) void {
+        const width: f32 = if (self.effect.look == .mushroom) 290 else 210;
         var panel = dvui.box(@src(), .{ .dir = .vertical }, .{
-            .min_size_content = .{ .w = 210 },
-            .max_size_content = .{ .w = 210, .h = 100000 },
+            .min_size_content = .{ .w = width },
+            .max_size_content = .{ .w = width, .h = 100000 },
             .expand = .vertical,
             .background = true,
             .color_fill = .{ .color = Palette.panel },
             .padding = .{ .x = 8, .y = 8 },
         });
         defer panel.deinit();
+
+        if (self.effect.look == .mushroom) self.gardenFeatures();
 
         self.playlistStats();
 
@@ -994,29 +997,22 @@ pub const App = struct {
         }
 
         self.playlistChildren("root", 0);
+        self.still(rectFrom(panel.data().borderRectScale().r));
     }
 
     /// The garden's switches, one row per feature: the arrow drops the long
     /// description, the row itself turns the feature on or off.
-    fn frameFeatures(self: *App) void {
-        var panel = dvui.box(@src(), .{ .dir = .vertical }, .{
-            .min_size_content = .{ .w = 290 },
-            .max_size_content = .{ .w = 290, .h = 100000 },
-            .expand = .vertical,
-            .background = true,
-            .color_fill = .{ .color = Palette.panel },
-            .padding = .{ .x = 8, .y = 8 },
-        });
-        defer panel.deinit();
-
-        labelStyled(@src(), "garden", .{
+    fn gardenFeatures(self: *App) void {
+        {
+            var head = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = 7300 });
+            defer head.deinit();
+            labelStyled(@src(), "garden", .{
             .color_text = .{ .color = Palette.purple },
             .font = headingFont(),
-            .margin = .{ .x = 4, .y = 2 },
-            .id_extra = 7300,
-        });
-
-        self.still(rectFrom(panel.data().borderRectScale().r));
+                .margin = .{ .x = 4, .y = 2 },
+                .id_extra = 7301,
+            });
+        }
 
         for (features_ui.list, 0..) |feature, index| {
             const on = self.mushroom.features.on[index];
@@ -1055,7 +1051,16 @@ pub const App = struct {
                 .id_extra = 7360 + index,
             });
 
-            self.hit_map.append(rectFrom(words.data().contentRectScale().r), .{ .feature_toggle = index });
+            const row_rect = rectFrom(words.data().contentRectScale().r);
+            // The arrow is registered first: the map answers with the first
+            // rectangle that contains the point, so the toggle must come after.
+            self.hit_map.append(.{
+                .x = row_rect.x,
+                .y = row_rect.y,
+                .w = 22,
+                .h = row_rect.h,
+            }, .{ .feature_open = index });
+            self.hit_map.append(row_rect, .{ .feature_toggle = index });
 
             if (open) {
                 // The column is narrow, so the long line is wrapped here rather
@@ -1065,7 +1070,7 @@ pub const App = struct {
                 var line_id: u32 = 7390 + @as(u32, @intCast(index)) * 8;
                 var pieces = std.mem.splitScalar(u8, feature.detail, ' ');
                 while (pieces.next()) |word| {
-                    if (length > 0 and length + word.len + 1 > 20) {
+                    if (length > 0 and length + word.len + 1 > 14) {
                         labelStyled(@src(), buffer[0..length], .{
                             .color_text = .{ .color = Palette.muted },
                             .font = metaFont(),
@@ -1107,7 +1112,6 @@ pub const App = struct {
 
         self.framePicker();
         self.frameCanvas();
-        if (self.effect.look == .mushroom) self.frameFeatures();
         self.framePlaylists();
     }
 

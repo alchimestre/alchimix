@@ -362,9 +362,12 @@ pub const Mixer = struct {
     }
 
     pub fn deinit(self: *Mixer) void {
-        self.stop();
+        // Stop the pump first: once the device is closed the thread must not
+        // call into SDL again, or the stream is queried after destruction.
         self.running.store(false, .release);
         if (self.thread) |thread| thread.join();
+        self.thread = null;
+        self.stop();
         self.thread = null;
         self.device.close();
         for (&self.slots) |*slot| {
@@ -832,6 +835,7 @@ fn freeFrames(slot: *const Slot) usize {
     fn pumpMain(self: *Mixer) void {
         while (self.running.load(.acquire)) {
             self.io.sleep(.{ .nanoseconds = 5 * std.time.ns_per_ms }, .awake) catch {};
+            if (!self.running.load(.acquire)) break;
 
             // 100 ms of runway: at 40 ms a late wake-up emptied the queue and
             // clicked. The queue is capped so latency stays fixed.
@@ -852,6 +856,7 @@ fn freeFrames(slot: *const Slot) usize {
             self.mixFrames(frames, now);
             self.mutex.unlock(self.io);
 
+            if (self.out.len < frames * channels) continue;
             self.device.write(self.out[0 .. frames * channels]);
             _ = self.clock_frames.fetchAdd(frames, .monotonic);
         }
