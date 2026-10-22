@@ -42,7 +42,7 @@ const life: f64 = 7.0;
 /// Seconds a ring lives.
 const ripple_life: f64 = 1.1;
 /// Seconds a heart floats before it pops.
-const heart_life: f64 = 4.2;
+const heart_life: f64 = 9.0;
 
 const Mushroom = struct {
     x: f32,
@@ -197,7 +197,7 @@ pub const State = struct {
         }
         for (&self.hearts) |*heart| {
             if (heart.born > now or now - heart.born > heart_life) continue;
-            heart.y -= 0.035 * step;
+            heart.y -= 0.030 * step;
         }
         for (&self.drops) |*drop| {
             drop.y += drop.fall * @as(f32, @floatCast(seconds));
@@ -233,10 +233,13 @@ pub const State = struct {
         }
 
         for (&self.hearts, 0..) |*heart, at| {
+            // Spread wide across the field so the burst reads as a shower, not
+            // a column rising off the plant.
+            const spread = (random.float(f32) - 0.5) * 0.55;
             heart.* = .{
-                .x = plant_x + (random.float(f32) - 0.5) * 0.16,
-                .y = plant_base - 0.02 - @as(f32, @floatFromInt(at)) * 0.02,
-                .born = now + @as(f64, @floatFromInt(at)) * 0.35,
+                .x = std.math.clamp(plant_x + spread, 0.06, 0.94),
+                .y = plant_base - 0.02 - (random.float(f32)) * 0.10,
+                .born = now + @as(f64, @floatFromInt(at)) * 0.5,
             };
         }
     }
@@ -352,6 +355,7 @@ pub fn draw(
     time: f64,
     size: dvui.Size.Physical,
     still: []const dvui.Rect.Physical,
+    bpm: f32,
     ascii: dvui.Font,
 ) !void {
     if (size.w <= 0 or size.h <= 0) return;
@@ -367,7 +371,7 @@ pub fn draw(
     }
 
     try dvui.renderTriangles(try lsd.wash(arena, time, size, shimmer), null);
-    try undergrowth(state, time, size, still, ascii);
+    try undergrowth(state, time, size, still, bpm, ascii);
     try geom.repaint(arena, still, size, texture);
 }
 
@@ -387,6 +391,7 @@ fn undergrowth(
     now: f64,
     size: dvui.Size.Physical,
     still: []const dvui.Rect.Physical,
+    bpm: f32,
     ascii: dvui.Font,
 ) !void {
     // A fixed cell: scaled to the window, the sprites stop reading as art.
@@ -415,7 +420,7 @@ fn undergrowth(
 
     try drawPlant(state.grown, size, font);
     try insectSwarm(state, now, size, font);
-    try heartBubbles(state, now, size, font);
+    try heartBubbles(state, now, size, bpm, font);
 
     for (order) |item| {
         if (item.big) |slot| {
@@ -606,7 +611,7 @@ fn insectSwarm(state: *const State, now: f64, size: dvui.Size.Physical, font_in:
     }
 }
 
-fn heartBubbles(state: *const State, now: f64, size: dvui.Size.Physical, font: dvui.Font) !void {
+fn heartBubbles(state: *const State, now: f64, size: dvui.Size.Physical, bpm: f32, font: dvui.Font) !void {
     for (state.hearts) |heart| {
         const age = now - heart.born;
         if (age < 0) continue;
@@ -614,7 +619,16 @@ fn heartBubbles(state: *const State, now: f64, size: dvui.Size.Physical, font: d
         const at = dvui.Point.Physical{ .x = heart.x * size.w, .y = heart.y * size.h };
 
         if (age < heart_life - 0.8) {
-            const fade: u8 = @intFromFloat(@min(1, age / 0.3) * 235);
+            // Beating with the track: the halo brightens on the beat and the
+            // heart itself swells a little with it.
+            const beat = @max(1, bpm) / 60;
+            const pulse = 0.5 + 0.5 * @sin(2 * std.math.pi * beat * age);
+            const halo: u8 = @intFromFloat(pulse * 110);
+            const fade: u8 = @intFromFloat(@min(1, age / 0.3) * (170 + 85 * pulse));
+
+            try put(font, "<3", .{ .x = at.x - 2, .y = at.y }, heart_colour(halo));
+            try put(font, "<3", .{ .x = at.x + 2, .y = at.y }, heart_colour(halo));
+            try put(font, "<3", .{ .x = at.x, .y = at.y - 2 }, heart_colour(halo));
             try put(font, "<3", at, heart_colour(fade));
         } else {
             // The bubble pops: a ring of rings that fades as it widens.
@@ -868,4 +882,18 @@ test "a mushroom lower on the frame paints over one above it" {
     const b: Item = .{ .y = 0.7, .small = 1 };
     try std.testing.expect(itemLess({}, a, b));
     try std.testing.expect(!itemLess({}, b, a));
+}
+
+test "a press scatters the hearts across the field" {
+    var state: State = .{};
+    state.tick(0);
+    state.poke(10);
+
+    var left: f32 = 1;
+    var right: f32 = 0;
+    for (state.hearts) |heart| {
+        left = @min(left, heart.x);
+        right = @max(right, heart.x);
+    }
+    try std.testing.expect(right - left > 0.25);
 }
