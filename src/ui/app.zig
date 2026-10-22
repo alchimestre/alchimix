@@ -96,17 +96,9 @@ pub const Effect = struct {
         return self.look != .none or self.dmt != .off;
     }
 
-    /// Only the colour-weighted variants lift the waveform; the plain funnel
-    /// and the drift leave it alone.
-    pub fn liftsColour(self: Effect) bool {
-        return self.dmt == .b;
-    }
 };
 
-/// `plain` folds the whole frame. `a` folds only what is drawn over the panels,
-/// with the panels themselves left as one flat surface. `b` dims the fold and
-/// paints the coloured fills back at full strength.
-pub const Dmt = enum { off, plain, a, b };
+pub const Dmt = enum { off, plain };
 
 /// Lane indices for remembered tracks the crate still holds, oldest first.
 pub fn rememberedLanes(remembered: []const u64, lanes: []const u64, out: *[Played.limit]usize) usize {
@@ -155,7 +147,7 @@ fn pressed(current: Dmt, choice: Dmt) Dmt {
     return if (current == choice) .off else choice;
 }
 
-pub const EffectMode = enum { lsd, mushroom, dmt, dmt_a, dmt_b };
+pub const EffectMode = enum { lsd, mushroom, dmt };
 
 /// The bundled emoji family, loaded at startup.
 pub const emoji_family = "noto emoji";
@@ -242,7 +234,10 @@ pub const App = struct {
     effect_target: ?dvui.Texture.Target = null,
     /// LSD's output while DMT folds it. Only allocated when both run.
     lsd_target: ?dvui.Texture.Target = null,
-    /// The frame's coloured fills, for DMT B. Only kept while it runs.
+    /// Picks the aberrations, figures and flares DMT seeds its source frame
+    /// with.
+    seed: u64 = 0,
+    /// The frame's coloured fills, kept while DMT runs.
     colours: std.ArrayListUnmanaged(geom.Quad) = .empty,
     colour_target: ?dvui.Texture.Target = null,
     /// Effect seconds: wall seconds scaled by tempo and the speed slider. LSD
@@ -316,6 +311,7 @@ pub const App = struct {
             .crate = pl.crate.Crate.init(allocator),
             .hit_map = hit.HitMap.init(allocator),
         };
+        app.seed = freshSeed(io);
         app.playlists = library.playlists() catch &.{};
         return app;
     }
@@ -401,7 +397,7 @@ pub const App = struct {
 
         var root = dvui.box(@src(), .{ .dir = .vertical }, .{
             .expand = .both,
-            .background = self.panels(),
+            .background = true,
             .color_fill = .{ .color = Palette.background },
         });
         defer root.deinit();
@@ -435,6 +431,7 @@ pub const App = struct {
         self.frameBody();
         frameFooter(self);
         self.drawGhost();
+        if (self.effect.dmt != .off) self.seedFrame();
 
         if (self.pending_select) |index| {
             self.pending_select = null;
@@ -521,9 +518,8 @@ pub const App = struct {
         }
 
         if (self.effect.dmt != .off) {
-            if (self.effect.dmt == .a) try App.flatSurface(arena, size);
-            try dmt.draw(source, arena, self.effect_clock, size, stills, self.dmtShade(), 0);
-            if (self.effect.dmt == .b) try self.paintColours(arena, screen, size);
+            try dmt.draw(source, arena, self.effect_clock, size, stills, 1, 0);
+            try self.paintColours(arena, screen, size);
         }
     }
 
@@ -535,8 +531,8 @@ pub const App = struct {
         }
     }
 
-    /// DMT B: the coloured fills the frame kept, folded through the same map at
-    /// full strength, so the dimmed fold cannot take their weight.
+    /// The coloured fills the frame kept, folded through the same map at half
+    /// strength, so the funnel keeps their weight without drowning the type.
     fn paintColours(self: *App, arena: std.mem.Allocator, screen: dvui.RenderTarget, size: dvui.Size.Physical) !void {
         if (self.colours.items.len == 0) return;
 
@@ -581,8 +577,6 @@ pub const App = struct {
             .lsd => self.effect.look = if (self.effect.look == .drift) .none else .drift,
             .mushroom => self.effect.look = if (self.effect.look == .mushroom) .none else .mushroom,
             .dmt => self.effect.dmt = pressed(self.effect.dmt, .plain),
-            .dmt_a => self.effect.dmt = pressed(self.effect.dmt, .a),
-            .dmt_b => self.effect.dmt = pressed(self.effect.dmt, .b),
         }
         if (!self.effect.any()) {
             self.dropEffects();
@@ -615,7 +609,7 @@ pub const App = struct {
             var bar = dvui.box(@src(), .{ .dir = .horizontal }, .{
                 .expand = .horizontal,
                 .padding = .{ .x = 16, .y = 8 },
-                .background = self.panels(),
+                .background = true,
                 .color_fill = .{ .color = Palette.background },
             });
             defer bar.deinit();
@@ -633,12 +627,38 @@ pub const App = struct {
             self.effectChip("LSD", .lsd, .lsd, 7120);
             self.effectChip(if (self.emoji_font) "🍄" else ".-.", .mushroom, .mushroom, 7122);
             self.effectChip("DMT", .dmt, .dmt, 7125);
-            self.effectChip("DMT A", .dmt_a, .dmt_a, 7127);
-            self.effectChip("DMT B", .dmt_b, .dmt_b, 7140);
+            if (self.effect.dmt != .off) self.seedChip();
             if (self.effect.look == .mushroom) self.growChip();
         }
 
         self.effectSpeed();
+    }
+
+    /// Redraws the seeded decoration on the spot, so a seed can be judged
+    /// without waiting for the fold to drift.
+    fn seedChip(self: *App) void {
+        var chip = dvui.box(@src(), .{ .dir = .horizontal }, .{
+            .gravity_y = 0.5,
+            .margin = .{ .x = 3 },
+            .padding = .{ .x = 8, .y = 0 },
+            .min_size_content = .{ .h = 24 },
+            .background = true,
+            .color_fill = .{ .color = Palette.field },
+            .corners = square,
+            .id_extra = 7170,
+        });
+        defer chip.deinit();
+
+        labelStyled(@src(), "seed", .{
+            .gravity_y = 0.5,
+            .color_text = .{ .color = Palette.heat4 },
+            .font = metaFont(),
+            .id_extra = 7171,
+        });
+
+        const rect = rectFrom(chip.data().contentRectScale().r);
+        self.still(rect);
+        self.hit_map.append(rect, .reseed);
     }
 
     /// One press grows the plant a stage, so the growth halos can be watched
@@ -649,7 +669,7 @@ pub const App = struct {
             .margin = .{ .x = 3 },
             .padding = .{ .x = 8, .y = 0 },
             .min_size_content = .{ .h = 24 },
-            .background = self.panels(),
+            .background = true,
             .color_fill = .{ .color = Palette.field },
             .corners = square,
             .id_extra = 7160,
@@ -709,15 +729,13 @@ pub const App = struct {
             .lsd => self.effect.look == .drift,
             .mushroom => self.effect.look == .mushroom,
             .dmt => self.effect.dmt == .plain,
-            .dmt_a => self.effect.dmt == .a,
-            .dmt_b => self.effect.dmt == .b,
         };
         var chip = dvui.box(@src(), .{ .dir = .horizontal }, .{
             .gravity_y = 0.5,
             .margin = .{ .x = 3 },
             .padding = .{ .x = 8, .y = 0 },
             .min_size_content = .{ .h = 24 },
-            .background = self.panels(),
+            .background = true,
             .color_fill = .{ .color = if (on) Palette.purple else Palette.field },
             .corners = square,
             .id_extra = id,
@@ -745,7 +763,7 @@ pub const App = struct {
             .gravity_y = 0.5,
             .margin = .{ .x = 4, .y = 0 },
             .padding = .{ .x = 5, .y = 0 },
-            .background = self.panels(),
+            .background = true,
             .color_fill = .{ .color = if (active) Palette.green else Palette.field },
             .id_extra = 7110,
         });
@@ -768,7 +786,7 @@ pub const App = struct {
             .margin = .{ .x = 12, .y = 0 },
             .padding = .{ .x = 2, .y = 0 },
             .gravity_y = 0.5,
-            .background = self.panels(),
+            .background = true,
             .color_fill = .{ .color = Palette.field },
             .id_extra = 95,
         });
@@ -779,7 +797,7 @@ pub const App = struct {
             var cell = dvui.box(@src(), .{ .dir = .horizontal }, .{
                 .min_size_content = .{ .w = 34, .h = 24 },
                 .margin = .{ .x = 1, .y = 0 },
-                .background = self.panels(),
+                .background = true,
                 .color_fill = .{ .color = if (active) Palette.green else Palette.field },
                 .id_extra = 96 + slot,
             });
@@ -977,7 +995,7 @@ pub const App = struct {
             .min_size_content = .{ .w = 210 },
             .max_size_content = .{ .w = 210, .h = 100000 },
             .expand = .vertical,
-            .background = self.panels(),
+            .background = true,
             .color_fill = .{ .color = Palette.panel },
             .padding = .{ .x = 8, .y = 8 },
         });
@@ -1003,7 +1021,7 @@ pub const App = struct {
             var save = dvui.box(@src(), .{ .dir = .horizontal }, .{
                 .min_size_content = .{ .w = 74, .h = 20 },
                 .margin = .{ .x = 2, .y = 2 },
-                .background = self.panels(),
+                .background = true,
                 .color_fill = .{ .color = Palette.field },
                 .id_extra = 7201,
             });
@@ -1041,7 +1059,7 @@ pub const App = struct {
             .min_size_content = .{ .w = 420 },
             .max_size_content = .{ .w = 420, .h = 100000 },
             .expand = .vertical,
-            .background = self.panels(),
+            .background = true,
             .color_fill = .{ .color = Palette.panel },
             .padding = .{ .x = 0, .y = 0 },
         });
@@ -1143,7 +1161,7 @@ pub const App = struct {
             .padding = .{ .x = 12, .y = 5 },
             .margin = .{ .y = 0 },
             .corners = square,
-            .background = self.panels(),
+            .background = true,
             .color_fill = .{ .color = Palette.field },
             .color_text = .{ .color = Palette.ink },
             .font = bodyFont(),
@@ -1177,7 +1195,7 @@ pub const App = struct {
             .margin = .{ .x = 2, .y = 0 },
             .gravity_y = 0.5,
             .corners = square,
-            .background = self.panels(),
+            .background = true,
             .color_fill = .{ .color = Palette.field },
             .color_text = .{ .color = Palette.ink },
             .font = metaFont(),
@@ -1215,7 +1233,7 @@ pub const App = struct {
             .id_extra = @backingInt(toggle) + 1,
             .corners = square,
             .font = headingFont().withSize(18),
-            .background = self.panels(),
+            .background = true,
             .color_fill = .{ .color = if (on) Palette.field else Palette.background },
             .color_text = .{ .color = if (on) color else Palette.muted },
         });
@@ -1231,7 +1249,7 @@ pub const App = struct {
             .padding = .{ .x = 8, .y = 0 },
             .min_size_content = .{ .h = 24 },
             .gravity_y = 0.5,
-            .background = self.panels(),
+            .background = true,
             .color_fill = .{ .color = Palette.field },
             .id_extra = 90,
         });
@@ -1257,7 +1275,7 @@ pub const App = struct {
         var canvas = dvui.box(@src(), .{ .dir = .vertical }, .{
             .expand = .both,
             .padding = .{ .x = 24, .y = 24 },
-            .background = self.panels(),
+            .background = true,
             .color_fill = .{ .color = Palette.background },
             .min_size_content = .{ .h = 0 },
         });
@@ -1535,8 +1553,10 @@ pub const App = struct {
             .toggle_lsd => self.toggleEffect(.lsd),
             .toggle_mushroom => self.toggleEffect(.mushroom),
             .toggle_dmt => self.toggleEffect(.dmt),
-            .toggle_dmt_a => self.toggleEffect(.dmt_a),
-            .toggle_dmt_b => self.toggleEffect(.dmt_b),
+            .reseed => {
+                self.seed = freshSeed(self.io);
+                dvui.refresh(null, @src(), null);
+            },
             .select_playlist => |index| {
                 if (index >= self.playlists.len) return;
                 self.selectPlaylist(index);
@@ -1749,7 +1769,7 @@ pub const App = struct {
             .margin = .{ .x = 2, .y = 0 },
             .gravity_y = 0.5,
             .corners = square,
-            .background = self.panels(),
+            .background = true,
             .color_fill = .{ .color = Palette.field },
             .color_text = .{ .color = Palette.ink },
             .font = metaFont(),
@@ -1771,7 +1791,7 @@ pub const App = struct {
                 .padding = .{ .x = 5, .y = 0 },
                 .min_size_content = .{ .h = 24 },
                 .gravity_y = 0.5,
-                .background = self.panels(),
+                .background = true,
                 .color_fill = .{ .color = Palette.field },
                 .id_extra = 72,
             });
@@ -1791,7 +1811,7 @@ pub const App = struct {
                 .padding = .{ .x = 8, .y = 0 },
                 .min_size_content = .{ .h = 24 },
                 .gravity_y = 0.5,
-                .background = self.panels(),
+                .background = true,
                 .color_fill = .{ .color = Palette.field },
                 .id_extra = 74,
             });
@@ -1810,7 +1830,7 @@ pub const App = struct {
         var chip = dvui.box(@src(), .{ .dir = .horizontal }, .{
             .min_size_content = .{ .w = 26, .h = 26 },
             .margin = .{ .x = 4 },
-            .background = self.panels(),
+            .background = true,
             .color_fill = .{ .color = Palette.background },
             .id_extra = 7000 + index,
         });
@@ -1836,7 +1856,7 @@ pub const App = struct {
         var chip = dvui.box(@src(), .{ .dir = .horizontal }, .{
             .min_size_content = .{ .w = 26, .h = 18 },
             .margin = .{ .x = 4 },
-            .background = self.panels(),
+            .background = true,
             .color_fill = .{ .color = Palette.background },
             .id_extra = 7500 + index,
         });
@@ -1860,7 +1880,7 @@ pub const App = struct {
             .padding = .{ .x = 10, .y = 0 },
             .min_size_content = .{ .h = 24 },
             .gravity_y = 0.5,
-            .background = self.panels(),
+            .background = true,
             .color_fill = .{ .color = Palette.field },
             .id_extra = 80,
         });
@@ -1882,7 +1902,7 @@ pub const App = struct {
             .padding = .{ .x = 10, .y = 0 },
             .min_size_content = .{ .h = 24 },
             .gravity_y = 0.5,
-            .background = self.panels(),
+            .background = true,
             .color_fill = .{ .color = Palette.field },
             .id_extra = 82,
         });
@@ -1972,7 +1992,7 @@ pub const App = struct {
             .max_size_content = .{ .w = 630, .h = 100000 },
             .margin = .{ .x = 8, .y = 6 },
             .padding = .{ .x = 8, .y = 4 },
-            .background = self.panels(),
+            .background = true,
             .color_fill = .{ .color = Palette.field },
             .id_extra = 9000 + index,
         });
@@ -2043,7 +2063,7 @@ pub const App = struct {
                     var chip = dvui.box(@src(), .{ .dir = .horizontal }, .{
                         .min_size_content = .{ .w = 40, .h = 20 },
                         .margin = .{ .x = 2, .y = 2 },
-                        .background = self.panels(),
+                        .background = true,
                         .color_fill = .{ .color = if (active) Palette.green else Palette.field },
                         .id_extra = 9410 + index * 4 + choice,
                     });
@@ -2148,30 +2168,7 @@ pub const App = struct {
 
     /// The pinned look runs on tempo alone, at its own constant turn; the other
     /// variants use the mood-driven clock.
-    /// DMT A drops every panel fill, so the fold carries only the type,
-    /// waveforms and controls drawn over them.
-    fn panels(self: *const App) bool {
-        return self.effect.dmt != .a;
-    }
 
-    /// The one surface DMT A folds the drawn parts over, since the panels
-    /// themselves are gone from the frame.
-    fn flatSurface(arena: std.mem.Allocator, size: dvui.Size.Physical) !void {
-        const quads = [_]geom.Quad{.{
-            .rect = .{ .x = 0, .y = 0, .w = size.w, .h = size.h },
-            .colour = Palette.background,
-        }};
-        const grid = try geom.solidQuads(arena, &quads);
-        try dvui.renderTriangles(.{
-            .vertexes = grid.vertexes,
-            .indices = grid.indices,
-            .bounds = .{ .x = 0, .y = 0, .w = size.w, .h = size.h },
-        }, null);
-    }
-
-    fn dmtShade(self: *const App) f32 {
-        return if (self.effect.dmt == .b) dmt.damp else 1;
-    }
 
     /// Play: start the remembered tracks together. With nothing playable
     /// remembered, start every lane and remember what started.
@@ -2330,15 +2327,18 @@ pub const App = struct {
         }
     }
 
-    /// A waveform column: drawn now, and kept for DMT B, which needs the
-    /// coloured fills on their own.
+    /// How much of the waveform colour DMT paints back through the fold: half
+    /// strength, so the funnel gains colour without losing the type.
+    const dmt_colour_share: f32 = 0.5;
+
+    /// A waveform column: drawn now, and kept while DMT runs, which paints the
+    /// coloured fills again through the fold.
     fn waveFill(self: *App, builder: *dvui.Path.Builder, x: f32, y: f32, w: f32, h: f32, colour: dvui.Color) void {
-        const shown = lifted(self.effect, colour);
-        fillRectInto(builder, x, y, w, h, shown);
-        if (self.effect.dmt != .b) return;
+        fillRectInto(builder, x, y, w, h, colour);
+        if (self.effect.dmt == .off) return;
         self.colours.append(self.allocator, .{
             .rect = .{ .x = x, .y = y, .w = w, .h = h },
-            .colour = shown,
+            .colour = faded(colour, dmt_colour_share),
         }) catch return;
     }
 
@@ -2397,6 +2397,15 @@ pub const App = struct {
 
     /// The dragged block, translucent under the pointer, so the thing in hand is
     /// visible rather than only implied by the drop line.
+    /// Paints the seeded aberrations into the frame the fold is about to
+    /// capture, so the tunnel repeats them.
+    fn seedFrame(self: *App) void {
+        const window = dvui.currentWindow();
+        const rect = window.rect_pixels;
+        const tris = dmt.decorate(window.arena(), self.seed, .{ .w = rect.w, .h = rect.h }) catch return;
+        dvui.renderTriangles(tris, null) catch return;
+    }
+
     fn drawGhost(self: *App) void {
         const track = self.drag.carriedTrack() orelse
             if (self.drag.carriedBlock()) |index|
@@ -2484,7 +2493,7 @@ fn pickRow(app: *App, row_index: usize, track: Track, step: ?Transition) void {
         .expand = .horizontal,
         .padding = .{ .x = 12, .y = 6 },
         .margin = .{ .y = 1 },
-        .background = app.panels(),
+        .background = true,
         .color_fill = .{ .color = Palette.panel },
         .color_fill_hover = .{ .color = Palette.hover },
         .corners = square,
@@ -2558,7 +2567,7 @@ fn drawBlock(app: *App, index: usize, track: Track) Block {
         .max_size_content = .{ .w = 380, .h = 100000 },
         .padding = .{ .x = 14, .y = 10 },
         .margin = .{ .x = 6, .y = 6 },
-        .background = app.panels(),
+        .background = true,
         .color_fill = .{ .color = blockColor(app, index, is_seed) },
         .color_fill_hover = .{ .color = if (is_seed) Palette.selection else Palette.hover },
         .corners = square,
@@ -2727,7 +2736,7 @@ fn progressBar(app: *App, track: Track, id_extra: usize, height: f32) void {
         .expand = .horizontal,
         .min_size_content = .{ .h = height },
         .margin = .{ .y = 6, .w = 6 },
-        .background = app.panels(),
+        .background = true,
         .color_fill = .{ .color = Palette.field },
         .corners = square,
         .id_extra = id_extra,
@@ -2748,7 +2757,7 @@ fn transportButton(app: *App, track: Track, id_extra: usize) bool {
     var area = dvui.box(@src(), .{ .dir = .horizontal }, .{
         .min_size_content = .{ .w = 26, .h = 26 },
         .margin = .{ .x = 4 },
-        .background = app.panels(),
+        .background = true,
         .color_fill = .{ .color = Palette.background },
         .color_fill_hover = .{ .color = Palette.hover },
         .id_extra = id_extra,
@@ -2793,28 +2802,6 @@ fn drawPauseBars(allocator: std.mem.Allocator, cx: f32, cy: f32, size: f32) void
 /// Same colour at a given opacity, for the block being carried.
 /// Waveform colour held against the fold's dampening: the grey chrome dims,
 /// the heat map keeps its weight.
-fn lifted(effect: Effect, colour: dvui.Color) dvui.Color {
-    if (!effect.liftsColour()) return colour;
-
-    const red: f32 = @floatFromInt(colour.r);
-    const green: f32 = @floatFromInt(colour.g);
-    const blue: f32 = @floatFromInt(colour.b);
-    const grey = 0.299 * red + 0.587 * green + 0.114 * blue;
-    return .{
-        .r = liftChannel(red, grey),
-        .g = liftChannel(green, grey),
-        .b = liftChannel(blue, grey),
-        .a = colour.a,
-    };
-}
-
-/// Push a channel away from the colour's own grey, then lift it a little.
-fn liftChannel(value: f32, grey: f32) u8 {
-    const chroma: f32 = 1.45;
-    const gain: f32 = 1.15;
-    const shown = (grey + (value - grey) * chroma) * gain;
-    return @intFromFloat(@round(std.math.clamp(shown, 0, 255)));
-}
 
 pub fn fade(color: dvui.Color, alpha: u8) dvui.Color {
     var dimmed = color;
@@ -2884,6 +2871,28 @@ fn rectFrom(rect: dvui.Rect.Physical) hit.Rect {
     return .{ .x = rect.x, .y = rect.y, .w = rect.w, .h = rect.h };
 }
 
+/// A new seed per launch and per press. The awake clock is enough: the
+/// decoration needs to differ, not to be unpredictable.
+fn freshSeed(io: std.Io) u64 {
+    const nanos = std.Io.Timestamp.now(io, .awake).nanoseconds;
+    const ticks: u64 = @truncate(@as(u96, @bitCast(nanos)));
+    return ticks *% 0x9e37_79b9_7f4a_7c15;
+}
+
+fn faded(colour: dvui.Color, amount: f32) dvui.Color {
+    const share = std.math.clamp(amount, 0, 1);
+    return .{
+        .r = fadeChannel(colour.r, share),
+        .g = fadeChannel(colour.g, share),
+        .b = fadeChannel(colour.b, share),
+        .a = fadeChannel(colour.a, share),
+    };
+}
+
+fn fadeChannel(value: u8, share: f32) u8 {
+    return @intFromFloat(@as(f32, @floatFromInt(value)) * share);
+}
+
 fn pointFrom(point: dvui.Point.Physical) hit.Point {
     return .{ .x = point.x, .y = point.y };
 }
@@ -2900,7 +2909,7 @@ fn frameFooter(app: *App) void {
         .expand = .horizontal,
         .min_size_content = .{ .h = 40 },
         .padding = .{ .x = 0, .y = 6 },
-        .background = app.panels(),
+        .background = true,
         .color_fill = .{ .color = Palette.panel },
     });
     defer bar.deinit();
@@ -3099,28 +3108,10 @@ pub const Palette = struct {
     pub const red = dvui.Color{ .r = 0xff, .g = 0x55, .b = 0x55, .a = 0xff };
 };
 
-test "waveform colour survives the fold" {
-    const plain = dvui.Color{ .r = 0x30, .g = 0xfa, .b = 0x7b, .a = 0xff };
-    try std.testing.expectEqual(plain, lifted(.{}, plain));
-
-    const grey = dvui.Color{ .r = 0x40, .g = 0x40, .b = 0x40, .a = 0xff };
-    const shown_grey = lifted(.{ .dmt = .b }, grey);
-    try std.testing.expectEqual(shown_grey.r, shown_grey.g);
-    try std.testing.expectEqual(shown_grey.g, shown_grey.b);
-    try std.testing.expect(shown_grey.r > grey.r);
-
-    // The plain funnel is the reference look: colour comes through untouched.
-    try std.testing.expectEqual(plain, lifted(.{ .dmt = .plain }, plain));
-    try std.testing.expectEqual(plain, lifted(.{ .look = .drift }, plain));
-}
-
 test "a mode chip runs itself and stops only itself" {
     try std.testing.expectEqual(Dmt.plain, pressed(.off, .plain));
     try std.testing.expectEqual(Dmt.off, pressed(.plain, .plain));
-    try std.testing.expectEqual(Dmt.a, pressed(.plain, .a));
-    try std.testing.expectEqual(Dmt.b, pressed(.off, .b));
-    try std.testing.expectEqual(Dmt.off, pressed(.b, .b));
-    try std.testing.expectEqual(Dmt.b, pressed(.plain, .b));
+
 }
 
 test "the play history keeps four tracks, newest last" {
