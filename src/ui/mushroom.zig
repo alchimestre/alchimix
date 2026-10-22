@@ -30,7 +30,7 @@ const heart_slots = 10;
 /// Seconds of playback a plant takes to reach full height.
 const season: f32 = 90;
 /// The plant sits here, as a fraction of the window.
-const plant_x: f32 = 0.70;
+const plant_x: f32 = 0.86;
 const plant_base: f32 = 0.92;
 /// Seconds a mushroom takes to reach its cap.
 const grow: f64 = 2.4;
@@ -133,7 +133,7 @@ pub const State = struct {
                     .x = 0.05 + random.float(f32) * 0.9,
                     .y = -random.float(f32) * 0.6,
                     .fall = 0.25 + random.float(f32) * 0.35,
-                    .land = 0.2 + random.float(f32) * 0.75,
+                    .land = 0.55 + random.float(f32) * 0.38,
                 };
             }
         }
@@ -189,7 +189,7 @@ pub const State = struct {
                 .x = 0.05 + random.float(f32) * 0.9,
                 .y = -0.05 - random.float(f32) * 0.3,
                 .fall = 0.25 + random.float(f32) * 0.35,
-                .land = 0.2 + random.float(f32) * 0.75,
+                .land = 0.55 + random.float(f32) * 0.38,
             };
         }
     }
@@ -316,12 +316,13 @@ pub fn draw(
 }
 
 /// Where the plant grows, and where a press on it lands.
+/// Where a press on the shamrock is caught: the same centre it is drawn at.
 pub fn plantRect(size: dvui.Size.Physical) dvui.Rect.Physical {
     return .{
-        .x = size.w * 0.46,
-        .y = size.h * 0.58,
-        .w = size.w * 0.26,
-        .h = size.h * 0.38,
+        .x = size.w * (plant_x - 0.10),
+        .y = size.h * 0.55,
+        .w = size.w * 0.20,
+        .h = size.h * 0.42,
     };
 }
 
@@ -333,26 +334,32 @@ fn undergrowth(state: *const State, now: f64, size: dvui.Size.Physical, ascii: d
     const font = ascii.withSize(font_px);
     const cell = font.textSize("M").w;
 
-    try bigMushrooms(state, now, size, font);
+    var items: [big_slots + mushroom_slots]Item = undefined;
+    var count: usize = 0;
+    for (state.big, 0..) |bush, slot| {
+        if (now - bush.born < 0) continue;
+        items[count] = .{ .y = bush.y, .big = slot };
+        count += 1;
+    }
+    for (state.mushrooms, 0..) |mushroom, slot| {
+        if (now - mushroom.born < 0) continue;
+        items[count] = .{ .y = mushroom.y, .small = slot };
+        count += 1;
+    }
+
+    const order = items[0..count];
+    // Farthest first: a row nearer the viewer paints over the ones behind it.
+    std.mem.sort(Item, order, {}, itemLess);
+
     try drawPlant(state.grown, size, font);
     try insectSwarm(state, now, size, font);
     try heartBubbles(state, now, size, font);
 
-    for (state.mushrooms) |plant| {
-        const age = now - plant.born;
-        if (age < 0) continue;
-        const at = dvui.Point.Physical{ .x = plant.x * size.w, .y = plant.y * size.h };
-        const fade: u8 = @intFromFloat(@min(1, age / 0.4) * 255);
-
-        if (age < 0.5) {
-            try put(font, ".", at, pink(fade));
-        } else if (age < 1.1) {
-            try put(font, "o", at, pink(fade));
-        } else if (age < grow) {
-            try put(font, ".-.", at, pink(fade));
-        } else {
-            try put(font, ".-.", at, pink(fade));
-            try put(font, "|", .{ .x = at.x + cell, .y = at.y + font_px * 1.05 }, stem());
+    for (order) |item| {
+        if (item.big) |slot| {
+            try drawBig(state, now, slot, size, font);
+        } else if (item.small) |slot| {
+            try drawSmall(state, now, slot, size, font, cell);
         }
     }
 
@@ -397,41 +404,71 @@ const mushroom_stout = [_][]const u8{
     " \\|/(_)\\|/",
 };
 
-fn bigMushrooms(state: *const State, now: f64, size: dvui.Size.Physical, font_in: dvui.Font) !void {
+/// Garden coordinates are fractions of the frame; glyphs need pixels.
+fn onScreen(x: f32, y: f32, size: dvui.Size.Physical) dvui.Point.Physical {
+    return .{ .x = x * size.w, .y = y * size.h };
+}
+
+/// Sprites fade in over `span` seconds and hold at `peak` alpha.
+fn fadeIn(age: f64, span: f64, peak: u8) u8 {
+    const t = std.math.clamp(age / span, 0, 1);
+    return @intFromFloat(t * @as(f64, @floatFromInt(peak)));
+}
+
+/// One sprite in the depth order, whichever kind of mushroom it is.
+const Item = struct {
+    y: f32,
+    big: ?usize = null,
+    small: ?usize = null,
+};
+
+/// Sorted farthest first, so nearer sprites paint over the ones behind.
+fn itemLess(_: void, a: Item, b: Item) bool {
+    return a.y < b.y;
+}
+
+/// A wide or tall mushroom, rising through its three phases.
+fn drawBig(state: *const State, now: f64, slot: usize, size: dvui.Size.Physical, font_in: dvui.Font) !void {
+    const bush = state.big[slot];
     const font = font_in.withSize(font_in.size * 0.7);
 
-    for (state.big, 0..) |bush, slot| {
-        const age = now - bush.born;
-        if (age < 0) continue;
-        const at = dvui.Point.Physical{ .x = bush.x * size.w, .y = bush.y * size.h };
-        const fade: u8 = @intFromFloat(@min(1, age / 0.9) * 235);
-        const tint = caps[slot % caps.len];
+    const age = now - bush.born;
+    const at = onScreen(bush.x, bush.y, size);
+    const fade = fadeIn(age, 0.9, 235);
+    const tint = caps[slot % caps.len];
 
-        const full: []const []const u8 = if (slot < tall_slots) &mushroom_tall else &mushroom_stout;
-        // Three phases: a tip, then the cap, then the whole thing.
-        const lines: []const []const u8 = if (age < 0.8)
-            full[0..1]
-        else if (age < 1.8)
-            full[0..@max(1, full.len / 2)]
-        else
-            full;
+    const full: []const []const u8 = if (slot < tall_slots) &mushroom_tall else &mushroom_stout;
+    // Three phases: a tip, then the cap, then the whole thing.
+    const lines: []const []const u8 = if (age < 0.8)
+        full[0..1]
+    else if (age < 1.8)
+        full[0..@max(1, full.len / 2)]
+    else
+        full;
 
-        try stack(font, lines, at, tint(fade));
+    try stack(font, lines, at, tint(fade));
+}
+
+/// One of the small pop-up mushrooms, tinted by its slot.
+fn drawSmall(state: *const State, now: f64, slot: usize, size: dvui.Size.Physical, font: dvui.Font, cell: f32) !void {
+    const plant = state.mushrooms[slot];
+    const age = now - plant.born;
+    const at = onScreen(plant.x, plant.y, size);
+    const fade = fadeIn(age, 0.4, 255);
+    const tint = caps[(slot / 3) % caps.len];
+
+    if (age < 0.5) {
+        try put(font, ".", at, tint(fade));
+    } else if (age < 1.1) {
+        try put(font, "o", at, tint(fade));
+    } else if (age < grow) {
+        try put(font, ".-.", at, tint(fade));
+    } else {
+        try put(font, ".-.", at, tint(fade));
+        try put(font, "|", .{ .x = at.x + cell, .y = at.y + cell * 1.15 }, stem());
     }
 }
 
-/// The full-grown plant: a flowering tree at the app's scale.
-const tree_art = [_][]const u8{
-    "  * . * ",
-    " . * * .",
-    "* . | . *",
-    " .-\\|/-. ",
-    "   ###  ",
-    "   ###  ",
-};
-
-
-/// Where the plant grows.
 fn drawPlant(grown: f32, size: dvui.Size.Physical, font_in: dvui.Font) !void {
     const base = dvui.Point.Physical{ .x = plant_x * size.w, .y = plant_base * size.h };
     const font = font_in.withSize(font_in.size * (1.3 + grown * 1.1));
@@ -452,6 +489,15 @@ fn drawPlant(grown: f32, size: dvui.Size.Physical, font_in: dvui.Font) !void {
     try stack(font, lines, base, leaf());
 }
 
+const tree_art = [_][]const u8{
+    "  * . * ",
+    " . * . ",
+    "* . | . *",
+    " .-\\|/-. ",
+    "   ###  ",
+    "   ###  ",
+};
+
 /// Three bugs, told apart by shape: a beetle, a grasshopper, a bee.
 const bug_art = [3][]const []const u8{
     &.{ ".-.", "(o)", "'-'" },
@@ -462,10 +508,11 @@ const bug_art = [3][]const []const u8{
 fn insectSwarm(state: *const State, now: f64, size: dvui.Size.Physical, font_in: dvui.Font) !void {
     const font = font_in.withSize(font_in.size * 0.95);
 
-    _ = now;
+    // The bugs change glyph about eight times a second, so they read as crawling.
+    const frame: usize = @intFromFloat(@max(0, now) * 8);
     for (state.insects) |insect| {
         const at = dvui.Point.Physical{ .x = insect.x * size.w, .y = insect.y * size.h };
-        try stack(font, bug_art[insect.glyph], at, bug(220));
+        try stack(font, bug_art[(insect.glyph + frame) % bug_art.len], at, bug(220));
     }
 }
 
@@ -576,7 +623,7 @@ fn stem() dvui.Color {
 }
 
 fn rain(fade: u8) dvui.Color {
-    return .{ .r = 0x89, .g = 0xb4, .b = 0xfa, .a = fade };
+    return .{ .r = 0xcf, .g = 0xe3, .b = 0xff, .a = fade };
 }
 
 fn skin(fade: u8) dvui.Color {
