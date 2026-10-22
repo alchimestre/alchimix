@@ -3,7 +3,6 @@
 //! rain falls from the top and rings where it lands.
 
 const std = @import("std");
-const features = @import("features.zig");
 const dvui = @import("dvui");
 const geom = @import("geom.zig");
 const lsd = @import("lsd.zig");
@@ -14,15 +13,7 @@ pub const reach: f32 = 0.45;
 const shimmer: f32 = 18;
 
 const mushroom_slots = 40;
-const ring_period = 12;
-const ring_radius = 0.34;
-const ring_life = 3.6;
 
-// Feature order, matching the panel in `features.zig`.
-const ring_feature = 0;
-const wave_feature = 1;
-const inherit_feature = 2;
-const lean_feature = 3;
 /// Each cluster fills a range of slots with tall mushrooms; the slots from
 /// `tall_slots` on are the wide, solitary ones.
 const Cluster = struct { start: usize, len: usize };
@@ -109,12 +100,8 @@ pub const State = struct {
     hearts: [heart_slots]Heart = @splat(.{ .x = -1, .y = -1, .born = -1 }),
     /// Growth of the plant, zero to one, earned by playing music.
     grown: f32 = 0,
-    features: features.State = .{},
     /// Whether any lane is playing; the weather answers it.
-    ring_at: f64 = -1000,
     wave_at: f64 = -1000,
-    ring_x: f32 = 0.5,
-    ring_y: f32 = 0.5,
     seeded: bool = false,
 
     /// Spawns, lands and retires. `now` is effect seconds.
@@ -157,12 +144,6 @@ pub const State = struct {
             }
         }
 
-        if (self.features.enabled(ring_feature) and now - self.ring_at > ring_period) {
-            self.ring_at = now;
-            self.ring_x = 0.15 + random.float(f32) * 0.6;
-            self.ring_y = 0.2 + random.float(f32) * 0.5;
-        }
-
         for (self.big, 0..) |bush, slot| {
             if (now - bush.born <= 30) continue;
             if (clusterOf(slot)) |index| {
@@ -175,20 +156,12 @@ pub const State = struct {
         for (&self.mushrooms) |*plant| {
             if (now - plant.born <= life) continue;
 
-            if (self.features.enabled(inherit_feature)) {
-                // Replaced where it stood, give or take a step.
-                plant.* = .{
-                    .x = std.math.clamp(plant.x + (random.float(f32) - 0.5) * 0.12, 0.04, 0.96),
-                    .y = std.math.clamp(plant.y + (random.float(f32) - 0.5) * 0.1, 0.06, 0.94),
-                    .born = now,
-                };
-            } else {
-                plant.* = .{
-                    .x = 0.04 + random.float(f32) * 0.92,
-                    .y = 0.08 + random.float(f32) * 0.84,
-                    .born = now,
-                };
-            }
+            // Replaced where it stood, give or take a step.
+            plant.* = .{
+                .x = std.math.clamp(plant.x + (random.float(f32) - 0.5) * 0.12, 0.04, 0.96),
+                .y = std.math.clamp(plant.y + (random.float(f32) - 0.5) * 0.1, 0.06, 0.94),
+                .born = now,
+            };
         }
     }
 
@@ -214,10 +187,6 @@ pub const State = struct {
 
         for (&self.mushrooms) |*plant| {
 
-            if (!self.features.enabled(lean_feature)) {
-                plant.lean = 0;
-                continue;
-            }
             // The lean fades over about a second after the bug has gone.
             if (plant.lean != 0) plant.lean *= @max(0, 1 - step * 0.9);
             for (self.insects) |insect| {
@@ -253,10 +222,8 @@ pub const State = struct {
 
     /// A press on the plant: insects pour in from both sides, hearts rise.
     pub fn poke(self: *State, now: f64) void {
-        if (self.features.enabled(wave_feature)) {
-            // A flash travels out from the plant; the field stays standing.
-            self.wave_at = now;
-        }
+        // A flash travels out from the plant; the field stays standing.
+        self.wave_at = now;
 
         const random = self.rng.random();
 
@@ -577,33 +544,6 @@ fn drawSmall(
     const fade = shade(at, fadeIn(age, 0.4, 255), still);
     const tint = caps[(slot / 3) % caps.len];
 
-    // A fairy ring lights the mushrooms inside it in order of angle.
-    var lit = false;
-    const ring_age = now - state.ring_at;
-    if (state.features.enabled(ring_feature) and ring_age >= 0 and ring_age < ring_life) {
-        const dx = plant.x - state.ring_x;
-        const dy = plant.y - state.ring_y;
-        const front = @sqrt(dx * dx + dy * dy);
-        const radius = ring_radius * (ring_age / ring_life);
-        lit = @abs(front - radius) < 0.07;
-    }
-
-    // The press wave: a bright edge travelling out from the plant.
-    const wave_age = now - state.wave_at;
-    if (state.features.enabled(wave_feature) and wave_age >= 0) {
-        const dx = plant.x - plant_x;
-        const dy = plant.y - plant_base;
-        const front = @sqrt(dx * dx + dy * dy) * 0.8;
-        if (wave_age > front and wave_age < front + 0.45) lit = true;
-    }
-
-
-    if (lit) {
-        try put(font, "*", at, .{ .r = 0xff, .g = 0xf4, .b = 0xd6, .a = 255 });
-        try put(font, "|", .{ .x = at.x + cell, .y = at.y + cell * 1.15 }, tint(255));
-        return;
-    }
-
     if (age < 0.5) {
         try put(font, ".", at, tint(fade));
     } else if (age < 1.1) {
@@ -614,9 +554,7 @@ fn drawSmall(
         try put(font, ".-.", at, tint(fade));
 
         var stem_glyph: []const u8 = "|";
-        if (state.features.enabled(lean_feature) and plant.lean != 0) {
-            stem_glyph = if (plant.lean < 0) "/" else "\\";
-        }
+        if (plant.lean != 0) stem_glyph = if (plant.lean < 0) "/" else "\\";
         try put(font, stem_glyph, .{ .x = at.x + cell, .y = at.y + cell * 1.15 }, stem());
     }
 }
@@ -901,14 +839,6 @@ test "a press starts a wave and leaves the field standing" {
     try std.testing.expectEqual(before, state.mushrooms[0].born);
 }
 
-test "without the wave a press starts no front" {
-    var state: State = .{};
-    state.tick(0);
-    state.features.on[1] = false;
-    state.poke(10);
-    try std.testing.expect(state.wave_at < 0);
-}
-
 test "a landing drop revives the mushroom under it" {
     var state: State = .{};
     state.tick(0);
@@ -931,4 +861,11 @@ test "a cluster stays inside its spread and never stacks" {
             try std.testing.expect(a.x != b.x or a.y != b.y);
         }
     }
+}
+
+test "a mushroom lower on the frame paints over one above it" {
+    const a: Item = .{ .y = 0.2, .small = 0 };
+    const b: Item = .{ .y = 0.7, .small = 1 };
+    try std.testing.expect(itemLess({}, a, b));
+    try std.testing.expect(!itemLess({}, b, a));
 }

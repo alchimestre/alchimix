@@ -89,10 +89,6 @@ pub const Target = union(enum) {
     save_playlist,
     /// Orders the suggestions by BPM.
     sort_bpm,
-    /// One garden feature in the mushroom panel: switches it on or off.
-    feature_toggle: usize,
-    /// The arrow on a feature row: shows or hides its description.
-    feature_open: usize,
     /// Drifts the window, or stops it drifting.
     lsd,
     /// The gentler drift with mushrooms and rain, or stops it.
@@ -316,7 +312,6 @@ pub const Drag = struct {
         return switch (target) {
             .toggle => |toggle| .{ .toggle = toggle },
             .notation => .toggle_notation,
-            .feature_toggle, .feature_open => .none,
             .transport => .toggle_transport,
             .clear => .clear_all,
             .sort_bpm => .toggle_sort_bpm,
@@ -408,7 +403,7 @@ pub const Drag = struct {
         return switch (target) {
             .block => |from| .{ .move_block = .{ .from = from, .gap = to } },
             .row => |track| .{ .drop_track = .{ .gap = to, .track = track } },
-            .toggle, .notation, .lane, .nav, .eq_node, .eq_plot, .eq_preset, .trim, .transport, .clear, .playlist, .playlist_toggle, .save_playlist, .sort_bpm, .lsd, .mushroom, .dmt, .dmt_a, .dmt_b, .dmt_og, .master_lock, .pitch_lock, .lane_play, .lane_mute, .width, .feature_toggle, .feature_open => .none,
+            .toggle, .notation, .lane, .nav, .eq_node, .eq_plot, .eq_preset, .trim, .transport, .clear, .playlist, .playlist_toggle, .save_playlist, .sort_bpm, .lsd, .mushroom, .dmt, .dmt_a, .dmt_b, .dmt_og, .master_lock, .pitch_lock, .lane_play, .lane_mute, .width => .none,
         };
     }
 

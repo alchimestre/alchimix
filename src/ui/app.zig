@@ -10,7 +10,6 @@ const std = @import("std");
 const dvui = @import("dvui");
 const pl = @import("alchimix");
 const dmt = @import("dmt.zig");
-const features_ui = @import("features.zig");
 const geom = @import("geom.zig");
 const hit = @import("hit.zig");
 const lsd = @import("lsd.zig");
@@ -948,18 +947,15 @@ pub const App = struct {
     }
 
     fn framePlaylists(self: *App) void {
-        const width: f32 = if (self.effect.look == .mushroom) 290 else 210;
         var panel = dvui.box(@src(), .{ .dir = .vertical }, .{
-            .min_size_content = .{ .w = width },
-            .max_size_content = .{ .w = width, .h = 100000 },
+            .min_size_content = .{ .w = 210 },
+            .max_size_content = .{ .w = 210, .h = 100000 },
             .expand = .vertical,
             .background = true,
             .color_fill = .{ .color = Palette.panel },
             .padding = .{ .x = 8, .y = 8 },
         });
         defer panel.deinit();
-
-        if (self.effect.look == .mushroom) self.gardenFeatures();
 
         self.playlistStats();
 
@@ -998,106 +994,6 @@ pub const App = struct {
 
         self.playlistChildren("root", 0);
         self.still(rectFrom(panel.data().borderRectScale().r));
-    }
-
-    /// The garden's switches, one row per feature: the arrow drops the long
-    /// description, the row itself turns the feature on or off.
-    fn gardenFeatures(self: *App) void {
-        {
-            var head = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = 7300 });
-            defer head.deinit();
-            labelStyled(@src(), "garden", .{
-            .color_text = .{ .color = Palette.purple },
-            .font = headingFont(),
-                .margin = .{ .x = 4, .y = 2 },
-                .id_extra = 7301,
-            });
-        }
-
-        for (features_ui.list, 0..) |feature, index| {
-            const on = self.mushroom.features.on[index];
-            const open = self.mushroom.features.open[index];
-
-            var row = dvui.box(@src(), .{ .dir = .horizontal }, .{
-                .expand = .horizontal,
-                .margin = .{ .y = 1 },
-                .padding = .{ .x = 2, .y = 1 },
-                .id_extra = 7310 + index,
-            });
-            defer row.deinit();
-
-            // The arrow rides in front of the title, so a long title can never
-            // push it out of the column.
-            var words = dvui.box(@src(), .{ .dir = .vertical }, .{
-                .expand = .horizontal,
-                .id_extra = 7340 + index,
-            });
-            defer words.deinit();
-
-            var title: [64]u8 = undefined;
-            const arrow = if (open) "▾" else "▸";
-            const title_text = std.fmt.bufPrint(&title, "{s} {s}", .{ arrow, feature.title }) catch feature.title;
-
-            labelStyled(@src(), title_text, .{
-                .color_text = .{ .color = if (on) Palette.ink else Palette.muted },
-                .font = metaFont(),
-                .id_extra = 7350 + index,
-            });
-
-            labelStyled(@src(), feature.blurb, .{
-                .color_text = .{ .color = if (on) Palette.purple else Palette.muted },
-                .font = metaFont(),
-                .margin = .{ .x = 16 },
-                .id_extra = 7360 + index,
-            });
-
-            const row_rect = rectFrom(words.data().contentRectScale().r);
-            // The arrow is registered first: the map answers with the first
-            // rectangle that contains the point, so the toggle must come after.
-            self.hit_map.append(.{
-                .x = row_rect.x,
-                .y = row_rect.y,
-                .w = 22,
-                .h = row_rect.h,
-            }, .{ .feature_open = index });
-            self.hit_map.append(row_rect, .{ .feature_toggle = index });
-
-            if (open) {
-                // The column is narrow, so the long line is wrapped here rather
-                // than clipped by the panel edge.
-                var buffer: [160]u8 = undefined;
-                var length: usize = 0;
-                var line_id: u32 = 7390 + @as(u32, @intCast(index)) * 8;
-                var pieces = std.mem.splitScalar(u8, feature.detail, ' ');
-                while (pieces.next()) |word| {
-                    if (length > 0 and length + word.len + 1 > 14) {
-                        labelStyled(@src(), buffer[0..length], .{
-                            .color_text = .{ .color = Palette.muted },
-                            .font = metaFont(),
-                            .margin = .{ .x = 16 },
-                            .id_extra = line_id,
-                        });
-                        line_id += 1;
-                        length = 0;
-                    }
-                    if (length + word.len + 1 > buffer.len) break;
-                    if (length > 0) {
-                        buffer[length] = ' ';
-                        length += 1;
-                    }
-                    @memcpy(buffer[length..][0..word.len], word);
-                    length += word.len;
-                }
-                if (length > 0) {
-                    labelStyled(@src(), buffer[0..length], .{
-                        .color_text = .{ .color = Palette.muted },
-                        .font = metaFont(),
-                        .margin = .{ .x = 16 },
-                        .id_extra = line_id,
-                    });
-                }
-            }
-        }
     }
 
     fn frameBody(self: *App) void {
@@ -1515,19 +1411,6 @@ pub const App = struct {
                 }
 
                 const target = self.hit_map.hit(p) orelse return;
-                switch (target) {
-                    .feature_toggle => |index| {
-                        self.mushroom.features.toggle(index);
-                        dvui.refresh(null, @src(), null);
-                        return;
-                    },
-                    .feature_open => |index| {
-                        self.mushroom.features.dropDown(index);
-                        dvui.refresh(null, @src(), null);
-                        return;
-                    },
-                    else => {},
-                }
                 self.last_point = p;
                 self.apply(self.drag.press(target, p, mouse.mod.shift()));
                 switch (target) {
