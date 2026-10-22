@@ -237,6 +237,8 @@ pub const App = struct {
     /// Picks the aberrations, figures and flares DMT seeds its source frame
     /// with.
     seed: u64 = 0,
+    /// Shows the seeded scene on the plain window, with no fold over it.
+    seed_preview: bool = false,
     /// The frame's coloured fills, kept while DMT runs.
     colours: std.ArrayListUnmanaged(geom.Quad) = .empty,
     colour_target: ?dvui.Texture.Target = null,
@@ -431,7 +433,7 @@ pub const App = struct {
         self.frameBody();
         frameFooter(self);
         self.drawGhost();
-        if (self.effect.dmt != .off) self.seedFrame();
+        if (self.effect.dmt != .off or self.seed_preview) self.seedFrame();
 
         if (self.pending_select) |index| {
             self.pending_select = null;
@@ -518,7 +520,7 @@ pub const App = struct {
         }
 
         if (self.effect.dmt != .off) {
-            try dmt.draw(source, arena, self.effect_clock, size, stills, 1, 0);
+            try dmt.draw(source, arena, self.effect_clock, size, stills, dmt_shade, 0);
             try self.paintColours(arena, screen, size);
         }
     }
@@ -573,6 +575,7 @@ pub const App = struct {
     }
 
     fn toggleEffect(self: *App, which: EffectMode) void {
+        self.seed_preview = false;
         switch (which) {
             .lsd => self.effect.look = if (self.effect.look == .drift) .none else .drift,
             .mushroom => self.effect.look = if (self.effect.look == .mushroom) .none else .mushroom,
@@ -627,7 +630,7 @@ pub const App = struct {
             self.effectChip("LSD", .lsd, .lsd, 7120);
             self.effectChip(if (self.emoji_font) "🍄" else ".-.", .mushroom, .mushroom, 7122);
             self.effectChip("DMT", .dmt, .dmt, 7125);
-            if (self.effect.dmt != .off) self.seedChip();
+            self.seedChip();
             if (self.effect.look == .mushroom) self.growChip();
         }
 
@@ -643,7 +646,7 @@ pub const App = struct {
             .padding = .{ .x = 8, .y = 0 },
             .min_size_content = .{ .h = 24 },
             .background = true,
-            .color_fill = .{ .color = Palette.field },
+            .color_fill = .{ .color = if (self.seed_preview) Palette.selection else Palette.field },
             .corners = square,
             .id_extra = 7170,
         });
@@ -1554,7 +1557,10 @@ pub const App = struct {
             .toggle_mushroom => self.toggleEffect(.mushroom),
             .toggle_dmt => self.toggleEffect(.dmt),
             .reseed => {
-                self.seed = freshSeed(self.io);
+                self.effect.look = .none;
+                self.effect.dmt = .off;
+                self.seed_preview = !self.seed_preview;
+                if (self.seed_preview) self.seed = freshSeed(self.io);
                 dvui.refresh(null, @src(), null);
             },
             .select_playlist => |index| {
@@ -2327,9 +2333,10 @@ pub const App = struct {
         }
     }
 
-    /// How much of the waveform colour DMT paints back through the fold: half
-    /// strength, so the funnel gains colour without losing the type.
-    const dmt_colour_share: f32 = 0.5;
+    /// How much of the waveform colour DMT paints back through the fold. The
+    /// fold is dimmed by `dmt_shade` first, so the colour has room to show.
+    const dmt_colour_share: f32 = 0.85;
+    const dmt_shade: f32 = 0.78;
 
     /// A waveform column: drawn now, and kept while DMT runs, which paints the
     /// coloured fills again through the fold.
