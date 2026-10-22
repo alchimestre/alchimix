@@ -14,30 +14,27 @@ pub const reach: f32 = 0.45;
 const shimmer: f32 = 18;
 
 const mushroom_slots = 40;
-const spore_slots = 24;
-const spore_life = 1.4;
-const ring_period = 18;
-const ring_radius = 0.22;
+const ring_period = 12;
+const ring_radius = 0.34;
 const ring_life = 3.6;
 
 // Feature order, matching the panel in `features.zig`.
 const ring_feature = 0;
 const wave_feature = 1;
-const wet_feature = 2;
-const inherit_feature = 3;
-const lean_feature = 4;
-const spore_feature = 5;
-const snail_feature = 6;
+const inherit_feature = 2;
+const lean_feature = 3;
 /// Each cluster fills a range of slots with tall mushrooms; the slots from
 /// `tall_slots` on are the wide, solitary ones.
 const Cluster = struct { start: usize, len: usize };
 const clusters = [_]Cluster{
-    .{ .start = 0, .len = 7 },
-    .{ .start = 7, .len = 9 },
-    .{ .start = 16, .len = 12 },
+    .{ .start = 0, .len = 5 },
+    .{ .start = 5, .len = 6 },
+    .{ .start = 11, .len = 7 },
+    .{ .start = 18, .len = 8 },
+    .{ .start = 26, .len = 6 },
 };
-const tall_slots = 28;
-const big_slots = tall_slots + 6;
+const tall_slots = 32;
+const big_slots = tall_slots + 9;
 const drop_slots = 18;
 const ripple_slots = 18;
 const insect_slots = 3;
@@ -60,8 +57,6 @@ const Mushroom = struct {
     x: f32,
     y: f32,
     born: f64,
-    /// 1 when freshly watered, drying to 0.
-    wet: f32 = 0,
     /// Signed lean toward the last insect to pass: -1 left, 1 right.
     lean: f32 = 0,
 };
@@ -116,13 +111,10 @@ pub const State = struct {
     grown: f32 = 0,
     features: features.State = .{},
     /// Whether any lane is playing; the weather answers it.
-    playing: bool = true,
     ring_at: f64 = -1000,
     wave_at: f64 = -1000,
     ring_x: f32 = 0.5,
     ring_y: f32 = 0.5,
-    spores: [spore_slots]Spore = @splat(.{ .x = 0.5, .y = 0.5, .born = -1 }),
-    snail: Snail = .{},
     seeded: bool = false,
 
     /// Spawns, lands and retires. `now` is effect seconds.
@@ -183,9 +175,6 @@ pub const State = struct {
         for (&self.mushrooms) |*plant| {
             if (now - plant.born <= life) continue;
 
-            const died_at = dvui.Point.Physical{ .x = plant.x, .y = plant.y };
-            if (self.features.enabled(spore_feature)) self.puff(died_at, now);
-
             if (self.features.enabled(inherit_feature)) {
                 // Replaced where it stood, give or take a step.
                 plant.* = .{
@@ -224,7 +213,6 @@ pub const State = struct {
         }
 
         for (&self.mushrooms) |*plant| {
-            if (plant.wet > 0) plant.wet = @max(0, plant.wet - step * 0.06);
 
             if (!self.features.enabled(lean_feature)) {
                 plant.lean = 0;
@@ -238,11 +226,6 @@ pub const State = struct {
                 break;
             }
         }
-        for (&self.spores) |*spore| {
-            if (spore.born < 0 or now - spore.born > spore_life) continue;
-            spore.y -= 0.05 * step;
-        }
-        self.crawl(step, now, random);
         for (&self.hearts) |*heart| {
             if (heart.born > now or now - heart.born > heart_life) continue;
             heart.y -= 0.035 * step;
@@ -376,47 +359,10 @@ pub const State = struct {
 
         if (best) |slot| {
             self.mushrooms[slot].born = now;
-            if (self.features.enabled(wet_feature)) self.mushrooms[slot].wet = 1;
         }
     }
 
     /// Five dots rise where a mushroom stood, spread across its cap.
-    fn puff(self: *State, at: dvui.Point.Physical, now: f64) void {
-        var placed: usize = 0;
-        for (&self.spores, 0..) |*spore, index| {
-            if (placed == 5) return;
-            if (spore.born >= 0 and now - spore.born <= spore_life) continue;
-            spore.* = .{
-                .x = at.x + (@as(f32, @floatFromInt(placed)) - 2) * 0.010,
-                .y = at.y - 0.01,
-                .born = now + @as(f64, @floatFromInt(index % 2)) * 0.1,
-            };
-            placed += 1;
-        }
-    }
-
-    /// The snail crosses slowly, dropping trail dots behind it.
-    fn crawl(self: *State, step: f32, now: f64, random: std.Random) void {
-        if (!self.features.enabled(snail_feature)) return;
-
-        const snail = &self.snail;
-        if (now > snail.turn) {
-            snail.turn = now + 2 + random.float(f64) * 3;
-            snail.vx = (random.float(f32) - 0.5) * 0.012;
-        }
-        snail.x += snail.vx * step;
-        snail.y += (random.float(f32) - 0.5) * 0.004 * step * 60;
-        if (snail.x < 0.02) snail.x = 0.98;
-        if (snail.x > 0.98) snail.x = 0.02;
-        snail.y = std.math.clamp(snail.y, 0.55, 0.94);
-
-        if (now - snail.trail_at < 0.5) return;
-        snail.trail_at = now;
-        var index: usize = snail.trail.len - 1;
-        while (index > 0) : (index -= 1) snail.trail[index] = snail.trail[index - 1];
-        snail.trail[0] = .{ .x = snail.x, .y = snail.y };
-    }
-
     fn ring(self: *State, x: f32, y: f32, now: f64, random: std.Random) void {
         var slot = &self.ripples[0];
         for (&self.ripples) |*candidate| {
@@ -512,21 +458,6 @@ fn undergrowth(
         }
     }
 
-    for (state.spores) |spore| {
-        if (spore.born < 0 or now - spore.born > spore_life) continue;
-        const fade: u8 = @intFromFloat((1 - (now - spore.born) / spore_life) * 230);
-        try put(font, "*", onScreen(spore.x, spore.y, size), amber(fade));
-    }
-
-    if (state.features.enabled(snail_feature)) {
-        for (state.snail.trail, 0..) |dot, index| {
-            if (index == 0) continue;
-            const fade: u8 = @intFromFloat(110 * (1 - @as(f32, @floatFromInt(index)) / 6));
-            try put(font, ".", onScreen(dot.x, dot.y, size), stemFade(fade));
-        }
-        try stack(font, &snail_art, onScreen(state.snail.x, state.snail.y, size), lilac(220));
-    }
-
     for (state.drops) |drop| {
         const at = dvui.Point.Physical{ .x = drop.x * size.w, .y = drop.y * size.h };
         // A two glyph streak, so the fall reads at a glance.
@@ -589,21 +520,6 @@ fn fadeIn(age: f64, span: f64, peak: u8) u8 {
     return @intFromFloat(t * @as(f64, @floatFromInt(peak)));
 }
 
-const Spore = struct {
-    x: f32,
-    y: f32,
-    born: f64,
-};
-
-const Snail = struct {
-    x: f32 = 0.5,
-    y: f32 = 0.82,
-    vx: f32 = 0.008,
-    turn: f64 = 0,
-    trail: [6]struct { x: f32, y: f32 } = @splat(.{ .x = 0.5, .y = 0.82 }),
-    trail_at: f64 = 0,
-};
-
 /// One sprite in the depth order, whichever kind of mushroom it is.
 const Item = struct {
     y: f32,
@@ -626,7 +542,7 @@ fn drawBig(
     font_in: dvui.Font,
 ) !void {
     const bush = state.big[slot];
-    const font = font_in.withSize(font_in.size * 0.7);
+    const font = font_in.withSize(font_in.size * 0.62);
 
     const age = now - bush.born;
     const at = onScreen(bush.x, bush.y, size);
@@ -667,11 +583,9 @@ fn drawSmall(
     if (state.features.enabled(ring_feature) and ring_age >= 0 and ring_age < ring_life) {
         const dx = plant.x - state.ring_x;
         const dy = plant.y - state.ring_y;
-        if (@sqrt(dx * dx + dy * dy) < ring_radius) {
-            const turn = (std.math.atan2(dy, dx) + std.math.pi) / (2 * std.math.pi);
-            const start = turn * (ring_life - 0.7);
-            lit = ring_age > start and ring_age < start + 0.7;
-        }
+        const front = @sqrt(dx * dx + dy * dy);
+        const radius = ring_radius * (ring_age / ring_life);
+        lit = @abs(front - radius) < 0.07;
     }
 
     // The press wave: a bright edge travelling out from the plant.
@@ -683,11 +597,10 @@ fn drawSmall(
         if (wave_age > front and wave_age < front + 0.45) lit = true;
     }
 
-    const wet = plant.wet;
 
     if (lit) {
-        try put(font, "o", at, tint(255));
-        try put(font, "|", .{ .x = at.x + cell, .y = at.y + cell * 1.15 }, stem());
+        try put(font, "*", at, .{ .r = 0xff, .g = 0xf4, .b = 0xd6, .a = 255 });
+        try put(font, "|", .{ .x = at.x + cell, .y = at.y + cell * 1.15 }, tint(255));
         return;
     }
 
@@ -698,7 +611,7 @@ fn drawSmall(
     } else if (age < grow) {
         try put(font, ".-.", at, tint(fade));
     } else {
-        try put(font, ".-.", at, wetTint(tint, wet, fade));
+        try put(font, ".-.", at, tint(fade));
 
         var stem_glyph: []const u8 = "|";
         if (state.features.enabled(lean_feature) and plant.lean != 0) {
@@ -849,19 +762,6 @@ fn put(font: dvui.Font, text: []const u8, at: dvui.Point.Physical, colour: dvui.
 }
 
 /// Watered caps lean blue until they dry.
-fn wetTint(tint: *const fn (u8) dvui.Color, wet: f32, fade: u8) dvui.Color {
-    if (wet <= 0.01) return tint(fade);
-    const base = tint(fade);
-    const cool = water(fade);
-    const t = @min(1, wet * 1.4);
-    return .{
-        .r = @intFromFloat(@as(f32, @floatFromInt(base.r)) * (1 - t) + @as(f32, @floatFromInt(cool.r)) * t),
-        .g = @intFromFloat(@as(f32, @floatFromInt(base.g)) * (1 - t) + @as(f32, @floatFromInt(cool.g)) * t),
-        .b = @intFromFloat(@as(f32, @floatFromInt(base.b)) * (1 - t) + @as(f32, @floatFromInt(cool.b)) * t),
-        .a = fade,
-    };
-}
-
 fn pink(fade: u8) dvui.Color {
     return .{ .r = 0xf3, .g = 0x8b, .b = 0xa8, .a = fade };
 }
@@ -880,13 +780,6 @@ fn amber(fade: u8) dvui.Color {
 
 /// The caps cycle through these, so the field is not all one colour.
 const caps = [_]*const fn (u8) dvui.Color{ pink, lilac, sky, amber };
-
-const snail_art = [_][]const u8{
-    "  .--.",
-    " ( @@ )__",
-    "  `--'  oo",
-    " ~~~~~~~~~~",
-};
 
 fn stemFade(fade: u8) dvui.Color {
     return .{ .r = 0xd8, .g = 0xd0, .b = 0xc8, .a = fade };
@@ -1016,12 +909,12 @@ test "without the wave a press starts no front" {
     try std.testing.expect(state.wave_at < 0);
 }
 
-test "a landing drop wets the mushroom under it" {
+test "a landing drop revives the mushroom under it" {
     var state: State = .{};
     state.tick(0);
     const target = state.mushrooms[3];
-    state.water(target.x, target.y, 1);
-    try std.testing.expectEqual(@as(f32, 1), state.mushrooms[3].wet);
+    state.water(target.x, target.y, 7);
+    try std.testing.expectEqual(@as(f64, 7), state.mushrooms[3].born);
 }
 
 test "a cluster stays inside its spread and never stacks" {

@@ -9,7 +9,7 @@ pub const Feature = struct {
     detail: []const u8,
 };
 
-pub const count = 7;
+pub const count = 4;
 
 pub const list = [_]Feature{
     .{
@@ -25,12 +25,6 @@ pub const list = [_]Feature{
             "across the field.",
     },
     .{
-        .title = "Wet caps",
-        .blurb = "Caps cool",
-        .detail = "A drop that waters a mushroom cools its cap toward blue, then it dries " ++
-            "back to its own colour.",
-    },
-    .{
         .title = "Birth spot",
         .blurb = "Same spot",
         .detail = "A retiring mushroom is replaced a short step away, so patches persist " ++
@@ -41,17 +35,6 @@ pub const list = [_]Feature{
         .blurb = "Tips at bugs",
         .detail = "A nearby insect bends the stems toward it for a moment, then they " ++
             "straighten.",
-    },
-    .{
-        .title = "Spore puff",
-        .blurb = "Puffs away",
-        .detail = "As a mushroom retires, five dots rise from its cap and fade.",
-    },
-    .{
-        .title = "Snail",
-        .blurb = "Slow crawler",
-        .detail = "A snail crosses far slower than the insects, leaving a trail of dots " ++
-            "that fades behind it.",
     },
 };
 
@@ -78,9 +61,9 @@ pub const State = struct {
 test "a feature toggles independently" {
     var state: State = .{};
     try std.testing.expect(state.enabled(3));
-    state.toggle(3);
-    try std.testing.expect(!state.enabled(3));
-    try std.testing.expect(state.enabled(4));
+    state.toggle(2);
+    try std.testing.expect(!state.enabled(2));
+    try std.testing.expect(state.enabled(3));
 }
 
 test "an out of range feature is refused rather than crashing" {
