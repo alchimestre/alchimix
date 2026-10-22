@@ -103,9 +103,10 @@ pub const Effect = struct {
     }
 };
 
-/// `plain` is the funnel at full brightness; `b` dims the fold and paints the
+/// `one` pulls the grey backdrop in ahead of the controls, `two` tightens the
+/// panel padding, `both` does both, and `b` dims the fold and paints the
 /// coloured fills back at full strength.
-pub const Dmt = enum { off, plain, b };
+pub const Dmt = enum { off, one, two, both, b };
 
 /// Lane indices for remembered tracks the crate still holds, oldest first.
 pub fn rememberedLanes(remembered: []const u64, lanes: []const u64, out: *[Played.limit]usize) usize {
@@ -154,7 +155,7 @@ fn pressed(current: Dmt, choice: Dmt) Dmt {
     return if (current == choice) .off else choice;
 }
 
-pub const EffectMode = enum { lsd, mushroom, dmt, dmt_b };
+pub const EffectMode = enum { lsd, mushroom, dmt_one, dmt_two, dmt_both, dmt_b };
 
 /// The bundled emoji family, loaded at startup.
 pub const emoji_family = "noto emoji";
@@ -243,6 +244,9 @@ pub const App = struct {
     lsd_target: ?dvui.Texture.Target = null,
     /// The frame's coloured fills, for DMT B. Only kept while it runs.
     colours: std.ArrayListUnmanaged(geom.Quad) = .empty,
+    /// The grey panels the frame is built on, for DMT 1. Only kept while it
+    /// runs.
+    backdrops: std.ArrayListUnmanaged(dvui.Rect.Physical) = .empty,
     colour_target: ?dvui.Texture.Target = null,
     /// Effect seconds: wall seconds scaled by tempo and the speed slider. LSD
     /// reads it straight; DMT integrates it through its mood.
@@ -396,6 +400,7 @@ pub const App = struct {
         // The whole frame has to exist before it can be warped, so while the
         // mode runs it is drawn into an offscreen copy and blitted back.
         self.colours.clearRetainingCapacity();
+        self.backdrops.clearRetainingCapacity();
         const previous = self.capture();
 
         var root = dvui.box(@src(), .{ .dir = .vertical }, .{
@@ -520,7 +525,7 @@ pub const App = struct {
         }
 
         if (self.effect.dmt != .off) {
-            try dmt.draw(source, arena, self.effect_clock, size, stills, self.dmtShade(), 0);
+            try dmt.draw(source, arena, self.effect_clock, size, stills, self.dmtShade(), 0, self.backdrop());
             if (self.effect.dmt == .b) try self.paintColours(arena, screen, size);
         }
     }
@@ -554,7 +559,7 @@ pub const App = struct {
 
         _ = dvui.RenderTarget.setAsCurrent(screen);
         const layer_texture = try dvui.textureFromTarget(layer);
-        try dmt.draw(layer_texture, arena, self.effect_clock, size, &.{}, 1, 0);
+        try dmt.draw(layer_texture, arena, self.effect_clock, size, &.{}, 1, 0, null);
     }
 
     /// LSD's output copy, kept for as long as both modes run.
@@ -578,7 +583,9 @@ pub const App = struct {
         switch (which) {
             .lsd => self.effect.look = if (self.effect.look == .drift) .none else .drift,
             .mushroom => self.effect.look = if (self.effect.look == .mushroom) .none else .mushroom,
-            .dmt => self.effect.dmt = pressed(self.effect.dmt, .plain),
+            .dmt_one => self.effect.dmt = pressed(self.effect.dmt, .one),
+            .dmt_two => self.effect.dmt = pressed(self.effect.dmt, .two),
+            .dmt_both => self.effect.dmt = pressed(self.effect.dmt, .both),
             .dmt_b => self.effect.dmt = pressed(self.effect.dmt, .b),
         }
         if (!self.effect.any()) {
@@ -611,11 +618,12 @@ pub const App = struct {
         {
             var bar = dvui.box(@src(), .{ .dir = .horizontal }, .{
                 .expand = .horizontal,
-                .padding = .{ .x = 16, .y = 8 },
+                .padding = .{ .x = 16 * self.tight(), .y = 8 * self.tight() },
                 .background = true,
                 .color_fill = .{ .color = Palette.background },
             });
             defer bar.deinit();
+            self.backdrops.append(self.allocator, bar.data().rectScaleFromParent().r) catch {};
 
             labelStyled(@src(), "alchimix", .{
                 .font = titleFont(),
@@ -629,7 +637,9 @@ pub const App = struct {
             self.still_count = 0;
             self.effectChip("LSD", .lsd, .lsd, 7120);
             self.effectChip(if (self.emoji_font) "🍄" else ".-.", .mushroom, .mushroom, 7122);
-            self.effectChip("DMT", .dmt, .dmt, 7125);
+            self.effectChip("DMT 1", .dmt_one, .dmt_one, 7125);
+            self.effectChip("DMT 2", .dmt_two, .dmt_two, 7127);
+            self.effectChip("DMT 1+2", .dmt_both, .dmt_both, 7129);
             self.effectChip("DMT B", .dmt_b, .dmt_b, 7140);
             if (self.effect.look == .mushroom) self.growChip();
         }
@@ -704,7 +714,9 @@ pub const App = struct {
         const on = switch (which) {
             .lsd => self.effect.look == .drift,
             .mushroom => self.effect.look == .mushroom,
-            .dmt => self.effect.dmt == .plain,
+            .dmt_one => self.effect.dmt == .one,
+            .dmt_two => self.effect.dmt == .two,
+            .dmt_both => self.effect.dmt == .both,
             .dmt_b => self.effect.dmt == .b,
         };
         var chip = dvui.box(@src(), .{ .dir = .horizontal }, .{
@@ -974,7 +986,7 @@ pub const App = struct {
             .expand = .vertical,
             .background = true,
             .color_fill = .{ .color = Palette.panel },
-            .padding = .{ .x = 8, .y = 8 },
+            .padding = .{ .x = 8 * self.tight(), .y = 8 * self.tight() },
         });
         defer panel.deinit();
 
@@ -1014,7 +1026,7 @@ pub const App = struct {
         }
 
         self.playlistChildren("root", 0);
-        self.still(rectFrom(panel.data().borderRectScale().r));
+        self.backdrops.append(self.allocator, panel.data().borderRectScale().r) catch {};
     }
 
     fn frameBody(self: *App) void {
@@ -1368,7 +1380,7 @@ pub const App = struct {
         // DMT runs on top of LSD, so a press follows the tunnel first and the
         // drift underneath it second.
         var shown = dvui.Point.Physical{ .x = p.x, .y = p.y };
-        if (self.effect.dmt != .off) shown = dmt.fold(shown, self.effect_clock, size, stills, 0);
+        if (self.effect.dmt != .off) shown = dmt.foldBack(shown, self.effect_clock, size, stills, 0, self.backdrop());
         switch (self.effect.look) {
             .drift => shown = lsd.sample(shown, self.effect_time, size, stills, 1),
             .mushroom => shown = lsd.sample(shown, self.effect_time, size, stills, mushroom.reach),
@@ -1530,7 +1542,9 @@ pub const App = struct {
             },
             .toggle_lsd => self.toggleEffect(.lsd),
             .toggle_mushroom => self.toggleEffect(.mushroom),
-            .toggle_dmt => self.toggleEffect(.dmt),
+            .toggle_dmt_one => self.toggleEffect(.dmt_one),
+            .toggle_dmt_two => self.toggleEffect(.dmt_two),
+            .toggle_dmt_both => self.toggleEffect(.dmt_both),
             .toggle_dmt_b => self.toggleEffect(.dmt_b),
             .select_playlist => |index| {
                 if (index >= self.playlists.len) return;
@@ -2143,6 +2157,19 @@ pub const App = struct {
 
     /// The pinned look runs on tempo alone, at its own constant turn; the other
     /// variants use the mood-driven clock.
+    /// DMT 1 pulls the grey panels in ahead of the controls drawn over them.
+    fn backdrop(self: *const App) ?dmt.Backdrop {
+        if (self.effect.dmt != .one and self.effect.dmt != .both) return null;
+        if (self.backdrops.items.len == 0) return null;
+        return .{ .rects = self.backdrops.items, .pull = 0.18 };
+    }
+
+    /// DMT 2 spends less of each panel on padding, so the grey frame is a
+    /// smaller share of the window.
+    fn tight(self: *const App) f32 {
+        return if (self.effect.dmt == .two or self.effect.dmt == .both) 0.55 else 1;
+    }
+
     fn dmtShade(self: *const App) f32 {
         return if (self.effect.dmt == .b) dmt.damp else 1;
     }
@@ -3084,16 +3111,17 @@ test "waveform colour survives the fold" {
     try std.testing.expect(shown_grey.r > grey.r);
 
     // The plain funnel is the reference look: colour comes through untouched.
-    try std.testing.expectEqual(plain, lifted(.{ .dmt = .plain }, plain));
+    try std.testing.expectEqual(plain, lifted(.{ .dmt = .one }, plain));
     try std.testing.expectEqual(plain, lifted(.{ .look = .drift }, plain));
 }
 
 test "a mode chip runs itself and stops only itself" {
-    try std.testing.expectEqual(Dmt.plain, pressed(.off, .plain));
-    try std.testing.expectEqual(Dmt.off, pressed(.plain, .plain));
+    try std.testing.expectEqual(Dmt.one, pressed(.off, .one));
+    try std.testing.expectEqual(Dmt.off, pressed(.one, .one));
+    try std.testing.expectEqual(Dmt.two, pressed(.one, .two));
     try std.testing.expectEqual(Dmt.b, pressed(.off, .b));
     try std.testing.expectEqual(Dmt.off, pressed(.b, .b));
-    try std.testing.expectEqual(Dmt.b, pressed(.plain, .b));
+    try std.testing.expectEqual(Dmt.b, pressed(.one, .b));
 }
 
 test "the play history keeps four tracks, newest last" {
