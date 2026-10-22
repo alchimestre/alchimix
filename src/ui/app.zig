@@ -182,6 +182,12 @@ pub const App = struct {
     lane_right: f32 = 0,
     /// Tracks that started lately; the transport button replays them.
     played: Played = .{},
+    /// Crate autoplay: the lane it is pulling through, the track it left there
+    /// so a restart resumes it, and whether the next frame should scroll to it.
+    autoplay_on: bool = false,
+    autoplay_index: usize = 0,
+    autoplay_track: u64 = 0,
+    autoplay_show: bool = false,
     /// The mushroom undergrowth: plants, rain and rings.
     mushroom: mushroom.State = .{},
     /// A text field held the keyboard last frame, so space is a space.
@@ -427,6 +433,7 @@ pub const App = struct {
         self.player.poll();
         self.transport.setTempo(self.masterBpm());
         self.transport.sync();
+        self.advanceAutoplay();
         self.advanceEffects();
 
         if (self.preview_pending) |track| {
@@ -1408,6 +1415,10 @@ pub const App = struct {
                 });
                 defer row.deinit();
 
+                if (self.autoplay_show and index == self.autoplay_index) {
+                    dvui.scrollTo(.{ .screen_rect = row.data().borderRectScale().r });
+                    self.autoplay_show = false;
+                }
                 const block = drawBlock(self, index, track.*);
                 switch (block.action) {
                     .remove => next_action = .{ .remove = index },
@@ -1620,7 +1631,12 @@ pub const App = struct {
                 self.transport.setKeylock(!self.transport.keylocked());
                 dvui.refresh(null, @src(), null);
             },
+            .toggle_autoplay => {
+                self.toggleAutoplay();
+                dvui.refresh(null, @src(), null);
+            },
             .toggle_transport => {
+                self.pauseAutoplay();
                 // Stop is global; play replays the tracks that ran last.
                 if (self.transport.anyPlaying()) {
                     self.transport.stopAll();
@@ -1629,7 +1645,11 @@ pub const App = struct {
                 }
                 dvui.refresh(null, @src(), null);
             },
-            .clear_all => self.clearAll(),
+            .clear_all => {
+                self.pauseAutoplay();
+                self.finishAutoplay();
+                self.clearAll();
+            },
             .toggle_sort_bpm => {
                 self.sort_by_bpm = !self.sort_by_bpm;
                 self.refresh() catch {};
@@ -1658,6 +1678,7 @@ pub const App = struct {
             },
             .toggle_lane_play => |index| {
                 if (index >= self.grid.items.len) return;
+                self.pauseAutoplay();
                 if (self.transport.isPlaying(index)) {
                     self.transport.stop(index);
                     self.played.remember(self.grid.items[index].track_id);
@@ -1958,6 +1979,95 @@ pub const App = struct {
         });
 
         self.hit_map.append(rectFrom(chip.data().contentRectScale().r), .{ .lane_mute = index });
+    }
+
+    /// The crate autoplay switch, between play and clear.
+    fn autoButton(self: *App) void {
+        var chip = dvui.box(@src(), .{ .dir = .horizontal }, .{
+            .margin = .{ .x = 8, .y = 0 },
+            .padding = .{ .x = 10, .y = 0 },
+            .min_size_content = .{ .h = 24 },
+            .gravity_y = 0.5,
+            .background = true,
+            .color_fill = .{ .color = if (self.autoplay_on) Palette.selection else Palette.field },
+            .id_extra = 84,
+        });
+        defer chip.deinit();
+
+        labelStyled(@src(), "auto", .{
+            .gravity_y = 0.5,
+            .color_text = .{ .color = if (self.autoplay_on) Palette.green else Palette.secondary },
+            .font = metaFont(),
+            .id_extra = 85,
+        });
+        self.hit_map.append(rectFrom(chip.data().rectScaleFromParent().r), .autoplay);
+    }
+
+    /// Where autoplay's track sits now. A crate edit moves lanes, so the index
+    /// is only trusted while it still holds the track autoplay started.
+    fn autoplayLane(self: *const App) ?usize {
+        if (self.autoplay_index < self.crate.len()) {
+            const track = self.crate.at(self.autoplay_index) orelse return null;
+            if (self.autoplay_track == 0 or track.id == self.autoplay_track) return self.autoplay_index;
+        }
+        if (self.autoplay_track == 0) return null;
+        for (0..self.crate.len()) |index| {
+            const track = self.crate.at(index) orelse break;
+            if (track.id == self.autoplay_track) return index;
+        }
+        return null;
+    }
+
+    /// Starts the lane autoplay sits on, walking past tracks the decoder cannot
+    /// load rather than stalling on them.
+    fn startAutoplayLane(self: *App) void {
+        while (self.autoplay_index < self.crate.len()) {
+            const track = self.crate.at(self.autoplay_index) orelse break;
+            self.autoplay_track = track.id;
+            self.transport.start(self.autoplay_index, .now);
+            if (self.transport.isPlaying(self.autoplay_index)) {
+                self.played.remember(track.id);
+                return;
+            }
+            self.autoplay_index += 1;
+        }
+        self.finishAutoplay();
+    }
+
+    fn finishAutoplay(self: *App) void {
+        self.autoplay_on = false;
+        self.autoplay_index = 0;
+        self.autoplay_track = 0;
+    }
+
+    /// Turns autoplay off but leaves its lane where it stopped, so pressing it
+    /// again resumes the same track from the same beat.
+    fn pauseAutoplay(self: *App) void {
+        if (!self.autoplay_on) return;
+        self.autoplay_on = false;
+        if (self.transport.isPlaying(self.autoplay_index)) self.transport.stop(self.autoplay_index);
+    }
+
+    /// Pulls the next crate track once the lane autoplay was running stops.
+    fn advanceAutoplay(self: *App) void {
+        if (!self.autoplay_on) return;
+        if (self.autoplayLane()) |index| self.autoplay_index = index;
+        if (self.transport.isPlaying(self.autoplay_index)) return;
+        self.autoplay_index += 1;
+        self.autoplay_show = true;
+        self.startAutoplayLane();
+    }
+
+    fn toggleAutoplay(self: *App) void {
+        if (self.autoplay_on) {
+            self.pauseAutoplay();
+            return;
+        }
+        if (self.crate.len() == 0) return;
+        self.autoplay_on = true;
+        self.autoplay_index = self.autoplayLane() orelse 0;
+        self.autoplay_show = true;
+        self.startAutoplayLane();
     }
 
     fn transportToggle(self: *App) void {
@@ -3184,6 +3294,7 @@ fn frameFooter(app: *App) void {
     spacer.deinit();
 
     app.transportToggle();
+    app.autoButton();
     app.clearButton();
 
     var spacer2 = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal });

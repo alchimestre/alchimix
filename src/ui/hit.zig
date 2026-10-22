@@ -79,6 +79,8 @@ pub const Target = union(enum) {
     trim: usize,
     /// Starts and stops the grid's shared transport.
     transport,
+    /// Plays the crate through, one track after another.
+    autoplay,
     /// Empties the crate and returns to the starting state.
     clear,
     /// Advances the garden's plant by one stage, for trying the growth halos.
@@ -272,6 +274,7 @@ pub const Drag = struct {
         toggle: Toggle,
         toggle_notation,
         toggle_transport,
+        toggle_autoplay,
         clear_all,
         toggle_sort_bpm,
     /// Advances the garden one stage.
@@ -311,6 +314,7 @@ pub const Drag = struct {
             .toggle => |toggle| .{ .toggle = toggle },
             .notation => .toggle_notation,
             .transport => .toggle_transport,
+            .autoplay => .toggle_autoplay,
             .clear => .clear_all,
             .sort_bpm => .toggle_sort_bpm,
             .grow_plant => .grow_plant,
@@ -400,7 +404,7 @@ pub const Drag = struct {
         return switch (target) {
             .block => |from| .{ .move_block = .{ .from = from, .gap = to } },
             .row => |track| .{ .drop_track = .{ .gap = to, .track = track } },
-            .toggle, .notation, .lane, .nav, .eq_node, .eq_plot, .eq_preset, .trim, .transport, .clear, .playlist, .playlist_toggle, .save_playlist, .sort_bpm, .lsd, .mushroom, .dmt, .heartbeat, .master_lock, .pitch_lock, .lane_play, .lane_mute, .width, .grow_plant => .none,
+            .toggle, .notation, .lane, .nav, .eq_node, .eq_plot, .eq_preset, .trim, .transport, .autoplay, .clear, .playlist, .playlist_toggle, .save_playlist, .sort_bpm, .lsd, .mushroom, .dmt, .heartbeat, .master_lock, .pitch_lock, .lane_play, .lane_mute, .width, .grow_plant => .none,
         };
     }
 
