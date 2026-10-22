@@ -33,7 +33,7 @@ const speed: f32 = 1.6;
 /// The pinned look: the window border never samples outside the frame.
 pub const border_px: f32 = 26;
 /// Pixels between a still rect and the full fold around it.
-const calm: f32 = 18;
+const calm: f32 = 1.5;
 /// Vertex every this many physical pixels. Mirror seams are sharp, so the grid
 /// has to be fine.
 const cell: f32 = 9;
