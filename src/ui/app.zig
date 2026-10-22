@@ -99,13 +99,13 @@ pub const Effect = struct {
     /// Only the colour-weighted variants lift the waveform; the plain funnel
     /// and the drift leave it alone.
     pub fn liftsColour(self: Effect) bool {
-        return self.dmt == .a or self.dmt == .b;
+        return self.dmt == .b;
     }
 };
 
-/// `plain` is the funnel as it was: the frame at full brightness. `a` dims the
-/// whole fold; `b` dims it and paints the coloured fills back at full strength.
-pub const Dmt = enum { off, plain, a, b, og };
+/// `plain` is the funnel at full brightness; `b` dims the fold and paints the
+/// coloured fills back at full strength.
+pub const Dmt = enum { off, plain, b };
 
 /// Lane indices for remembered tracks the crate still holds, oldest first.
 pub fn rememberedLanes(remembered: []const u64, lanes: []const u64, out: *[Played.limit]usize) usize {
@@ -154,7 +154,7 @@ fn pressed(current: Dmt, choice: Dmt) Dmt {
     return if (current == choice) .off else choice;
 }
 
-pub const EffectMode = enum { lsd, mushroom, dmt, dmt_a, dmt_b, dmt_og };
+pub const EffectMode = enum { lsd, mushroom, dmt, dmt_b };
 
 /// The bundled emoji family, loaded at startup.
 pub const emoji_family = "noto emoji";
@@ -251,7 +251,6 @@ pub const App = struct {
     effect_clock: dmt.Clock = .{},
     /// The pinned look's own clock: tempo only, so the speed slider leaves it
     /// exactly as it was.
-    og_clock: dmt.Clock = .{},
     /// Shared effect speed multiplier, under both mode chips.
     effect_speed: f32 = 1,
     // Six effect chips, the speed slider, the garden panel and its chrome all
@@ -521,7 +520,7 @@ pub const App = struct {
         }
 
         if (self.effect.dmt != .off) {
-            try dmt.draw(source, arena, self.dmtClock(), size, stills, self.dmtShade(), self.dmtBorder());
+            try dmt.draw(source, arena, self.effect_clock, size, stills, self.dmtShade(), 0);
             if (self.effect.dmt == .b) try self.paintColours(arena, screen, size);
         }
     }
@@ -555,7 +554,7 @@ pub const App = struct {
 
         _ = dvui.RenderTarget.setAsCurrent(screen);
         const layer_texture = try dvui.textureFromTarget(layer);
-        try dmt.draw(layer_texture, arena, self.dmtClock(), size, &.{}, 1, 0);
+        try dmt.draw(layer_texture, arena, self.effect_clock, size, &.{}, 1, 0);
     }
 
     /// LSD's output copy, kept for as long as both modes run.
@@ -580,9 +579,7 @@ pub const App = struct {
             .lsd => self.effect.look = if (self.effect.look == .drift) .none else .drift,
             .mushroom => self.effect.look = if (self.effect.look == .mushroom) .none else .mushroom,
             .dmt => self.effect.dmt = pressed(self.effect.dmt, .plain),
-            .dmt_a => self.effect.dmt = pressed(self.effect.dmt, .a),
             .dmt_b => self.effect.dmt = pressed(self.effect.dmt, .b),
-            .dmt_og => self.effect.dmt = pressed(self.effect.dmt, .og),
         }
         if (!self.effect.any()) {
             self.dropEffects();
@@ -633,9 +630,7 @@ pub const App = struct {
             self.effectChip("LSD", .lsd, .lsd, 7120);
             self.effectChip(if (self.emoji_font) "🍄" else ".-.", .mushroom, .mushroom, 7122);
             self.effectChip("DMT", .dmt, .dmt, 7125);
-            self.effectChip("DMT A", .dmt_a, .dmt_a, 7130);
             self.effectChip("DMT B", .dmt_b, .dmt_b, 7140);
-            self.effectChip("OG DMT", .dmt_og, .dmt_og, 7150);
             if (self.effect.look == .mushroom) self.growChip();
         }
 
@@ -710,9 +705,7 @@ pub const App = struct {
             .lsd => self.effect.look == .drift,
             .mushroom => self.effect.look == .mushroom,
             .dmt => self.effect.dmt == .plain,
-            .dmt_a => self.effect.dmt == .a,
             .dmt_b => self.effect.dmt == .b,
-            .dmt_og => self.effect.dmt == .og,
         };
         var chip = dvui.box(@src(), .{ .dir = .horizontal }, .{
             .gravity_y = 0.5,
@@ -1359,7 +1352,6 @@ pub const App = struct {
         const step = dmt.tempoStep(elapsed, self.masterBpm()) * self.effect_speed;
         self.effect_time += step;
         self.effect_clock.advance(step, dmt.mood(self.effect_time));
-        self.og_clock.advance(dmt.tempoStep(elapsed, self.masterBpm()), .{});
         if (self.transport.anyPlaying()) self.mushroom.grow(step, self.effect_time, self.masterBpm());
         self.mushroom.tick(self.effect_time);
         self.mushroom.fall(step, self.effect_time);
@@ -1376,7 +1368,7 @@ pub const App = struct {
         // DMT runs on top of LSD, so a press follows the tunnel first and the
         // drift underneath it second.
         var shown = dvui.Point.Physical{ .x = p.x, .y = p.y };
-        if (self.effect.dmt != .off) shown = dmt.fold(shown, self.dmtClock(), size, stills, self.dmtBorder());
+        if (self.effect.dmt != .off) shown = dmt.fold(shown, self.effect_clock, size, stills, 0);
         switch (self.effect.look) {
             .drift => shown = lsd.sample(shown, self.effect_time, size, stills, 1),
             .mushroom => shown = lsd.sample(shown, self.effect_time, size, stills, mushroom.reach),
@@ -1539,9 +1531,7 @@ pub const App = struct {
             .toggle_lsd => self.toggleEffect(.lsd),
             .toggle_mushroom => self.toggleEffect(.mushroom),
             .toggle_dmt => self.toggleEffect(.dmt),
-            .toggle_dmt_a => self.toggleEffect(.dmt_a),
             .toggle_dmt_b => self.toggleEffect(.dmt_b),
-            .toggle_dmt_og => self.toggleEffect(.dmt_og),
             .select_playlist => |index| {
                 if (index >= self.playlists.len) return;
                 self.selectPlaylist(index);
@@ -2153,19 +2143,8 @@ pub const App = struct {
 
     /// The pinned look runs on tempo alone, at its own constant turn; the other
     /// variants use the mood-driven clock.
-    fn dmtClock(self: *const App) dmt.Clock {
-        return if (self.effect.dmt == .og) self.og_clock else self.effect_clock;
-    }
-
     fn dmtShade(self: *const App) f32 {
-        return switch (self.effect.dmt) {
-            .a, .b => dmt.damp,
-            else => 1,
-        };
-    }
-
-    fn dmtBorder(self: *const App) f32 {
-        return if (self.effect.dmt == .og) dmt.og_border else 0;
+        return if (self.effect.dmt == .b) dmt.damp else 1;
     }
 
     /// Play: start the remembered tracks together. With nothing playable
@@ -3104,9 +3083,6 @@ test "waveform colour survives the fold" {
     try std.testing.expectEqual(shown_grey.g, shown_grey.b);
     try std.testing.expect(shown_grey.r > grey.r);
 
-    const shown = lifted(.{ .dmt = .a }, plain);
-    try std.testing.expect(shown.r < plain.r and shown.g >= plain.g);
-
     // The plain funnel is the reference look: colour comes through untouched.
     try std.testing.expectEqual(plain, lifted(.{ .dmt = .plain }, plain));
     try std.testing.expectEqual(plain, lifted(.{ .look = .drift }, plain));
@@ -3115,13 +3091,9 @@ test "waveform colour survives the fold" {
 test "a mode chip runs itself and stops only itself" {
     try std.testing.expectEqual(Dmt.plain, pressed(.off, .plain));
     try std.testing.expectEqual(Dmt.off, pressed(.plain, .plain));
-    try std.testing.expectEqual(Dmt.plain, pressed(.a, .plain));
-    try std.testing.expectEqual(Dmt.a, pressed(.off, .a));
     try std.testing.expectEqual(Dmt.b, pressed(.off, .b));
-    try std.testing.expectEqual(Dmt.off, pressed(.a, .a));
     try std.testing.expectEqual(Dmt.off, pressed(.b, .b));
-    try std.testing.expectEqual(Dmt.a, pressed(.b, .a));
-    try std.testing.expectEqual(Dmt.b, pressed(.a, .b));
+    try std.testing.expectEqual(Dmt.b, pressed(.plain, .b));
 }
 
 test "the play history keeps four tracks, newest last" {
