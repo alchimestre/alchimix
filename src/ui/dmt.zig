@@ -16,6 +16,13 @@ const dvui = @import("dvui");
 const geom = @import("geom.zig");
 
 /// Rings between the centre and the rim.
+/// The band a ring shows at, with every other ring reflected. Adjacent rings
+/// meet at their edges, so the picture mirrors from the middle outwards.
+fn ringBand(level: f32, band: f32) f32 {
+    const parity = @mod(level, 2);
+    return if (parity < 1) band else 1 - band;
+}
+
 /// How far one kick pushes the rings outward, in ring widths. A beat swells
 /// the lanes and the gap between beats lets them settle back.
 const kick_push: f32 = 0.25;
@@ -117,10 +124,12 @@ pub fn fold(
     // outward, so the frame is always leaving the fulcrum.
     const depth = @log(radius / half + 0.01) * rings - rush_phase - heart * kick_push;
     const level = @floor(depth);
-    const band = depth - level;
+    const band = ringBand(level, depth - level);
 
     // Each ring shows the frame again at a full radius, turned against its
-    // neighbour. Mirroring both axes folds that copy into V chevrons.
+    // neighbour, and alternate rings are turned inside out, so the picture
+    // reflects across every ring boundary on its way out from the middle.
+    // Mirroring both axes folds that copy into V chevrons.
     //
     // The ring's angle is `turn` twice over, once inside the ring and once as
     // the mirror rotation, so one rotation of the radial unit vector covers
@@ -434,6 +443,16 @@ test "the grid fits one index buffer at any window size" {
         const shape = gridShape(size);
         try std.testing.expect((shape.columns + 1) * (shape.rows + 1) <= 65535);
     }
+}
+
+test "alternate rings are reflected so the picture mirrors outwards" {
+    try std.testing.expectEqual(@as(f32, 0.2), ringBand(0, 0.2));
+    try std.testing.expectEqual(@as(f32, 0.8), ringBand(1, 0.2));
+    try std.testing.expectEqual(@as(f32, 0.2), ringBand(2, 0.2));
+
+    // The seam between two rings is continuous: both sides show the edge.
+    try std.testing.expectApproxEqAbs(ringBand(0, 1), ringBand(1, 0), 0.0001);
+    try std.testing.expectApproxEqAbs(ringBand(-1, 0.3), 0.7, 0.0001);
 }
 
 test "the lane slider round-trips and stays in range" {
