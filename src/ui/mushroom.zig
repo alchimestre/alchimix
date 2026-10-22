@@ -17,11 +17,11 @@ const mushroom_slots = 40;
 /// `tall_slots` on are the wide, solitary ones.
 const Cluster = struct { start: usize, len: usize };
 const clusters = [_]Cluster{
-    .{ .start = 0, .len = 5 },
-    .{ .start = 5, .len = 6 },
-    .{ .start = 11, .len = 7 },
+    .{ .start = 0, .len = 7 },
+    .{ .start = 7, .len = 9 },
+    .{ .start = 16, .len = 12 },
 };
-const tall_slots = 18;
+const tall_slots = 28;
 const big_slots = tall_slots + 6;
 const drop_slots = 18;
 const ripple_slots = 18;
@@ -185,6 +185,7 @@ pub const State = struct {
             if (drop.y < drop.land) continue;
 
             self.ring(drop.x, drop.land, now, random);
+            self.water(drop.x, drop.land, now);
             drop.* = .{
                 .x = 0.05 + random.float(f32) * 0.9,
                 .y = -0.05 - random.float(f32) * 0.3,
@@ -230,14 +231,24 @@ pub const State = struct {
         const group = clusters[index];
         const centre_x = 0.12 + random.float(f32) * 0.7;
         const centre_y = 0.15 + random.float(f32) * 0.6;
-        const spread_x = 0.035 + @as(f32, @floatFromInt(group.len)) * 0.007;
-        const spread_y = 0.06 + @as(f32, @floatFromInt(group.len)) * 0.010;
+        // Laid on a grid of up to four across, so the members stand beside each
+        // other instead of stacking on one point.
+        const columns: usize = @min(group.len, 4);
+        const rows = (group.len + columns - 1) / columns;
+        const pitch_x: f32 = 0.050;
+        const pitch_y: f32 = 0.105;
 
         for (group.start..group.start + group.len) |slot| {
             if (slot >= self.big.len) return;
+            const seat = slot - group.start;
+            const column = seat % columns;
+            const row = seat / columns;
+            const across = (@as(f32, @floatFromInt(column)) - @as(f32, @floatFromInt(columns - 1)) * 0.5) * pitch_x;
+            const down = (@as(f32, @floatFromInt(row)) - @as(f32, @floatFromInt(rows - 1)) * 0.5) * pitch_y;
+
             self.big[slot] = .{
-                .x = std.math.clamp(centre_x + (random.float(f32) - 0.5) * spread_x, 0.04, 0.94),
-                .y = std.math.clamp(centre_y + (random.float(f32) - 0.5) * spread_y, 0.1, 0.9),
+                .x = std.math.clamp(centre_x + across + (random.float(f32) - 0.5) * 0.012, 0.04, 0.94),
+                .y = std.math.clamp(centre_y + down + (random.float(f32) - 0.5) * 0.02, 0.1, 0.9),
                 .scale = 0.7 + random.float(f32) * 0.5,
                 .born = born,
             };
@@ -273,6 +284,25 @@ pub const State = struct {
         };
     }
 
+
+    /// A landing drop re-pops the nearest small mushroom, so the rain reaches
+    /// the field instead of passing through it.
+    fn water(self: *State, x: f32, y: f32, now: f64) void {
+        var best: ?usize = null;
+        var best_d2: f32 = 0.05 * 0.05;
+
+        for (self.mushrooms, 0..) |mushroom, slot| {
+            const dx = mushroom.x - x;
+            const dy = mushroom.y - y;
+            const d2 = dx * dx + dy * dy;
+            if (d2 < best_d2) {
+                best_d2 = d2;
+                best = slot;
+            }
+        }
+
+        if (best) |slot| self.mushrooms[slot].born = now;
+    }
 
     fn ring(self: *State, x: f32, y: f32, now: f64, random: std.Random) void {
         var slot = &self.ripples[0];
@@ -311,7 +341,7 @@ pub fn draw(
     }
 
     try dvui.renderTriangles(try lsd.wash(arena, time, size, shimmer), null);
-    try undergrowth(state, time, size, ascii);
+    try undergrowth(state, time, size, still, ascii);
     try geom.repaint(arena, still, size, texture);
 }
 
@@ -326,7 +356,13 @@ pub fn plantRect(size: dvui.Size.Physical) dvui.Rect.Physical {
     };
 }
 
-fn undergrowth(state: *const State, now: f64, size: dvui.Size.Physical, ascii: dvui.Font) !void {
+fn undergrowth(
+    state: *const State,
+    now: f64,
+    size: dvui.Size.Physical,
+    still: []const dvui.Rect.Physical,
+    ascii: dvui.Font,
+) !void {
     // A fixed cell: scaled to the window, the sprites stop reading as art.
     const font_px: f32 = 20;
     // ASCII art is a grid: in a proportional face every space collapses and the
@@ -357,9 +393,9 @@ fn undergrowth(state: *const State, now: f64, size: dvui.Size.Physical, ascii: d
 
     for (order) |item| {
         if (item.big) |slot| {
-            try drawBig(state, now, slot, size, font);
+            try drawBig(state, now, slot, size, still, font);
         } else if (item.small) |slot| {
-            try drawSmall(state, now, slot, size, font, cell);
+            try drawSmall(state, now, slot, size, still, font, cell);
         }
     }
 
@@ -409,6 +445,16 @@ fn onScreen(x: f32, y: f32, size: dvui.Size.Physical) dvui.Point.Physical {
     return .{ .x = x * size.w, .y = y * size.h };
 }
 
+/// The garden recedes under the app's panels, so the chrome stays readable.
+fn shade(at: dvui.Point.Physical, fade: u8, still: []const dvui.Rect.Physical) u8 {
+    for (still) |rect| {
+        const inside = at.x >= rect.x and at.x <= rect.x + rect.w and
+            at.y >= rect.y and at.y <= rect.y + rect.h;
+        if (inside) return fade / 3;
+    }
+    return fade;
+}
+
 /// Sprites fade in over `span` seconds and hold at `peak` alpha.
 fn fadeIn(age: f64, span: f64, peak: u8) u8 {
     const t = std.math.clamp(age / span, 0, 1);
@@ -428,13 +474,20 @@ fn itemLess(_: void, a: Item, b: Item) bool {
 }
 
 /// A wide or tall mushroom, rising through its three phases.
-fn drawBig(state: *const State, now: f64, slot: usize, size: dvui.Size.Physical, font_in: dvui.Font) !void {
+fn drawBig(
+    state: *const State,
+    now: f64,
+    slot: usize,
+    size: dvui.Size.Physical,
+    still: []const dvui.Rect.Physical,
+    font_in: dvui.Font,
+) !void {
     const bush = state.big[slot];
     const font = font_in.withSize(font_in.size * 0.7);
 
     const age = now - bush.born;
     const at = onScreen(bush.x, bush.y, size);
-    const fade = fadeIn(age, 0.9, 235);
+    const fade = shade(at, fadeIn(age, 0.9, 235), still);
     const tint = caps[slot % caps.len];
 
     const full: []const []const u8 = if (slot < tall_slots) &mushroom_tall else &mushroom_stout;
@@ -450,11 +503,19 @@ fn drawBig(state: *const State, now: f64, slot: usize, size: dvui.Size.Physical,
 }
 
 /// One of the small pop-up mushrooms, tinted by its slot.
-fn drawSmall(state: *const State, now: f64, slot: usize, size: dvui.Size.Physical, font: dvui.Font, cell: f32) !void {
+fn drawSmall(
+    state: *const State,
+    now: f64,
+    slot: usize,
+    size: dvui.Size.Physical,
+    still: []const dvui.Rect.Physical,
+    font: dvui.Font,
+    cell: f32,
+) !void {
     const plant = state.mushrooms[slot];
     const age = now - plant.born;
     const at = onScreen(plant.x, plant.y, size);
-    const fade = fadeIn(age, 0.4, 255);
+    const fade = shade(at, fadeIn(age, 0.4, 255), still);
     const tint = caps[(slot / 3) % caps.len];
 
     if (age < 0.5) {

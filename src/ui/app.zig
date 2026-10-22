@@ -699,7 +699,7 @@ pub const App = struct {
         labelStyled(@src(), text, .{
             .gravity_y = 0.5,
             .color_text = .{ .color = if (on) Palette.background else Palette.muted },
-            .font = if (self.emoji_font and which == .mushroom) self.emojiType(20) else metaFont(),
+            .font = if (self.emoji_font and which == .mushroom) self.emojiType(metaFont().size) else metaFont(),
             .id_extra = id + 1,
         });
 
