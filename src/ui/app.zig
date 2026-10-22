@@ -2335,8 +2335,8 @@ pub const App = struct {
 
     /// How much of the waveform colour DMT paints back through the fold. The
     /// fold is dimmed by `dmt_shade` first, so the colour has room to show.
-    const dmt_colour_share: f32 = 0.85;
-    const dmt_shade: f32 = 0.78;
+    const dmt_colour_share: f32 = 0.95;
+    const dmt_shade: f32 = 0.62;
 
     /// A waveform column: drawn now, and kept while DMT runs, which paints the
     /// coloured fills again through the fold.
