@@ -98,9 +98,7 @@ pub const Effect = struct {
 
 };
 
-/// `unzoomed` is the same funnel with the coloured fills left at the size they
-/// were drawn, for comparing the two.
-pub const Dmt = enum { off, plain, unzoomed };
+pub const Dmt = enum { off, plain };
 
 /// Lane indices for remembered tracks the crate still holds, oldest first.
 pub fn rememberedLanes(remembered: []const u64, lanes: []const u64, out: *[Played.limit]usize) usize {
@@ -149,7 +147,7 @@ fn pressed(current: Dmt, choice: Dmt) Dmt {
     return if (current == choice) .off else choice;
 }
 
-pub const EffectMode = enum { lsd, mushroom, dmt, dmt_unzoomed };
+pub const EffectMode = enum { lsd, mushroom, dmt };
 
 /// The bundled emoji family, loaded at startup.
 pub const emoji_family = "noto emoji";
@@ -237,10 +235,9 @@ pub const App = struct {
     /// LSD's output while DMT folds it. Only allocated when both run.
     lsd_target: ?dvui.Texture.Target = null,
     /// The frame's coloured fills, kept while DMT runs.
+    /// What DMT paints back through the fold: each lane's wash first, then its
+    /// waveform fills, in the order they were drawn.
     colours: std.ArrayListUnmanaged(geom.Quad) = .empty,
-    /// The lane wash: colour under the waveforms, drawn unzoomed so the lanes
-    /// keep their own hues instead of piling into one.
-    washes: std.ArrayListUnmanaged(geom.Quad) = .empty,
     colour_target: ?dvui.Texture.Target = null,
     /// Effect seconds: wall seconds scaled by tempo and the speed slider. LSD
     /// reads it straight; DMT integrates it through its mood.
@@ -394,7 +391,6 @@ pub const App = struct {
         // The whole frame has to exist before it can be warped, so while the
         // mode runs it is drawn into an offscreen copy and blitted back.
         self.colours.clearRetainingCapacity();
-        self.washes.clearRetainingCapacity();
         const previous = self.capture();
 
         var root = dvui.box(@src(), .{ .dir = .vertical }, .{
@@ -544,14 +540,7 @@ pub const App = struct {
         // last frame that reached it.
         errdefer _ = dvui.RenderTarget.setAsCurrent(screen);
 
-        const quads_kept = try arena.alloc(geom.Quad, self.washes.items.len + self.colours.items.len);
-        @memcpy(quads_kept[0..self.washes.items.len], self.washes.items);
-        const zoom = if (self.effect.dmt == .unzoomed) 1 else dmt_colour_zoom;
-        for (self.colours.items, quads_kept[self.washes.items.len..]) |quad, *out| {
-            out.* = grown(quad, size.w / 2, size.h / 2, zoom);
-        }
-
-        const quads = try geom.solidQuads(arena, quads_kept);
+        const quads = try geom.solidQuads(arena, self.colours.items);
         try dvui.renderTriangles(.{
             .vertexes = quads.vertexes,
             .indices = quads.indices,
@@ -585,7 +574,6 @@ pub const App = struct {
             .lsd => self.effect.look = if (self.effect.look == .drift) .none else .drift,
             .mushroom => self.effect.look = if (self.effect.look == .mushroom) .none else .mushroom,
             .dmt => self.effect.dmt = pressed(self.effect.dmt, .plain),
-            .dmt_unzoomed => self.effect.dmt = pressed(self.effect.dmt, .unzoomed),
         }
         if (!self.effect.any()) {
             self.dropEffects();
@@ -636,7 +624,6 @@ pub const App = struct {
             self.effectChip("LSD", .lsd, .lsd, 7120);
             self.effectChip(if (self.emoji_font) "🍄" else ".-.", .mushroom, .mushroom, 7122);
             self.effectChip("DMT", .dmt, .dmt, 7125);
-            self.effectChip("DMT UNZOOMED", .dmt_unzoomed, .dmt_unzoomed, 7127);
             if (self.effect.look == .mushroom) self.growChip();
         }
 
@@ -711,7 +698,6 @@ pub const App = struct {
             .lsd => self.effect.look == .drift,
             .mushroom => self.effect.look == .mushroom,
             .dmt => self.effect.dmt == .plain,
-            .dmt_unzoomed => self.effect.dmt == .unzoomed,
         };
         var chip = dvui.box(@src(), .{ .dir = .horizontal }, .{
             .gravity_y = 0.5,
@@ -1536,7 +1522,6 @@ pub const App = struct {
             .toggle_lsd => self.toggleEffect(.lsd),
             .toggle_mushroom => self.toggleEffect(.mushroom),
             .toggle_dmt => self.toggleEffect(.dmt),
-            .toggle_dmt_unzoomed => self.toggleEffect(.dmt_unzoomed),
             .select_playlist => |index| {
                 if (index >= self.playlists.len) return;
                 self.selectPlaylist(index);
@@ -2016,7 +2001,7 @@ pub const App = struct {
 
                 const view = self.laneStart(index);
                 if (lane.analysis) |*analysis| {
-                    self.paintWave(analysis, wave_rect, view, analysis.downbeatOffset(), index);
+                    self.paintWave(analysis, wave_rect, view, analysis.downbeatOffset());
                 } else {
                     labelStyled(@src(), "no analysis", .{
                         .color_text = .{ .color = Palette.muted },
@@ -2259,7 +2244,7 @@ pub const App = struct {
     }
 
     /// Waveform and beat lines, drawn straight into the lane's rectangle.
-    fn paintWave(self: *App, analysis: *const pl.analysis.Analysis, rect: hit.Rect, start_beat: f32, beat_offset: f32, slot: usize) void {
+    fn paintWave(self: *App, analysis: *const pl.analysis.Analysis, rect: hit.Rect, start_beat: f32, beat_offset: f32) void {
         if (rect.w <= 0 or rect.h <= 0) return;
         fillRect(self.allocator, rect.x, rect.y, rect.w, rect.h, Palette.field);
 
@@ -2285,7 +2270,8 @@ pub const App = struct {
         // The grid sits under the bars: over them its half-transparent lines
         // shimmered on the coloured waveform.
         self.paintBeats(rect, start_beat, beat_offset);
-        self.waveWash(rect, laneWash(slot));
+        const wash = if (has_bands) waveColor(wave_colour.tintBands(0.7, analysis.bands)) else bandColor(0.45);
+        self.waveWash(rect, opposite(wash));
 
         var a: usize = origin;
         while (a < analysis.waveform.len) : (a += bucket) {
@@ -2312,7 +2298,7 @@ pub const App = struct {
     /// a lane carries colour instead of reading as flat grey in the fold.
     fn waveWash(self: *App, rect: hit.Rect, colour: dvui.Color) void {
         if (self.effect.dmt == .off) return;
-        self.washes.append(self.allocator, .{
+        self.colours.append(self.allocator, .{
             .rect = .{ .x = rect.x, .y = rect.y, .w = rect.w, .h = rect.h },
             .colour = faded(saturated(colour), dmt_wash),
         }) catch return;
@@ -2857,30 +2843,53 @@ fn rectFrom(rect: dvui.Rect.Physical) hit.Rect {
 /// How far the folded colours are pushed past their own grey.
 const dmt_chroma: f32 = 1.3;
 
-/// How much larger the coloured fills are drawn than the frame they came from,
-/// so they cover more of the fold than the grey chrome.
-const dmt_colour_zoom: f32 = 2;
-
 /// How strongly the lane colour fills the stretch around its waveform.
 const dmt_wash: f32 = 0.5;
 
-/// One colour per lane, so the wash across the lanes covers five hues instead
-/// of averaging to whichever band the tracks share.
-fn laneWash(slot: usize) dvui.Color {
-    const hues = [_]dvui.Color{ Palette.purple, Palette.green, Palette.orange, Palette.yellow, Palette.red };
-    return hues[slot % hues.len];
-}
+/// The hue half a turn away from `colour`, so a lane's wash contrasts its
+/// waveform instead of blurring into it.
+fn opposite(colour: dvui.Color) dvui.Color {
+    const red: f32 = @floatFromInt(colour.r);
+    const green: f32 = @floatFromInt(colour.g);
+    const blue: f32 = @floatFromInt(colour.b);
 
-/// Enlarges a quad about a centre.
-fn grown(quad: geom.Quad, mid_x: f32, mid_y: f32, zoom: f32) geom.Quad {
+    const high = @max(red, @max(green, blue));
+    const low = @min(red, @min(green, blue));
+    const spread = high - low;
+
+    var hue: f32 = 0;
+    if (spread > 0) {
+        if (high == red) {
+            hue = @mod((green - blue) / spread, 6);
+        } else if (high == green) {
+            hue = (blue - red) / spread + 2;
+        } else {
+            hue = (red - green) / spread + 4;
+        }
+        hue /= 6;
+    }
+    hue = @mod(hue + 0.5, 1);
+
+    const saturation: f32 = if (high > 0) spread / high else 0;
+    const strong = @max(saturation, 0.8);
+    const bright = std.math.clamp(high / 255, 0.55, 0.85);
+
+    const sat = bright * strong;
+    const second = sat * (1 - @abs(@mod(hue * 6, 2) - 1));
+    const base = bright - sat;
+    const rgb = switch (@as(u8, @intFromFloat(hue * 6)) % 6) {
+        0 => [3]f32{ sat, second, 0 },
+        1 => [3]f32{ second, sat, 0 },
+        2 => [3]f32{ 0, sat, second },
+        3 => [3]f32{ 0, second, sat },
+        4 => [3]f32{ second, 0, sat },
+        else => [3]f32{ sat, 0, second },
+    };
     return .{
-        .rect = .{
-            .x = mid_x + (quad.rect.x - mid_x) * zoom,
-            .y = mid_y + (quad.rect.y - mid_y) * zoom,
-            .w = quad.rect.w * zoom,
-            .h = quad.rect.h * zoom,
-        },
-        .colour = quad.colour,
+        .r = @intFromFloat(std.math.clamp(rgb[0] + base, 0, 1) * 255),
+        .g = @intFromFloat(std.math.clamp(rgb[1] + base, 0, 1) * 255),
+        .b = @intFromFloat(std.math.clamp(rgb[2] + base, 0, 1) * 255),
+        .a = 0xff,
     };
 }
 
@@ -3133,17 +3142,17 @@ pub const Palette = struct {
     pub const red = dvui.Color{ .r = 0xff, .g = 0x55, .b = 0x55, .a = 0xff };
 };
 
-test "the coloured fills grow about the middle of the frame" {
-    const quad = geom.Quad{
-        .rect = .{ .x = 40, .y = 10, .w = 10, .h = 20 },
-        .colour = .{ .r = 1, .g = 2, .b = 3, .a = 255 },
-    };
-    const wide = grown(quad, 100, 50, 2);
-    try std.testing.expectEqual(@as(f32, -20), wide.rect.x);
-    try std.testing.expectEqual(@as(f32, -30), wide.rect.y);
-    try std.testing.expectEqual(@as(f32, 20), wide.rect.w);
-    try std.testing.expectEqual(@as(f32, 40), wide.rect.h);
-    try std.testing.expectEqual(quad.colour, wide.colour);
+test "the wash takes the hue opposite the lane" {
+    const blue = dvui.Color{ .r = 0x20, .g = 0x60, .b = 0xf0, .a = 0xff };
+    try std.testing.expect(opposite(blue).r > opposite(blue).b);
+
+    const red = dvui.Color{ .r = 0xf0, .g = 0x30, .b = 0x30, .a = 0xff };
+    try std.testing.expect(opposite(red).g > opposite(red).r);
+
+    // Grey has no hue to turn, so the wash keeps a lit channel rather than
+    // collapsing to black.
+    const flat = opposite(dvui.Color{ .r = 0x40, .g = 0x40, .b = 0x40, .a = 0xff });
+    try std.testing.expect(@max(flat.r, @max(flat.g, flat.b)) > 0x60);
 }
 
 test "the fold keeps its colours and leaves grey grey" {
@@ -3168,8 +3177,6 @@ test "the fold keeps its colours and leaves grey grey" {
 test "a mode chip runs itself and stops only itself" {
     try std.testing.expectEqual(Dmt.plain, pressed(.off, .plain));
     try std.testing.expectEqual(Dmt.off, pressed(.plain, .plain));
-    try std.testing.expectEqual(Dmt.unzoomed, pressed(.plain, .unzoomed));
-    try std.testing.expectEqual(Dmt.off, pressed(.unzoomed, .unzoomed));
 
 }
 
