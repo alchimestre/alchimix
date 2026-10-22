@@ -25,7 +25,7 @@ const twist: f32 = 0.55;
 /// Effect speed against the tempo clock. The shared slider scales this.
 const speed: f32 = 1.6;
 /// The pinned look: the window border never samples outside the frame.
-pub const og_border: f32 = 26;
+pub const border_px: f32 = 26;
 /// Fold brightness. The frame is mostly grey chrome, so the fold is damped and
 /// the coloured content carries the picture instead.
 pub const damp: f32 = 0.55;
@@ -398,12 +398,12 @@ test "the pinned look holds the window border still" {
     const clock = Clock{ .rush = 40, .turn = 7 };
 
     const edge = dvui.Point.Physical{ .x = 0, .y = 360 };
-    const shown = fold(edge, clock, framesize, &chips, og_border);
+    const shown = fold(edge, clock, framesize, &chips, border_px);
     try std.testing.expectEqual(edge.x, shown.x);
     try std.testing.expectEqual(edge.y, shown.y);
 
     // Past the border the fold runs again.
     const inside = dvui.Point.Physical{ .x = 200, .y = 360 };
-    const moved = fold(inside, clock, framesize, &chips, og_border);
+    const moved = fold(inside, clock, framesize, &chips, border_px);
     try std.testing.expect(@abs(moved.x - inside.x) + @abs(moved.y - inside.y) > 1);
 }
