@@ -251,24 +251,18 @@ pub const State = struct {
         const beat = 60 / @max(1, bpm);
         const spacing = beat / 6;
 
-        var order: [big_slots + mushroom_slots]f32 = undefined;
-        var count: usize = 0;
-        for (0..self.big.len + self.mushrooms.len) |_| {
-            order[count] = random.float(f32);
-            count += 1;
-        }
-        std.mem.sort(f32, order[0..count], {}, std.sort.asc(f32));
+        // Only the small mushrooms light, so their ranks span the whole sweep.
+        var order: [mushroom_slots]f32 = undefined;
+        for (&order) |*rank| rank.* = random.float(f32);
+        std.mem.sort(f32, &order, {}, std.sort.asc(f32));
 
-        for (&self.big, 0..) |*bush, slot| {
-            bush.halo = now + order[slot] * @as(f32, @floatFromInt(count)) * spacing;
-        }
+        const span = @as(f32, @floatFromInt(order.len)) * spacing;
         for (&self.mushrooms, 0..) |*plant, slot| {
             const jitter = (random.float(f32) - 0.5) * 0.25;
-            plant.halo = now + order[self.big.len + slot] * @as(f32, @floatFromInt(count)) * spacing + jitter;
+            plant.halo = now + order[slot] * span + jitter;
         }
     }
 
-    /// A press on the plant: insects pour in from both sides, hearts rise.
     pub fn poke(self: *State, now: f64) void {
         // A flash travels out from the plant; the field stays standing.
         self.wave_at = now;
@@ -444,55 +438,30 @@ fn halos(
     size: dvui.Size.Physical,
     ascii: dvui.Font,
 ) !void {
-    const small_cell = @max(1, ascii.textSize("M").w);
-    const big_cell = @max(1, ascii.withSize(ascii.size * 0.62).textSize("M").w);
+    const cell = @max(1, ascii.textSize("M").w);
     var glow = geom.Glow{ .arena = arena };
-
-    for (state.big) |bush| {
-        {
-            const t = haloOpen(bush.halo, now) orelse continue;
-            const bloom = big_cell * (4.0 + 3.0 * t);
-            const fade = (1 - t) * (1 - t);
-            // The sprite is anchored at its top-left corner; the light belongs
-            // on the cap, so it sits half a sprite across and down.
-            const at = dvui.Point.Physical{
-                .x = bush.x * size.w + big_cell * 3,
-                .y = bush.y * size.h + big_cell * 0.6,
-            };
-            try glow.disc(at, bloom, bloom * 0.85, .{
-                .r = @intFromFloat(80 * fade),
-                .g = @intFromFloat(62 * fade),
-                .b = @intFromFloat(18 * fade),
-                .a = 0,
-            });
-            try glow.disc(at, bloom * 0.3, bloom * 0.3, .{
-                .r = @intFromFloat(140 * fade),
-                .g = @intFromFloat(120 * fade),
-                .b = @intFromFloat(70 * fade),
-                .a = 0,
-            });
-        }
-    }
 
     for (state.mushrooms) |plant| {
         {
             const t = haloOpen(plant.halo, now) orelse continue;
-            const bloom = small_cell * (3.5 + 3.0 * t);
+            const bloom = size.w * (0.035 + 0.035 * t);
             const fade = (1 - t) * (1 - t);
+            // Centre of the two-row sprite: the middle of ".-." across, and
+            // half a row step down between cap and stem.
             const at = dvui.Point.Physical{
-                .x = plant.x * size.w + small_cell * 1.5,
-                .y = plant.y * size.h + small_cell * 0.5,
+                .x = plant.x * size.w + cell * 1.5,
+                .y = plant.y * size.h + cell * 1.15 * 0.5,
             };
             try glow.disc(at, bloom, bloom, .{
-                .r = @intFromFloat(75 * fade),
-                .g = @intFromFloat(58 * fade),
-                .b = @intFromFloat(16 * fade),
+                .r = @intFromFloat(105 * fade),
+                .g = @intFromFloat(82 * fade),
+                .b = @intFromFloat(24 * fade),
                 .a = 0,
             });
             try glow.disc(at, bloom * 0.32, bloom * 0.32, .{
-                .r = @intFromFloat(130 * fade),
-                .g = @intFromFloat(112 * fade),
-                .b = @intFromFloat(62 * fade),
+                .r = @intFromFloat(170 * fade),
+                .g = @intFromFloat(145 * fade),
+                .b = @intFromFloat(82 * fade),
                 .a = 0,
             });
         }
