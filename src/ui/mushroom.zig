@@ -420,7 +420,7 @@ pub fn draw(
 
     try dvui.renderTriangles(try lsd.wash(arena, time, size, shimmer), null);
     try undergrowth(state, time, size, still, bpm, ascii);
-    try halos(arena, state, time, size);
+    try halos(arena, state, time, size, ascii);
     try geom.repaint(arena, still, size, texture);
 }
 
@@ -437,25 +437,38 @@ pub fn plantRect(size: dvui.Size.Physical) dvui.Rect.Physical {
 
 /// Growth halos are light, not glyphs: two additive discs per mushroom, a wide
 /// soft bloom and a small bright core.
-fn halos(arena: std.mem.Allocator, state: *const State, now: f64, size: dvui.Size.Physical) !void {
+fn halos(
+    arena: std.mem.Allocator,
+    state: *const State,
+    now: f64,
+    size: dvui.Size.Physical,
+    ascii: dvui.Font,
+) !void {
+    const small_cell = @max(1, ascii.textSize("M").w);
+    const big_cell = @max(1, ascii.withSize(ascii.size * 0.62).textSize("M").w);
     var glow = geom.Glow{ .arena = arena };
 
     for (state.big) |bush| {
         {
             const t = haloOpen(bush.halo, now) orelse continue;
-            const bloom = size.w * (0.030 + 0.030 * t);
+            const bloom = big_cell * (4.0 + 3.0 * t);
             const fade = (1 - t) * (1 - t);
-            const at = dvui.Point.Physical{ .x = bush.x * size.w, .y = bush.y * size.h };
-            try glow.disc(at, bloom, bloom * 0.75, .{
-                .r = @intFromFloat(120 * fade),
-                .g = @intFromFloat(96 * fade),
-                .b = @intFromFloat(30 * fade),
+            // The sprite is anchored at its top-left corner; the light belongs
+            // on the cap, so it sits half a sprite across and down.
+            const at = dvui.Point.Physical{
+                .x = bush.x * size.w + big_cell * 3,
+                .y = bush.y * size.h + big_cell * 0.6,
+            };
+            try glow.disc(at, bloom, bloom * 0.85, .{
+                .r = @intFromFloat(80 * fade),
+                .g = @intFromFloat(62 * fade),
+                .b = @intFromFloat(18 * fade),
                 .a = 0,
             });
-            try glow.disc(at, bloom * 0.28, bloom * 0.28, .{
-                .r = @intFromFloat(200 * fade),
-                .g = @intFromFloat(180 * fade),
-                .b = @intFromFloat(110 * fade),
+            try glow.disc(at, bloom * 0.3, bloom * 0.3, .{
+                .r = @intFromFloat(140 * fade),
+                .g = @intFromFloat(120 * fade),
+                .b = @intFromFloat(70 * fade),
                 .a = 0,
             });
         }
@@ -464,19 +477,22 @@ fn halos(arena: std.mem.Allocator, state: *const State, now: f64, size: dvui.Siz
     for (state.mushrooms) |plant| {
         {
             const t = haloOpen(plant.halo, now) orelse continue;
-            const bloom = size.w * (0.016 + 0.018 * t);
+            const bloom = small_cell * (3.5 + 3.0 * t);
             const fade = (1 - t) * (1 - t);
-            const at = dvui.Point.Physical{ .x = plant.x * size.w, .y = plant.y * size.h };
+            const at = dvui.Point.Physical{
+                .x = plant.x * size.w + small_cell * 1.5,
+                .y = plant.y * size.h + small_cell * 0.5,
+            };
             try glow.disc(at, bloom, bloom, .{
-                .r = @intFromFloat(110 * fade),
-                .g = @intFromFloat(88 * fade),
-                .b = @intFromFloat(28 * fade),
+                .r = @intFromFloat(75 * fade),
+                .g = @intFromFloat(58 * fade),
+                .b = @intFromFloat(16 * fade),
                 .a = 0,
             });
-            try glow.disc(at, bloom * 0.3, bloom * 0.3, .{
-                .r = @intFromFloat(190 * fade),
-                .g = @intFromFloat(170 * fade),
-                .b = @intFromFloat(100 * fade),
+            try glow.disc(at, bloom * 0.32, bloom * 0.32, .{
+                .r = @intFromFloat(130 * fade),
+                .g = @intFromFloat(112 * fade),
+                .b = @intFromFloat(62 * fade),
                 .a = 0,
             });
         }
