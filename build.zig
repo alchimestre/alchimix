@@ -2,7 +2,9 @@ const std = @import("std");
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
-    const optimize = b.standardOptimizeOption(.{});
+    // Every effect warps the whole frame every frame, so an optimised build is
+    // the normal one; `-Doptimize=Debug` still works when a backtrace is wanted.
+    const optimize = b.option(std.lang.Optimize, "optimize", "Optimisation mode") orelse .fast;
 
     // rekordbox keeps its collection in SQLCipher, so the system SQLite cannot
     // open it.

@@ -121,16 +121,19 @@ pub fn fold(
 
     // Each ring shows the frame again at a full radius, turned against its
     // neighbour. Mirroring both axes folds that copy into V chevrons.
-    const angle = std.math.atan2(q.y, q.x) + level * twist + turn_phase;
-    const c = @cos(turn_phase);
-    const s_ = @sin(turn_phase);
-    var local = dvui.Point.Physical{
-        .x = @cos(angle) * half * band,
-        .y = @sin(angle) * half * band,
-    };
-    local = .{
-        .x = @abs(local.x * c - local.y * s_),
-        .y = @abs(local.x * s_ + local.y * c),
+    //
+    // The ring's angle is `turn` twice over, once inside the ring and once as
+    // the mirror rotation, so one rotation of the radial unit vector covers
+    // both: no atan2, and a single sine and cosine per vertex.
+    const turn = level * twist + turn_phase * 2;
+    const around = @cos(turn);
+    const across = @sin(turn);
+    const reach = half * band;
+    const unit_x = if (radius > 0.0001) q.x / radius else 1;
+    const unit_y = if (radius > 0.0001) q.y / radius else 0;
+    const local = dvui.Point.Physical{
+        .x = @abs(unit_x * around - unit_y * across) * reach,
+        .y = @abs(unit_x * across + unit_y * around) * reach,
     };
 
     const source = dvui.Point.Physical{ .x = centre.x + local.x, .y = centre.y + local.y };
@@ -190,11 +193,35 @@ pub fn mesh(
 
     return .{
         .vertexes = vertexes,
-        .indices = try geom.gridIndices(arena, shape.columns, shape.rows),
+        .indices = try cachedIndices(shape.columns, shape.rows),
     };
 }
 
 const Shape = struct { columns: usize, rows: usize };
+
+/// The grid's topology only changes when the window does, so the index buffer
+/// is kept instead of being rebuilt and handed to the frame arena every frame.
+var index_cache: struct {
+    columns: usize = 0,
+    rows: usize = 0,
+    values: []dvui.Vertex.Index = &.{},
+} = .{};
+
+fn cachedIndices(columns: usize, rows: usize) ![]dvui.Vertex.Index {
+    if (index_cache.columns == columns and index_cache.rows == rows and index_cache.values.len > 0) {
+        return index_cache.values;
+    }
+    if (index_cache.values.len > 0) std.heap.page_allocator.free(index_cache.values);
+
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    const built = try geom.gridIndices(arena.allocator(), columns, rows);
+
+    index_cache.values = try std.heap.page_allocator.dupe(dvui.Vertex.Index, built);
+    index_cache.columns = columns;
+    index_cache.rows = rows;
+    return index_cache.values;
+}
 
 /// Grid that covers `size`: one vertex per `cell` pixels, coarsened only when
 /// a finer grid would need more vertexes than the index buffer can address.

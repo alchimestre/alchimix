@@ -235,10 +235,10 @@ pub const App = struct {
     /// LSD's output while DMT folds it. Only allocated when both run.
     lsd_target: ?dvui.Texture.Target = null,
     /// The frame's coloured fills, kept while DMT runs.
+    colour_target: ?dvui.Texture.Target = null,
     /// What DMT paints back through the fold: each lane's wash first, then its
     /// waveform fills, in the order they were drawn.
     colours: std.ArrayListUnmanaged(geom.Quad) = .empty,
-    colour_target: ?dvui.Texture.Target = null,
     /// Effect seconds: wall seconds scaled by tempo and the speed slider. LSD
     /// reads it straight; DMT integrates it through its mood.
     effect_time: f64 = 0,
@@ -534,8 +534,8 @@ pub const App = struct {
         if (self.effect.dmt != .off) {
             try dmt.draw(source, arena, self.effect_clock, size, stills, self.foldShade(), 0, self.drawnRings(), self.beat_power);
             try self.paintColours(arena, screen, size);
-            // The colour pass folds the whole layer, so the stills have to come
-            // back over it or the controls are painted with lane colour.
+            // The colour pass folds the whole layer, so the controls come back
+            // over it rather than being painted with lane colour.
             try geom.repaint(arena, stills, size, texture);
 
         }
@@ -551,16 +551,15 @@ pub const App = struct {
         }
     }
 
-    /// The coloured fills the frame kept, folded through the same map at half
-    /// strength, so the funnel keeps their weight without drowning the type.
+    /// The coloured fills, folded through the same map and laid over the
+    /// dimmed frame. They are kept apart from the source so the drift, when it
+    /// runs underneath, cannot chew them up on its own coarser grid.
     fn paintColours(self: *App, arena: std.mem.Allocator, screen: dvui.RenderTarget, size: dvui.Size.Physical) !void {
         if (self.colours.items.len == 0) return;
 
         const layer = try sizedTarget(&self.colour_target, size);
         layer.clear();
         _ = dvui.RenderTarget.setAsCurrent(.{ .texture = layer, .offset = .{} });
-        // A failed draw must hand rendering back, or the window freezes on the
-        // last frame that reached it.
         errdefer _ = dvui.RenderTarget.setAsCurrent(screen);
 
         const quads = try geom.solidQuads(arena, self.colours.items);
@@ -585,10 +584,10 @@ pub const App = struct {
         // The copies are only worth their memory while a mode runs.
         if (self.effect_target) |target| target.destroyLater();
         self.effect_target = null;
-        if (self.lsd_target) |target| target.destroyLater();
-        self.lsd_target = null;
         if (self.colour_target) |target| target.destroyLater();
         self.colour_target = null;
+        if (self.lsd_target) |target| target.destroyLater();
+        self.lsd_target = null;
         dvui.refresh(null, @src(), null);
     }
 
