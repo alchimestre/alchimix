@@ -13,10 +13,16 @@ pub const reach: f32 = 0.45;
 const shimmer: f32 = 18;
 
 const mushroom_slots = 40;
-/// Slots below this are the tall mushrooms, which cluster; the rest are wide
-/// and stand alone.
-const tall_slots = 6;
-const big_slots = 10;
+/// Each cluster fills a range of slots with tall mushrooms; the slots from
+/// `tall_slots` on are the wide, solitary ones.
+const Cluster = struct { start: usize, len: usize };
+const clusters = [_]Cluster{
+    .{ .start = 0, .len = 5 },
+    .{ .start = 5, .len = 6 },
+    .{ .start = 11, .len = 7 },
+};
+const tall_slots = 18;
+const big_slots = tall_slots + 6;
 const drop_slots = 18;
 const ripple_slots = 18;
 const insect_slots = 3;
@@ -116,9 +122,8 @@ pub const State = struct {
                     .glyph = 0,
                 };
             }
-            var cluster: usize = 0;
-            while (cluster * 3 < tall_slots) : (cluster += 1) {
-                self.placeCluster(random, now - random.float(f64) * 20, cluster * 3);
+            for (clusters, 0..) |_, index| {
+                self.placeCluster(random, now - random.float(f64) * 20, index);
             }
             for (tall_slots..self.big.len) |slot| {
                 self.placeStout(random, now - random.float(f64) * 20, slot);
@@ -135,9 +140,9 @@ pub const State = struct {
 
         for (self.big, 0..) |bush, slot| {
             if (now - bush.born <= 30) continue;
-            if (slot < tall_slots) {
+            if (clusterOf(slot)) |index| {
                 // A cluster replaces itself whole, so the field keeps its groupings.
-                self.placeCluster(random, now, slot - slot % 3);
+                self.placeCluster(random, now, index);
             } else {
                 self.placeStout(random, now, slot);
             }
@@ -212,17 +217,27 @@ pub const State = struct {
         }
     }
 
-    /// Three mushrooms around one point, at different heights.
-    fn placeCluster(self: *State, random: std.Random, born: f64, first: usize) void {
+    fn clusterOf(slot: usize) ?usize {
+        for (clusters, 0..) |group, index| {
+            if (slot >= group.start and slot < group.start + group.len) return index;
+        }
+        return null;
+    }
+
+    /// A cluster's worth of mushrooms around one point, at different heights.
+    /// The spread grows with the count so a big group still reads as a group.
+    fn placeCluster(self: *State, random: std.Random, born: f64, index: usize) void {
+        const group = clusters[index];
         const centre_x = 0.12 + random.float(f32) * 0.7;
         const centre_y = 0.15 + random.float(f32) * 0.6;
+        const spread_x = 0.035 + @as(f32, @floatFromInt(group.len)) * 0.007;
+        const spread_y = 0.06 + @as(f32, @floatFromInt(group.len)) * 0.010;
 
-        for (0..3) |offset| {
-            const slot = first + offset;
+        for (group.start..group.start + group.len) |slot| {
             if (slot >= self.big.len) return;
             self.big[slot] = .{
-                .x = std.math.clamp(centre_x + (random.float(f32) - 0.5) * 0.05, 0.04, 0.94),
-                .y = std.math.clamp(centre_y + (random.float(f32) - 0.5) * 0.08, 0.1, 0.9),
+                .x = std.math.clamp(centre_x + (random.float(f32) - 0.5) * spread_x, 0.04, 0.94),
+                .y = std.math.clamp(centre_y + (random.float(f32) - 0.5) * spread_y, 0.1, 0.9),
                 .scale = 0.7 + random.float(f32) * 0.5,
                 .born = born,
             };
