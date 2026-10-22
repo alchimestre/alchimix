@@ -50,10 +50,13 @@ waveform is tinted by rekordbox's three bands: kick red, mid green, high blue.
 
 `🍄` runs the same drift field at 0.45 strength with the same colour fringe and
 no flare, over an ASCII undergrowth: small mushrooms pop and grow, tall ones arrive in
-tight clusters of three at different heights, wide ones stand alone, rain falls
-and rings where it lands, and insects walk about. A shamrock grows, leaf by leaf,
-into a small flowering tree while music plays; pressing it floats hearts up to
-pop.
+tight clusters of seven to twelve, wide ones stand alone, pale rain falls and
+rings where it lands, insects crawl, and a snail crosses slowly. A shamrock
+grows, leaf by leaf, into a small flowering tree while music plays; pressing it
+floats hearts up to pop.
+
+The `garden` column lists eight switches. Clicking a row turns that behaviour on
+or off; the arrow in front of each title drops its description.
 
 The undergrowth is drawn in Courier New (falling back to Andale Mono, then the
 theme mono): the art is a character grid, and a proportional or round face pulls
