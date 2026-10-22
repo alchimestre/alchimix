@@ -1432,7 +1432,6 @@ pub const App = struct {
         self.effect_time += step;
         self.effect_clock.advance(step, dmt.mood(self.effect_time));
         self.og_clock.advance(dmt.tempoStep(elapsed, self.masterBpm()), .{});
-        self.mushroom.playing = self.transport.anyPlaying();
         if (self.transport.anyPlaying()) self.mushroom.grow(step);
         self.mushroom.tick(self.effect_time);
         self.mushroom.fall(step, self.effect_time);
