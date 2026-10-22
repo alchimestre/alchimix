@@ -667,7 +667,7 @@ pub const App = struct {
     /// fold, so neither slider ever moves under the pointer.
     fn effectSpeed(self: *App) void {
         var column = dvui.box(@src(), .{ .dir = .vertical }, .{
-            .expand = .horizontal,
+            .gravity_x = 1,
             .padding = .{ .x = 16, .y = 0 },
         });
         defer column.deinit();
@@ -684,22 +684,14 @@ pub const App = struct {
             }
         }
 
-        // The whole chrome strip stays unfolded: the tunnel's outer rings
-        // magnify whatever sits here into wide bands.
-        const block = rectFrom(column.data().borderRectScale().r);
-        self.still(.{
-            .x = 0,
-            .y = 0,
-            .w = dvui.currentWindow().rect_pixels.w,
-            .h = block.y + block.h + 2,
-        });
+        self.still(rectFrom(column.data().borderRectScale().r));
     }
 
     /// A label with a slider hard against the right edge. Returns the new
     /// position only when it moved.
     fn sliderRow(self: *App, text: []const u8, start: f32, id: u32) ?f32 {
         _ = self;
-        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal });
+        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .gravity_x = 1 });
         defer row.deinit();
 
         _ = dvui.spacer(@src(), .{ .expand = .horizontal });
