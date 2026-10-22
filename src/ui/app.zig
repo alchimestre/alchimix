@@ -2411,7 +2411,7 @@ pub const App = struct {
     fn waveWash(self: *App, rect: hit.Rect, colour: dvui.Color, slot: usize) void {
         if (self.effect.dmt == .off) return;
 
-        const wash = saturated(opposite(colour, slot), self.chromaAmount());
+        const wash = saturated(opposite(colour, slot, self.effect_time), self.chromaAmount());
         const tick: u64 = @intFromFloat(@floor(self.effect_time * 1.5));
         const cell_w = rect.w / @as(f32, @floatFromInt(wash_columns));
         const cell_h = rect.h / @as(f32, @floatFromInt(wash_rows));
@@ -3015,7 +3015,7 @@ fn washFor(colour: f32, beat: f32) f32 {
 
 /// How far the lane count wanders from the slider, in ring widths, and how
 /// slowly it gets there.
-const lane_wander_limit: f32 = 2.6;
+const lane_wander_limit: f32 = 1.1;
 const lane_wander_ease: f32 = 3.4;
 
 /// The kick: the loudest of the lowest bands, once past the floor.
@@ -3033,6 +3033,11 @@ fn beatFollow(previous: f32, bass: f32, delta: f32) f32 {
 /// The grid the wash is broken into, so it moves and carries its own
 /// aberrations.
 const wash_columns: usize = 16;
+
+/// How far one lane's wash turns from the next, and how fast the row drifts
+/// through the wheel.
+const wash_step: f32 = 0.13;
+const wash_turn: f32 = 0.018;
 const wash_rows: usize = 3;
 
 /// The two channels the wash splits into, so its grain reads as colour fringing.
@@ -3049,11 +3054,11 @@ fn grain(seed: u64) f32 {
     return @as(f32, @floatFromInt(hash >> 40)) / @as(f32, @floatFromInt(@as(u64, 1) << 24));
 }
 
-/// The hue turned away from `colour` by the lane's place in the row. The
-/// waveforms all land near red, so a plain opposite would make every wash the
-/// same colour: the turns alternate either side of half a turn, which spreads
-/// the lanes across the wheel and still keeps each wash clear of its own lane.
-fn opposite(colour: dvui.Color, slot: usize) dvui.Color {
+/// The hue turned away from `colour` by the lane's place in the row plus a
+/// slow turn of the clock. The step is small, so neighbouring lanes shade into
+/// each other rather than jumping, and the whole row walks through the primaries
+/// over about a minute.
+fn opposite(colour: dvui.Color, slot: usize, now: f64) dvui.Color {
     const red: f32 = @floatFromInt(colour.r);
     const green: f32 = @floatFromInt(colour.g);
     const blue: f32 = @floatFromInt(colour.b);
@@ -3073,8 +3078,8 @@ fn opposite(colour: dvui.Color, slot: usize) dvui.Color {
         }
         hue /= 6;
     }
-    const turns = [_]f32{ 0.31, 0.69, 0.39, 0.61, 0.47, 0.55 };
-    hue = @mod(hue + turns[slot % turns.len], 1);
+    const walk = 0.5 + @as(f32, @floatFromInt(slot)) * wash_step + @as(f32, @floatCast(now)) * wash_turn;
+    hue = @mod(hue + walk, 1);
 
     const saturation: f32 = if (high > 0) spread / high else 0;
     const strong = @max(saturation, 0.8);
@@ -3394,14 +3399,14 @@ test "a kick lands at once and fades over its tail" {
 
 test "the wash takes the hue opposite the lane" {
     const blue = dvui.Color{ .r = 0x20, .g = 0x60, .b = 0xf0, .a = 0xff };
-    try std.testing.expect(opposite(blue, 0).r > opposite(blue, 0).b);
+    try std.testing.expect(opposite(blue, 0, 0).r > opposite(blue, 0, 0).b);
 
     const red = dvui.Color{ .r = 0xf0, .g = 0x30, .b = 0x30, .a = 0xff };
-    try std.testing.expect(opposite(red, 0).g > opposite(red, 0).r);
+    try std.testing.expect(opposite(red, 0, 0).g > opposite(red, 0, 0).r);
 
     // Grey has no hue to turn, so the wash keeps a lit channel rather than
     // collapsing to black.
-    const flat = opposite(dvui.Color{ .r = 0x40, .g = 0x40, .b = 0x40, .a = 0xff }, 0);
+    const flat = opposite(dvui.Color{ .r = 0x40, .g = 0x40, .b = 0x40, .a = 0xff }, 0, 0);
     try std.testing.expect(@max(flat.r, @max(flat.g, flat.b)) > 0x60);
 }
 
