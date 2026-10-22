@@ -3016,8 +3016,8 @@ fn washFor(colour: f32, beat: f32) f32 {
 
 /// How far the lane count wanders from the slider, in ring widths, and how
 /// slowly it gets there.
-const lane_wander_limit: f32 = 0.8;
-const lane_wander_ease: f32 = 2.6;
+const lane_wander_limit: f32 = 2.6;
+const lane_wander_ease: f32 = 3.4;
 
 /// The kick: the loudest of the lowest bands, once past the floor.
 const kick_bins: usize = 3;
