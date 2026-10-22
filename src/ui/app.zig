@@ -250,6 +250,12 @@ pub const App = struct {
     effect_speed: f32 = 1,
     /// Rings per e-fold of radius: how many lanes the tunnel shows.
     lane_rings: f32 = dmt.rings_default,
+    /// The lane count wanders on its own: a goal drawn every few seconds and
+    /// eased towards, so the tunnel thickens and thins without a jump.
+    lane_wander: f32 = 0,
+    lane_goal: f32 = 0,
+    lane_wait: f32 = 0,
+    lane_rng: std.Random.DefaultPrng = .init(0x1a4e_5eed),
     /// How far the fold leans on colour rather than the frame: the shade it
     /// dims to, the wash under the lanes, the share of the fills painted back
     /// and the chroma they are pushed to all follow it.
@@ -400,6 +406,7 @@ pub const App = struct {
         // The whole frame has to exist before it can be warped, so while the
         // mode runs it is drawn into an offscreen copy and blitted back.
         self.colours.clearRetainingCapacity();
+        self.driftLanes();
         self.pulseKick();
         const previous = self.capture();
 
@@ -525,7 +532,7 @@ pub const App = struct {
         }
 
         if (self.effect.dmt != .off) {
-            try dmt.draw(source, arena, self.effect_clock, size, stills, self.foldShade(), 0, self.lane_rings, self.beat_power);
+            try dmt.draw(source, arena, self.effect_clock, size, stills, self.foldShade(), 0, self.drawnRings(), self.beat_power);
             try self.paintColours(arena, screen, size);
             // The colour pass folds the whole layer, so the stills have to come
             // back over it or the controls are painted with lane colour.
@@ -565,7 +572,7 @@ pub const App = struct {
 
         _ = dvui.RenderTarget.setAsCurrent(screen);
         const layer_texture = try dvui.textureFromTarget(layer);
-        try dmt.draw(layer_texture, arena, self.effect_clock, size, &.{}, 1, 0, self.lane_rings, self.beat_power);
+        try dmt.draw(layer_texture, arena, self.effect_clock, size, &.{}, 1, 0, self.drawnRings(), self.beat_power);
     }
 
     /// LSD's output copy, kept for as long as both modes run.
@@ -727,6 +734,25 @@ pub const App = struct {
         });
 
         self.hit_map.append(rectFrom(chip.data().contentRectScale().r), .heartbeat);
+    }
+
+    /// Eases the lane count towards a fresh goal every few seconds. The wander
+    /// is folded into the slider's value rather than replacing it, so the knob
+    /// still says where the tunnel sits.
+    fn driftLanes(self: *App) void {
+        const delta = std.math.clamp(dvui.currentWindow().secs_since_last_frame, 0, 0.25);
+        self.lane_wait -= delta;
+        if (self.lane_wait <= 0) {
+            self.lane_goal = (self.lane_rng.random().float(f32) - 0.5) * 2 * lane_wander_limit;
+            self.lane_wait = 5 + self.lane_rng.random().float(f32) * 6;
+        }
+        const ease = 1 - @exp(-delta / lane_wander_ease);
+        self.lane_wander += (self.lane_goal - self.lane_wander) * ease;
+    }
+
+    /// The lane count the fold is actually drawn at.
+    fn drawnRings(self: *const App) f32 {
+        return drawnRingsFor(self.lane_rings, self.lane_wander);
     }
 
     /// Turns the mix's bass into one pulse: instant attack, a decay of about a
@@ -1442,7 +1468,7 @@ pub const App = struct {
         // DMT runs on top of LSD, so a press follows the tunnel first and the
         // drift underneath it second.
         var shown = dvui.Point.Physical{ .x = p.x, .y = p.y };
-        if (self.effect.dmt != .off) shown = dmt.fold(shown, self.effect_clock, size, stills, 0, self.lane_rings, self.beat_power);
+        if (self.effect.dmt != .off) shown = dmt.fold(shown, self.effect_clock, size, stills, 0, self.drawnRings(), self.beat_power);
         switch (self.effect.look) {
             .drift => shown = lsd.sample(shown, self.effect_time, size, stills, 1),
             .mushroom => shown = lsd.sample(shown, self.effect_time, size, stills, mushroom.reach),
@@ -2435,11 +2461,11 @@ pub const App = struct {
     }
 
     fn washStrength(self: *const App) f32 {
-        return 0.85 * self.lane_colour;
+        return washFor(self.lane_colour, self.beat_power);
     }
 
     fn chromaAmount(self: *const App) f32 {
-        return 1 + 0.5 * self.lane_colour;
+        return chromaFor(self.lane_colour, self.beat_power);
     }
 
     /// A waveform column: drawn now, and kept while DMT runs, which paints the
@@ -2973,6 +2999,26 @@ fn rectFrom(rect: dvui.Rect.Physical) hit.Rect {
     return .{ .x = rect.x, .y = rect.y, .w = rect.w, .h = rect.h };
 }
 
+/// How much one kick opens the colour up, on top of the colour slider.
+const kick_saturation: f32 = 0.5;
+
+fn drawnRingsFor(base: f32, wander: f32) f32 {
+    return std.math.clamp(base + wander, dmt.min_rings, dmt.max_rings);
+}
+
+fn chromaFor(colour: f32, beat: f32) f32 {
+    return 1 + 0.5 * colour + kick_saturation * beat;
+}
+
+fn washFor(colour: f32, beat: f32) f32 {
+    return 0.85 * colour * (1 + 0.45 * beat);
+}
+
+/// How far the lane count wanders from the slider, in ring widths, and how
+/// slowly it gets there.
+const lane_wander_limit: f32 = 0.8;
+const lane_wander_ease: f32 = 2.6;
+
 /// The kick: the loudest of the lowest bands, once past the floor.
 const kick_bins: usize = 3;
 const kick_floor: f32 = 0.18;
@@ -3316,6 +3362,18 @@ test "the wash grain stays in range and moves with the counter" {
     try std.testing.expect(low < 0.1);
     try std.testing.expect(high > 0.9);
     try std.testing.expect(grain(7) != grain(8));
+}
+
+test "the lane wander stays inside the slider's range" {
+    try std.testing.expectEqual(dmt.max_rings, drawnRingsFor(dmt.max_rings - 0.2, 3));
+    try std.testing.expectEqual(dmt.min_rings, drawnRingsFor(dmt.min_rings + 0.2, -3));
+    try std.testing.expectApproxEqAbs(@as(f32, 2.4), drawnRingsFor(2, 0.4), 0.001);
+}
+
+test "a kick opens the colour and thickens the wash" {
+    try std.testing.expect(chromaFor(0.6, 1) > chromaFor(0.6, 0));
+    try std.testing.expect(washFor(0.6, 1) > washFor(0.6, 0));
+    try std.testing.expectApproxEqAbs(washFor(0.6, 0) * 1.45, washFor(0.6, 1), 0.001);
 }
 
 test "a kick lands at once and fades over its tail" {
