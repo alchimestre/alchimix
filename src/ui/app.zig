@@ -103,10 +103,10 @@ pub const Effect = struct {
     }
 };
 
-/// `one` pulls the grey backdrop in ahead of the controls, `two` tightens the
-/// panel padding, `both` does both, and `b` dims the fold and paints the
-/// coloured fills back at full strength.
-pub const Dmt = enum { off, one, two, both, b };
+/// `plain` folds the whole frame. `a` folds only what is drawn over the panels,
+/// with the panels themselves left as one flat surface. `b` dims the fold and
+/// paints the coloured fills back at full strength.
+pub const Dmt = enum { off, plain, a, b };
 
 /// Lane indices for remembered tracks the crate still holds, oldest first.
 pub fn rememberedLanes(remembered: []const u64, lanes: []const u64, out: *[Played.limit]usize) usize {
@@ -155,7 +155,7 @@ fn pressed(current: Dmt, choice: Dmt) Dmt {
     return if (current == choice) .off else choice;
 }
 
-pub const EffectMode = enum { lsd, mushroom, dmt_one, dmt_two, dmt_both, dmt_b };
+pub const EffectMode = enum { lsd, mushroom, dmt, dmt_a, dmt_b };
 
 /// The bundled emoji family, loaded at startup.
 pub const emoji_family = "noto emoji";
@@ -244,9 +244,6 @@ pub const App = struct {
     lsd_target: ?dvui.Texture.Target = null,
     /// The frame's coloured fills, for DMT B. Only kept while it runs.
     colours: std.ArrayListUnmanaged(geom.Quad) = .empty,
-    /// The grey panels the frame is built on, for DMT 1. Only kept while it
-    /// runs.
-    backdrops: std.ArrayListUnmanaged(dvui.Rect.Physical) = .empty,
     colour_target: ?dvui.Texture.Target = null,
     /// Effect seconds: wall seconds scaled by tempo and the speed slider. LSD
     /// reads it straight; DMT integrates it through its mood.
@@ -400,12 +397,11 @@ pub const App = struct {
         // The whole frame has to exist before it can be warped, so while the
         // mode runs it is drawn into an offscreen copy and blitted back.
         self.colours.clearRetainingCapacity();
-        self.backdrops.clearRetainingCapacity();
         const previous = self.capture();
 
         var root = dvui.box(@src(), .{ .dir = .vertical }, .{
             .expand = .both,
-            .background = true,
+            .background = self.panels(),
             .color_fill = .{ .color = Palette.background },
         });
         defer root.deinit();
@@ -525,7 +521,8 @@ pub const App = struct {
         }
 
         if (self.effect.dmt != .off) {
-            try dmt.draw(source, arena, self.effect_clock, size, stills, self.dmtShade(), 0, self.backdrop());
+            if (self.effect.dmt == .a) try App.flatSurface(arena, size);
+            try dmt.draw(source, arena, self.effect_clock, size, stills, self.dmtShade(), 0);
             if (self.effect.dmt == .b) try self.paintColours(arena, screen, size);
         }
     }
@@ -559,7 +556,7 @@ pub const App = struct {
 
         _ = dvui.RenderTarget.setAsCurrent(screen);
         const layer_texture = try dvui.textureFromTarget(layer);
-        try dmt.draw(layer_texture, arena, self.effect_clock, size, &.{}, 1, 0, null);
+        try dmt.draw(layer_texture, arena, self.effect_clock, size, &.{}, 1, 0);
     }
 
     /// LSD's output copy, kept for as long as both modes run.
@@ -583,9 +580,8 @@ pub const App = struct {
         switch (which) {
             .lsd => self.effect.look = if (self.effect.look == .drift) .none else .drift,
             .mushroom => self.effect.look = if (self.effect.look == .mushroom) .none else .mushroom,
-            .dmt_one => self.effect.dmt = pressed(self.effect.dmt, .one),
-            .dmt_two => self.effect.dmt = pressed(self.effect.dmt, .two),
-            .dmt_both => self.effect.dmt = pressed(self.effect.dmt, .both),
+            .dmt => self.effect.dmt = pressed(self.effect.dmt, .plain),
+            .dmt_a => self.effect.dmt = pressed(self.effect.dmt, .a),
             .dmt_b => self.effect.dmt = pressed(self.effect.dmt, .b),
         }
         if (!self.effect.any()) {
@@ -618,12 +614,11 @@ pub const App = struct {
         {
             var bar = dvui.box(@src(), .{ .dir = .horizontal }, .{
                 .expand = .horizontal,
-                .padding = .{ .x = 16 * self.tight(), .y = 8 * self.tight() },
-                .background = true,
+                .padding = .{ .x = 16, .y = 8 },
+                .background = self.panels(),
                 .color_fill = .{ .color = Palette.background },
             });
             defer bar.deinit();
-            self.backdrops.append(self.allocator, bar.data().rectScaleFromParent().r) catch {};
 
             labelStyled(@src(), "alchimix", .{
                 .font = titleFont(),
@@ -637,9 +632,8 @@ pub const App = struct {
             self.still_count = 0;
             self.effectChip("LSD", .lsd, .lsd, 7120);
             self.effectChip(if (self.emoji_font) "🍄" else ".-.", .mushroom, .mushroom, 7122);
-            self.effectChip("DMT 1", .dmt_one, .dmt_one, 7125);
-            self.effectChip("DMT 2", .dmt_two, .dmt_two, 7127);
-            self.effectChip("DMT 1+2", .dmt_both, .dmt_both, 7129);
+            self.effectChip("DMT", .dmt, .dmt, 7125);
+            self.effectChip("DMT A", .dmt_a, .dmt_a, 7127);
             self.effectChip("DMT B", .dmt_b, .dmt_b, 7140);
             if (self.effect.look == .mushroom) self.growChip();
         }
@@ -655,7 +649,7 @@ pub const App = struct {
             .margin = .{ .x = 3 },
             .padding = .{ .x = 8, .y = 0 },
             .min_size_content = .{ .h = 24 },
-            .background = true,
+            .background = self.panels(),
             .color_fill = .{ .color = Palette.field },
             .corners = square,
             .id_extra = 7160,
@@ -714,9 +708,8 @@ pub const App = struct {
         const on = switch (which) {
             .lsd => self.effect.look == .drift,
             .mushroom => self.effect.look == .mushroom,
-            .dmt_one => self.effect.dmt == .one,
-            .dmt_two => self.effect.dmt == .two,
-            .dmt_both => self.effect.dmt == .both,
+            .dmt => self.effect.dmt == .plain,
+            .dmt_a => self.effect.dmt == .a,
             .dmt_b => self.effect.dmt == .b,
         };
         var chip = dvui.box(@src(), .{ .dir = .horizontal }, .{
@@ -724,7 +717,7 @@ pub const App = struct {
             .margin = .{ .x = 3 },
             .padding = .{ .x = 8, .y = 0 },
             .min_size_content = .{ .h = 24 },
-            .background = true,
+            .background = self.panels(),
             .color_fill = .{ .color = if (on) Palette.purple else Palette.field },
             .corners = square,
             .id_extra = id,
@@ -752,7 +745,7 @@ pub const App = struct {
             .gravity_y = 0.5,
             .margin = .{ .x = 4, .y = 0 },
             .padding = .{ .x = 5, .y = 0 },
-            .background = true,
+            .background = self.panels(),
             .color_fill = .{ .color = if (active) Palette.green else Palette.field },
             .id_extra = 7110,
         });
@@ -775,7 +768,7 @@ pub const App = struct {
             .margin = .{ .x = 12, .y = 0 },
             .padding = .{ .x = 2, .y = 0 },
             .gravity_y = 0.5,
-            .background = true,
+            .background = self.panels(),
             .color_fill = .{ .color = Palette.field },
             .id_extra = 95,
         });
@@ -786,7 +779,7 @@ pub const App = struct {
             var cell = dvui.box(@src(), .{ .dir = .horizontal }, .{
                 .min_size_content = .{ .w = 34, .h = 24 },
                 .margin = .{ .x = 1, .y = 0 },
-                .background = true,
+                .background = self.panels(),
                 .color_fill = .{ .color = if (active) Palette.green else Palette.field },
                 .id_extra = 96 + slot,
             });
@@ -984,9 +977,9 @@ pub const App = struct {
             .min_size_content = .{ .w = 210 },
             .max_size_content = .{ .w = 210, .h = 100000 },
             .expand = .vertical,
-            .background = true,
+            .background = self.panels(),
             .color_fill = .{ .color = Palette.panel },
-            .padding = .{ .x = 8 * self.tight(), .y = 8 * self.tight() },
+            .padding = .{ .x = 8, .y = 8 },
         });
         defer panel.deinit();
 
@@ -1010,7 +1003,7 @@ pub const App = struct {
             var save = dvui.box(@src(), .{ .dir = .horizontal }, .{
                 .min_size_content = .{ .w = 74, .h = 20 },
                 .margin = .{ .x = 2, .y = 2 },
-                .background = true,
+                .background = self.panels(),
                 .color_fill = .{ .color = Palette.field },
                 .id_extra = 7201,
             });
@@ -1026,7 +1019,6 @@ pub const App = struct {
         }
 
         self.playlistChildren("root", 0);
-        self.backdrops.append(self.allocator, panel.data().borderRectScale().r) catch {};
     }
 
     fn frameBody(self: *App) void {
@@ -1049,7 +1041,7 @@ pub const App = struct {
             .min_size_content = .{ .w = 420 },
             .max_size_content = .{ .w = 420, .h = 100000 },
             .expand = .vertical,
-            .background = true,
+            .background = self.panels(),
             .color_fill = .{ .color = Palette.panel },
             .padding = .{ .x = 0, .y = 0 },
         });
@@ -1151,7 +1143,7 @@ pub const App = struct {
             .padding = .{ .x = 12, .y = 5 },
             .margin = .{ .y = 0 },
             .corners = square,
-            .background = true,
+            .background = self.panels(),
             .color_fill = .{ .color = Palette.field },
             .color_text = .{ .color = Palette.ink },
             .font = bodyFont(),
@@ -1185,7 +1177,7 @@ pub const App = struct {
             .margin = .{ .x = 2, .y = 0 },
             .gravity_y = 0.5,
             .corners = square,
-            .background = true,
+            .background = self.panels(),
             .color_fill = .{ .color = Palette.field },
             .color_text = .{ .color = Palette.ink },
             .font = metaFont(),
@@ -1223,7 +1215,7 @@ pub const App = struct {
             .id_extra = @backingInt(toggle) + 1,
             .corners = square,
             .font = headingFont().withSize(18),
-            .background = true,
+            .background = self.panels(),
             .color_fill = .{ .color = if (on) Palette.field else Palette.background },
             .color_text = .{ .color = if (on) color else Palette.muted },
         });
@@ -1239,7 +1231,7 @@ pub const App = struct {
             .padding = .{ .x = 8, .y = 0 },
             .min_size_content = .{ .h = 24 },
             .gravity_y = 0.5,
-            .background = true,
+            .background = self.panels(),
             .color_fill = .{ .color = Palette.field },
             .id_extra = 90,
         });
@@ -1265,7 +1257,7 @@ pub const App = struct {
         var canvas = dvui.box(@src(), .{ .dir = .vertical }, .{
             .expand = .both,
             .padding = .{ .x = 24, .y = 24 },
-            .background = true,
+            .background = self.panels(),
             .color_fill = .{ .color = Palette.background },
             .min_size_content = .{ .h = 0 },
         });
@@ -1380,7 +1372,7 @@ pub const App = struct {
         // DMT runs on top of LSD, so a press follows the tunnel first and the
         // drift underneath it second.
         var shown = dvui.Point.Physical{ .x = p.x, .y = p.y };
-        if (self.effect.dmt != .off) shown = dmt.foldBack(shown, self.effect_clock, size, stills, 0, self.backdrop());
+        if (self.effect.dmt != .off) shown = dmt.fold(shown, self.effect_clock, size, stills, 0);
         switch (self.effect.look) {
             .drift => shown = lsd.sample(shown, self.effect_time, size, stills, 1),
             .mushroom => shown = lsd.sample(shown, self.effect_time, size, stills, mushroom.reach),
@@ -1542,9 +1534,8 @@ pub const App = struct {
             },
             .toggle_lsd => self.toggleEffect(.lsd),
             .toggle_mushroom => self.toggleEffect(.mushroom),
-            .toggle_dmt_one => self.toggleEffect(.dmt_one),
-            .toggle_dmt_two => self.toggleEffect(.dmt_two),
-            .toggle_dmt_both => self.toggleEffect(.dmt_both),
+            .toggle_dmt => self.toggleEffect(.dmt),
+            .toggle_dmt_a => self.toggleEffect(.dmt_a),
             .toggle_dmt_b => self.toggleEffect(.dmt_b),
             .select_playlist => |index| {
                 if (index >= self.playlists.len) return;
@@ -1758,7 +1749,7 @@ pub const App = struct {
             .margin = .{ .x = 2, .y = 0 },
             .gravity_y = 0.5,
             .corners = square,
-            .background = true,
+            .background = self.panels(),
             .color_fill = .{ .color = Palette.field },
             .color_text = .{ .color = Palette.ink },
             .font = metaFont(),
@@ -1780,7 +1771,7 @@ pub const App = struct {
                 .padding = .{ .x = 5, .y = 0 },
                 .min_size_content = .{ .h = 24 },
                 .gravity_y = 0.5,
-                .background = true,
+                .background = self.panels(),
                 .color_fill = .{ .color = Palette.field },
                 .id_extra = 72,
             });
@@ -1800,7 +1791,7 @@ pub const App = struct {
                 .padding = .{ .x = 8, .y = 0 },
                 .min_size_content = .{ .h = 24 },
                 .gravity_y = 0.5,
-                .background = true,
+                .background = self.panels(),
                 .color_fill = .{ .color = Palette.field },
                 .id_extra = 74,
             });
@@ -1819,7 +1810,7 @@ pub const App = struct {
         var chip = dvui.box(@src(), .{ .dir = .horizontal }, .{
             .min_size_content = .{ .w = 26, .h = 26 },
             .margin = .{ .x = 4 },
-            .background = true,
+            .background = self.panels(),
             .color_fill = .{ .color = Palette.background },
             .id_extra = 7000 + index,
         });
@@ -1845,7 +1836,7 @@ pub const App = struct {
         var chip = dvui.box(@src(), .{ .dir = .horizontal }, .{
             .min_size_content = .{ .w = 26, .h = 18 },
             .margin = .{ .x = 4 },
-            .background = true,
+            .background = self.panels(),
             .color_fill = .{ .color = Palette.background },
             .id_extra = 7500 + index,
         });
@@ -1869,7 +1860,7 @@ pub const App = struct {
             .padding = .{ .x = 10, .y = 0 },
             .min_size_content = .{ .h = 24 },
             .gravity_y = 0.5,
-            .background = true,
+            .background = self.panels(),
             .color_fill = .{ .color = Palette.field },
             .id_extra = 80,
         });
@@ -1891,7 +1882,7 @@ pub const App = struct {
             .padding = .{ .x = 10, .y = 0 },
             .min_size_content = .{ .h = 24 },
             .gravity_y = 0.5,
-            .background = true,
+            .background = self.panels(),
             .color_fill = .{ .color = Palette.field },
             .id_extra = 82,
         });
@@ -1981,7 +1972,7 @@ pub const App = struct {
             .max_size_content = .{ .w = 630, .h = 100000 },
             .margin = .{ .x = 8, .y = 6 },
             .padding = .{ .x = 8, .y = 4 },
-            .background = true,
+            .background = self.panels(),
             .color_fill = .{ .color = Palette.field },
             .id_extra = 9000 + index,
         });
@@ -2052,7 +2043,7 @@ pub const App = struct {
                     var chip = dvui.box(@src(), .{ .dir = .horizontal }, .{
                         .min_size_content = .{ .w = 40, .h = 20 },
                         .margin = .{ .x = 2, .y = 2 },
-                        .background = true,
+                        .background = self.panels(),
                         .color_fill = .{ .color = if (active) Palette.green else Palette.field },
                         .id_extra = 9410 + index * 4 + choice,
                     });
@@ -2157,22 +2148,25 @@ pub const App = struct {
 
     /// The pinned look runs on tempo alone, at its own constant turn; the other
     /// variants use the mood-driven clock.
-    /// How much wider DMT 1 samples the grey panels, and how little padding
-    /// DMT 2 leaves in them.
-    const backdrop_pull: f32 = 0.18;
-    const tight_padding: f32 = 0.55;
-
-    /// DMT 1 pulls the grey panels in ahead of the controls drawn over them.
-    fn backdrop(self: *const App) ?dmt.Backdrop {
-        if (self.effect.dmt != .one and self.effect.dmt != .both) return null;
-        if (self.backdrops.items.len == 0) return null;
-        return .{ .rects = self.backdrops.items, .pull = backdrop_pull };
+    /// DMT A drops every panel fill, so the fold carries only the type,
+    /// waveforms and controls drawn over them.
+    fn panels(self: *const App) bool {
+        return self.effect.dmt != .a;
     }
 
-    /// DMT 2 spends less of each panel on padding, so the grey frame is a
-    /// smaller share of the window.
-    fn tight(self: *const App) f32 {
-        return if (self.effect.dmt == .two or self.effect.dmt == .both) tight_padding else 1;
+    /// The one surface DMT A folds the drawn parts over, since the panels
+    /// themselves are gone from the frame.
+    fn flatSurface(arena: std.mem.Allocator, size: dvui.Size.Physical) !void {
+        const quads = [_]geom.Quad{.{
+            .rect = .{ .x = 0, .y = 0, .w = size.w, .h = size.h },
+            .colour = Palette.background,
+        }};
+        const grid = try geom.solidQuads(arena, &quads);
+        try dvui.renderTriangles(.{
+            .vertexes = grid.vertexes,
+            .indices = grid.indices,
+            .bounds = .{ .x = 0, .y = 0, .w = size.w, .h = size.h },
+        }, null);
     }
 
     fn dmtShade(self: *const App) f32 {
@@ -2490,7 +2484,7 @@ fn pickRow(app: *App, row_index: usize, track: Track, step: ?Transition) void {
         .expand = .horizontal,
         .padding = .{ .x = 12, .y = 6 },
         .margin = .{ .y = 1 },
-        .background = true,
+        .background = app.panels(),
         .color_fill = .{ .color = Palette.panel },
         .color_fill_hover = .{ .color = Palette.hover },
         .corners = square,
@@ -2564,7 +2558,7 @@ fn drawBlock(app: *App, index: usize, track: Track) Block {
         .max_size_content = .{ .w = 380, .h = 100000 },
         .padding = .{ .x = 14, .y = 10 },
         .margin = .{ .x = 6, .y = 6 },
-        .background = true,
+        .background = app.panels(),
         .color_fill = .{ .color = blockColor(app, index, is_seed) },
         .color_fill_hover = .{ .color = if (is_seed) Palette.selection else Palette.hover },
         .corners = square,
@@ -2733,7 +2727,7 @@ fn progressBar(app: *App, track: Track, id_extra: usize, height: f32) void {
         .expand = .horizontal,
         .min_size_content = .{ .h = height },
         .margin = .{ .y = 6, .w = 6 },
-        .background = true,
+        .background = app.panels(),
         .color_fill = .{ .color = Palette.field },
         .corners = square,
         .id_extra = id_extra,
@@ -2754,7 +2748,7 @@ fn transportButton(app: *App, track: Track, id_extra: usize) bool {
     var area = dvui.box(@src(), .{ .dir = .horizontal }, .{
         .min_size_content = .{ .w = 26, .h = 26 },
         .margin = .{ .x = 4 },
-        .background = true,
+        .background = app.panels(),
         .color_fill = .{ .color = Palette.background },
         .color_fill_hover = .{ .color = Palette.hover },
         .id_extra = id_extra,
@@ -2906,7 +2900,7 @@ fn frameFooter(app: *App) void {
         .expand = .horizontal,
         .min_size_content = .{ .h = 40 },
         .padding = .{ .x = 0, .y = 6 },
-        .background = true,
+        .background = app.panels(),
         .color_fill = .{ .color = Palette.panel },
     });
     defer bar.deinit();
@@ -3116,17 +3110,17 @@ test "waveform colour survives the fold" {
     try std.testing.expect(shown_grey.r > grey.r);
 
     // The plain funnel is the reference look: colour comes through untouched.
-    try std.testing.expectEqual(plain, lifted(.{ .dmt = .one }, plain));
+    try std.testing.expectEqual(plain, lifted(.{ .dmt = .plain }, plain));
     try std.testing.expectEqual(plain, lifted(.{ .look = .drift }, plain));
 }
 
 test "a mode chip runs itself and stops only itself" {
-    try std.testing.expectEqual(Dmt.one, pressed(.off, .one));
-    try std.testing.expectEqual(Dmt.off, pressed(.one, .one));
-    try std.testing.expectEqual(Dmt.two, pressed(.one, .two));
+    try std.testing.expectEqual(Dmt.plain, pressed(.off, .plain));
+    try std.testing.expectEqual(Dmt.off, pressed(.plain, .plain));
+    try std.testing.expectEqual(Dmt.a, pressed(.plain, .a));
     try std.testing.expectEqual(Dmt.b, pressed(.off, .b));
     try std.testing.expectEqual(Dmt.off, pressed(.b, .b));
-    try std.testing.expectEqual(Dmt.b, pressed(.one, .b));
+    try std.testing.expectEqual(Dmt.b, pressed(.plain, .b));
 }
 
 test "the play history keeps four tracks, newest last" {
