@@ -2157,17 +2157,22 @@ pub const App = struct {
 
     /// The pinned look runs on tempo alone, at its own constant turn; the other
     /// variants use the mood-driven clock.
+    /// How much wider DMT 1 samples the grey panels, and how little padding
+    /// DMT 2 leaves in them.
+    const backdrop_pull: f32 = 0.18;
+    const tight_padding: f32 = 0.55;
+
     /// DMT 1 pulls the grey panels in ahead of the controls drawn over them.
     fn backdrop(self: *const App) ?dmt.Backdrop {
         if (self.effect.dmt != .one and self.effect.dmt != .both) return null;
         if (self.backdrops.items.len == 0) return null;
-        return .{ .rects = self.backdrops.items, .pull = 0.18 };
+        return .{ .rects = self.backdrops.items, .pull = backdrop_pull };
     }
 
     /// DMT 2 spends less of each panel on padding, so the grey frame is a
     /// smaller share of the window.
     fn tight(self: *const App) f32 {
-        return if (self.effect.dmt == .two or self.effect.dmt == .both) 0.55 else 1;
+        return if (self.effect.dmt == .two or self.effect.dmt == .both) tight_padding else 1;
     }
 
     fn dmtShade(self: *const App) f32 {
