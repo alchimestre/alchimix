@@ -10,6 +10,7 @@ const std = @import("std");
 const dvui = @import("dvui");
 const pl = @import("alchimix");
 const dmt = @import("dmt.zig");
+const features_ui = @import("features.zig");
 const geom = @import("geom.zig");
 const hit = @import("hit.zig");
 const lsd = @import("lsd.zig");
@@ -254,7 +255,9 @@ pub const App = struct {
     og_clock: dmt.Clock = .{},
     /// Shared effect speed multiplier, under both mode chips.
     effect_speed: f32 = 1,
-    stills: [7]dvui.Rect.Physical = .{ .{}, .{}, .{}, .{}, .{}, .{}, .{} },
+    // Six effect chips, the speed slider, the garden panel and its chrome all
+    // want a slot, so the list is sized for the panel too.
+    stills: [24]dvui.Rect.Physical = @splat(.{}),
     still_count: usize = 0,
 
     /// Tempo window for suggestions, as a percentage of the seed's BPM.
@@ -993,6 +996,105 @@ pub const App = struct {
         self.playlistChildren("root", 0);
     }
 
+    /// The garden's switches, one row per feature: the arrow drops the long
+    /// description, the row itself turns the feature on or off.
+    fn frameFeatures(self: *App) void {
+        var panel = dvui.box(@src(), .{ .dir = .vertical }, .{
+            .min_size_content = .{ .w = 290 },
+            .max_size_content = .{ .w = 290, .h = 100000 },
+            .expand = .vertical,
+            .background = true,
+            .color_fill = .{ .color = Palette.panel },
+            .padding = .{ .x = 8, .y = 8 },
+        });
+        defer panel.deinit();
+
+        labelStyled(@src(), "garden", .{
+            .color_text = .{ .color = Palette.purple },
+            .font = headingFont(),
+            .margin = .{ .x = 4, .y = 2 },
+            .id_extra = 7300,
+        });
+
+        self.still(rectFrom(panel.data().borderRectScale().r));
+
+        for (features_ui.list, 0..) |feature, index| {
+            const on = self.mushroom.features.on[index];
+            const open = self.mushroom.features.open[index];
+
+            var row = dvui.box(@src(), .{ .dir = .horizontal }, .{
+                .expand = .horizontal,
+                .margin = .{ .y = 1 },
+                .padding = .{ .x = 2, .y = 1 },
+                .id_extra = 7310 + index,
+            });
+            defer row.deinit();
+
+            // The arrow rides in front of the title, so a long title can never
+            // push it out of the column.
+            var words = dvui.box(@src(), .{ .dir = .vertical }, .{
+                .expand = .horizontal,
+                .id_extra = 7340 + index,
+            });
+            defer words.deinit();
+
+            var title: [64]u8 = undefined;
+            const arrow = if (open) "▾" else "▸";
+            const title_text = std.fmt.bufPrint(&title, "{s} {s}", .{ arrow, feature.title }) catch feature.title;
+
+            labelStyled(@src(), title_text, .{
+                .color_text = .{ .color = if (on) Palette.ink else Palette.muted },
+                .font = metaFont(),
+                .id_extra = 7350 + index,
+            });
+
+            labelStyled(@src(), feature.blurb, .{
+                .color_text = .{ .color = if (on) Palette.purple else Palette.muted },
+                .font = metaFont(),
+                .margin = .{ .x = 16 },
+                .id_extra = 7360 + index,
+            });
+
+            self.hit_map.append(rectFrom(words.data().contentRectScale().r), .{ .feature_toggle = index });
+
+            if (open) {
+                // The column is narrow, so the long line is wrapped here rather
+                // than clipped by the panel edge.
+                var buffer: [160]u8 = undefined;
+                var length: usize = 0;
+                var line_id: u32 = 7390 + @as(u32, @intCast(index)) * 8;
+                var pieces = std.mem.splitScalar(u8, feature.detail, ' ');
+                while (pieces.next()) |word| {
+                    if (length > 0 and length + word.len + 1 > 20) {
+                        labelStyled(@src(), buffer[0..length], .{
+                            .color_text = .{ .color = Palette.muted },
+                            .font = metaFont(),
+                            .margin = .{ .x = 16 },
+                            .id_extra = line_id,
+                        });
+                        line_id += 1;
+                        length = 0;
+                    }
+                    if (length + word.len + 1 > buffer.len) break;
+                    if (length > 0) {
+                        buffer[length] = ' ';
+                        length += 1;
+                    }
+                    @memcpy(buffer[length..][0..word.len], word);
+                    length += word.len;
+                }
+                if (length > 0) {
+                    labelStyled(@src(), buffer[0..length], .{
+                        .color_text = .{ .color = Palette.muted },
+                        .font = metaFont(),
+                        .margin = .{ .x = 16 },
+                        .id_extra = line_id,
+                    });
+                }
+            }
+        }
+    }
+
     fn frameBody(self: *App) void {
         // A minimum of zero lets the body shrink to the window; measuring the
         // strips instead made every resize lag a frame.
@@ -1005,6 +1107,7 @@ pub const App = struct {
 
         self.framePicker();
         self.frameCanvas();
+        if (self.effect.look == .mushroom) self.frameFeatures();
         self.framePlaylists();
     }
 
@@ -1325,6 +1428,7 @@ pub const App = struct {
         self.effect_time += step;
         self.effect_clock.advance(step, dmt.mood(self.effect_time));
         self.og_clock.advance(dmt.tempoStep(elapsed, self.masterBpm()), .{});
+        self.mushroom.playing = self.transport.anyPlaying();
         if (self.transport.anyPlaying()) self.mushroom.grow(step);
         self.mushroom.tick(self.effect_time);
         self.mushroom.fall(step, self.effect_time);
@@ -1408,6 +1512,19 @@ pub const App = struct {
                 }
 
                 const target = self.hit_map.hit(p) orelse return;
+                switch (target) {
+                    .feature_toggle => |index| {
+                        self.mushroom.features.toggle(index);
+                        dvui.refresh(null, @src(), null);
+                        return;
+                    },
+                    .feature_open => |index| {
+                        self.mushroom.features.dropDown(index);
+                        dvui.refresh(null, @src(), null);
+                        return;
+                    },
+                    else => {},
+                }
                 self.last_point = p;
                 self.apply(self.drag.press(target, p, mouse.mod.shift()));
                 switch (target) {

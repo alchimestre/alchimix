@@ -21,7 +21,7 @@ pub fn run(init: std.process.Init, app: *App) !void {
     var backend = try SDLBackend.initWindow(.{
         .io = init.io,
         .environ_map = init.environ_map,
-        .size = .{ .w = 1180, .h = 720 },
+        .size = .{ .w = 1420, .h = 720 },
         .min_size = .{ .w = 720, .h = 460 },
         .vsync = true,
         .title = "alchimix",
