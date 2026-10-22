@@ -95,13 +95,11 @@ pub const Target = union(enum) {
     lsd,
     /// The gentler drift with mushrooms and rain, or stops it.
     mushroom,
-    /// Folds the window into a mandala at full brightness.
+    /// Folds the window into a mandala at full brightness, over a frame seeded
+    /// with colour aberrations.
     dmt,
-    dmt_a,
-    /// Folds it, dimmed throughout.
-    /// Folds it, then paints the coloured fills back at full strength.
-    dmt_b,
-    /// The pinned look: full brightness, window border held still.
+    /// Draws a new seed for that decoration.
+    reseed,
     /// Freezes the master tempo to the seed's BPM, or frees it.
     master_lock,
     /// Keeps the pitch while the master tempo changes.
@@ -282,8 +280,7 @@ pub const Drag = struct {
         toggle_lsd,
         toggle_mushroom,
         toggle_dmt,
-        toggle_dmt_a,
-        toggle_dmt_b,
+        reseed,
         select_playlist: usize,
         toggle_playlist: usize,
         save_playlist,
@@ -321,8 +318,7 @@ pub const Drag = struct {
             .lsd => .toggle_lsd,
             .mushroom => .toggle_mushroom,
             .dmt => .toggle_dmt,
-            .dmt_a => .toggle_dmt_a,
-            .dmt_b => .toggle_dmt_b,
+            .reseed => .reseed,
             .playlist => |index| .{ .select_playlist = index },
             .playlist_toggle => |index| .{ .toggle_playlist = index },
             .save_playlist => .save_playlist,
@@ -384,7 +380,7 @@ pub const Drag = struct {
     pub fn motion(self: *Drag, p: Point, threshold: f32, canvas: Rect, rows: []const Rect) bool {
         const pressed = self.pressed orelse return false;
         switch (pressed) {
-            .lane, .nav, .eq_node, .eq_plot, .eq_preset, .trim, .clear, .playlist, .playlist_toggle, .save_playlist, .sort_bpm, .lsd, .mushroom, .dmt, .dmt_a, .dmt_b => return false,
+            .lane, .nav, .eq_node, .eq_plot, .eq_preset, .trim, .clear, .playlist, .playlist_toggle, .save_playlist, .sort_bpm, .lsd, .mushroom, .dmt => return false,
             else => {},
         }
         if (self.carrying == null) {
@@ -405,7 +401,7 @@ pub const Drag = struct {
         return switch (target) {
             .block => |from| .{ .move_block = .{ .from = from, .gap = to } },
             .row => |track| .{ .drop_track = .{ .gap = to, .track = track } },
-            .toggle, .notation, .lane, .nav, .eq_node, .eq_plot, .eq_preset, .trim, .transport, .clear, .playlist, .playlist_toggle, .save_playlist, .sort_bpm, .lsd, .mushroom, .dmt, .dmt_a, .dmt_b, .master_lock, .pitch_lock, .lane_play, .lane_mute, .width, .grow_plant => .none,
+            .toggle, .notation, .lane, .nav, .eq_node, .eq_plot, .eq_preset, .trim, .transport, .clear, .playlist, .playlist_toggle, .save_playlist, .sort_bpm, .lsd, .mushroom, .dmt, .reseed, .master_lock, .pitch_lock, .lane_play, .lane_mute, .width, .grow_plant => .none,
         };
     }
 

@@ -219,6 +219,58 @@ pub fn draw(
     try geom.repaint(arena, stills, size, texture);
 }
 
+/// Colour aberrations, flat figures and flares, seeded so one number redraws
+/// the same frame. They are drawn into the capture before the fold, so the
+/// tunnel repeats them.
+pub fn decorate(arena: std.mem.Allocator, seed: u64, size: dvui.Size.Physical) !dvui.Triangles {
+    var glow = geom.Glow{ .arena = arena };
+    if (size.w <= 0 or size.h <= 0) return glow.triangles(.{ .x = 0, .y = 0, .w = 0, .h = 0 });
+
+    var gen = std.Random.DefaultPrng.init(seed);
+    const random = gen.random();
+    const span = @min(size.w, size.h);
+
+    var at: usize = 0;
+    while (at < 2 + random.uintLessThan(u32, 3)) : (at += 1) {
+        const flare = lit(0xff, 0xd7, 0x5e, 0.10 + 0.12 * random.float(f32));
+        const rx = span * (0.06 + 0.14 * random.float(f32));
+        glow.disc(spot(&random, size), rx, rx * (0.6 + 0.8 * random.float(f32)), flare) catch {};
+    }
+
+    at = 0;
+    while (at < 3 + random.uintLessThan(u32, 3)) : (at += 1) {
+        const from = spot(&random, size);
+        const to = spot(&random, size);
+        const wide = 0.6 + 1.4 * random.float(f32);
+        glow.limb(.{ .x = from.x - 2, .y = from.y }, .{ .x = to.x - 2, .y = to.y }, wide, lit(0xff, 0x30, 0x40, 0.30)) catch {};
+        glow.limb(.{ .x = from.x + 2, .y = from.y }, .{ .x = to.x + 2, .y = to.y }, wide, lit(0x30, 0x70, 0xff, 0.30)) catch {};
+    }
+
+    at = 0;
+    while (at < 1 + random.uintLessThan(u32, 3)) : (at += 1) {
+        const corners = [_]dvui.Point.Physical{ spot(&random, size), spot(&random, size), spot(&random, size) };
+        const colour = if (random.boolean()) lit(0xbd, 0x93, 0xf9, 0.28) else lit(0x50, 0xfa, 0x7b, 0.22);
+        for (corners, 0..) |corner, corner_at| {
+            glow.limb(corner, corners[(corner_at + 1) % corners.len], 1, colour) catch {};
+        }
+    }
+
+    return glow.triangles(.{ .x = 0, .y = 0, .w = size.w, .h = size.h });
+}
+
+fn spot(random: *const std.Random, size: dvui.Size.Physical) dvui.Point.Physical {
+    return .{ .x = random.float(f32) * size.w, .y = random.float(f32) * size.h };
+}
+
+fn lit(r: u8, g: u8, b: u8, alpha: f32) dvui.Color.PMA {
+    return .{
+        .r = @intFromFloat(@as(f32, @floatFromInt(r)) * alpha),
+        .g = @intFromFloat(@as(f32, @floatFromInt(g)) * alpha),
+        .b = @intFromFloat(@as(f32, @floatFromInt(b)) * alpha),
+        .a = @intFromFloat(alpha * 255),
+    };
+}
+
 /// Shared effect-speed range, driven by the slider under the mode chips.
 pub const min_speed: f32 = 0.2;
 pub const max_speed: f32 = 2;
@@ -392,6 +444,30 @@ test "the fold is drawn at the shade it is given" {
     try std.testing.expectEqual(@as(u8, 0), shadeColour(0).r);
     try std.testing.expectEqual(@as(u8, 140), shadeColour(damp).g);
     try std.testing.expectEqual(@as(u8, 255), shadeColour(damp).a);
+}
+
+test "the seeded decoration repeats for one seed and moves for another" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const size = dvui.Size.Physical{ .w = 800, .h = 600 };
+    const first = try decorate(arena.allocator(), 7, size);
+    const again = try decorate(arena.allocator(), 7, size);
+    const other = try decorate(arena.allocator(), 8, size);
+
+    try std.testing.expect(first.vertexes.len > 0);
+    try std.testing.expectEqual(first.vertexes.len, again.vertexes.len);
+    for (first.vertexes, again.vertexes) |shown, repeat| {
+        try std.testing.expectEqual(shown.pos.x, repeat.pos.x);
+        try std.testing.expectEqual(shown.pos.y, repeat.pos.y);
+    }
+
+    const shared = @min(first.vertexes.len, other.vertexes.len);
+    var moved = first.vertexes.len != other.vertexes.len;
+    for (first.vertexes[0..shared], other.vertexes[0..shared]) |shown, fresh| {
+        if (shown.pos.x != fresh.pos.x or shown.pos.y != fresh.pos.y) moved = true;
+    }
+    try std.testing.expect(moved);
 }
 
 test "the pinned look holds the window border still" {
