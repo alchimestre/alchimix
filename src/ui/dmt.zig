@@ -230,8 +230,8 @@ pub fn decorate(arena: std.mem.Allocator, seed: u64, size: dvui.Size.Physical) !
     var gen = std.Random.DefaultPrng.init(seed);
     const random = gen.random();
     const span = @min(size.w, size.h);
-    const across: u32 = 5;
-    const down: u32 = 3;
+    const across: u32 = 7;
+    const down: u32 = 5;
     const gap_x: f32 = size.w / @as(f32, @floatFromInt(across));
     const gap_y: f32 = size.h / @as(f32, @floatFromInt(down));
 
@@ -239,26 +239,32 @@ pub fn decorate(arena: std.mem.Allocator, seed: u64, size: dvui.Size.Physical) !
     while (row < down) : (row += 1) {
         var column: u32 = 0;
         while (column < across) : (column += 1) {
+            const inset = span * 0.06;
             const slot = dvui.Point.Physical{
-                .x = (gap_x * @as(f32, @floatFromInt(column)) + gap_x / 2) + (random.float(f32) - 0.5) * gap_x * 0.6,
-                .y = (gap_y * @as(f32, @floatFromInt(row)) + gap_y / 2) + (random.float(f32) - 0.5) * gap_y * 0.6,
+                .x = std.math.clamp((gap_x * @as(f32, @floatFromInt(column)) + gap_x / 2) + (random.float(f32) - 0.5) * gap_x * 0.6, inset, size.w - inset),
+                .y = std.math.clamp((gap_y * @as(f32, @floatFromInt(row)) + gap_y / 2) + (random.float(f32) - 0.5) * gap_y * 0.6, inset, size.h - inset),
             };
             if (random.float(f32) < 0.25) continue;
 
             if (random.float(f32) < 0.3) {
                 const radius = span * (0.03 + 0.03 * random.float(f32));
-                glow.disc(slot, radius, radius * (0.7 + 0.6 * random.float(f32)), lit(0xff, 0xd7, 0x5e, 0.22)) catch {};
+                glow.disc(slot, radius, radius * (0.7 + 0.6 * random.float(f32)), lit(0xff, 0xd7, 0x5e, 0.55)) catch {};
                 continue;
             }
 
             const sides = 3 + random.uintLessThan(usize, 3);
-            const radius = span * (0.02 + 0.025 * random.float(f32));
+            const radius = span * (0.018 + 0.022 * random.float(f32));
             const shape = figure(&random, slot, radius, sides);
-            const colour = if (random.boolean()) lit(0xbd, 0x93, 0xf9, 0.40) else lit(0x50, 0xfa, 0x7b, 0.32);
+            const colour = switch (random.uintLessThan(u8, 4)) {
+                0 => lit(0xbd, 0x93, 0xf9, 0.90),
+                1 => lit(0x50, 0xfa, 0x7b, 0.86),
+                2 => lit(0xff, 0xb8, 0x6c, 0.88),
+                else => lit(0xff, 0x55, 0x55, 0.84),
+            };
             const red = offset(shape, -2);
             const blue = offset(shape, 2);
-            glow.polygon(red[0..shape.count], lit(0xff, 0x30, 0x40, 0.30)) catch {};
-            glow.polygon(blue[0..shape.count], lit(0x30, 0x70, 0xff, 0.30)) catch {};
+            glow.polygon(red[0..shape.count], lit(0xff, 0x20, 0x30, 0.60)) catch {};
+            glow.polygon(blue[0..shape.count], lit(0x20, 0x60, 0xff, 0.62)) catch {};
             glow.polygon(shape.points[0..shape.count], colour) catch {};
         }
     }
