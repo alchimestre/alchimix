@@ -1237,6 +1237,10 @@ pub const App = struct {
             .min_size_content = .{ .h = 0 },
         });
         defer canvas.deinit();
+        // The plant stands at the canvas's right edge, clear of the playlists.
+        const canvas_rect = rectFrom(canvas.data().borderRectScale().r);
+        const frame_width: f32 = @max(1, dvui.currentWindow().rect_pixels.w);
+        mushroom.placePlant((canvas_rect.x + canvas_rect.w * 0.88) / frame_width);
         self.canvas = rectFrom(canvas.data().borderRectScale().r);
 
         self.lane_count = 0;
@@ -1328,7 +1332,7 @@ pub const App = struct {
         self.effect_time += step;
         self.effect_clock.advance(step, dmt.mood(self.effect_time));
         self.og_clock.advance(dmt.tempoStep(elapsed, self.masterBpm()), .{});
-        if (self.transport.anyPlaying()) self.mushroom.grow(step);
+        if (self.transport.anyPlaying()) self.mushroom.grow(step, self.effect_time, self.masterBpm());
         self.mushroom.tick(self.effect_time);
         self.mushroom.fall(step, self.effect_time);
     }
