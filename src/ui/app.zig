@@ -236,6 +236,9 @@ pub const App = struct {
     lsd_target: ?dvui.Texture.Target = null,
     /// The frame's coloured fills, kept while DMT runs.
     colours: std.ArrayListUnmanaged(geom.Quad) = .empty,
+    /// The lane wash: colour under the waveforms, drawn unzoomed so the lanes
+    /// keep their own hues instead of piling into one.
+    washes: std.ArrayListUnmanaged(geom.Quad) = .empty,
     colour_target: ?dvui.Texture.Target = null,
     /// Effect seconds: wall seconds scaled by tempo and the speed slider. LSD
     /// reads it straight; DMT integrates it through its mood.
@@ -389,6 +392,7 @@ pub const App = struct {
         // The whole frame has to exist before it can be warped, so while the
         // mode runs it is drawn into an offscreen copy and blitted back.
         self.colours.clearRetainingCapacity();
+        self.washes.clearRetainingCapacity();
         const previous = self.capture();
 
         var root = dvui.box(@src(), .{ .dir = .vertical }, .{
@@ -538,12 +542,13 @@ pub const App = struct {
         // last frame that reached it.
         errdefer _ = dvui.RenderTarget.setAsCurrent(screen);
 
-        const grown_quads = try arena.alloc(geom.Quad, self.colours.items.len);
-        for (self.colours.items, grown_quads) |quad, *out| {
+        const quads_kept = try arena.alloc(geom.Quad, self.washes.items.len + self.colours.items.len);
+        @memcpy(quads_kept[0..self.washes.items.len], self.washes.items);
+        for (self.colours.items, quads_kept[self.washes.items.len..]) |quad, *out| {
             out.* = grown(quad, size.w / 2, size.h / 2, dmt_colour_zoom);
         }
 
-        const quads = try geom.solidQuads(arena, grown_quads);
+        const quads = try geom.solidQuads(arena, quads_kept);
         try dvui.renderTriangles(.{
             .vertexes = quads.vertexes,
             .indices = quads.indices,
@@ -2004,7 +2009,7 @@ pub const App = struct {
 
                 const view = self.laneStart(index);
                 if (lane.analysis) |*analysis| {
-                    self.paintWave(analysis, wave_rect, view, analysis.downbeatOffset());
+                    self.paintWave(analysis, wave_rect, view, analysis.downbeatOffset(), index);
                 } else {
                     labelStyled(@src(), "no analysis", .{
                         .color_text = .{ .color = Palette.muted },
@@ -2247,7 +2252,7 @@ pub const App = struct {
     }
 
     /// Waveform and beat lines, drawn straight into the lane's rectangle.
-    fn paintWave(self: *App, analysis: *const pl.analysis.Analysis, rect: hit.Rect, start_beat: f32, beat_offset: f32) void {
+    fn paintWave(self: *App, analysis: *const pl.analysis.Analysis, rect: hit.Rect, start_beat: f32, beat_offset: f32, slot: usize) void {
         if (rect.w <= 0 or rect.h <= 0) return;
         fillRect(self.allocator, rect.x, rect.y, rect.w, rect.h, Palette.field);
 
@@ -2273,6 +2278,7 @@ pub const App = struct {
         // The grid sits under the bars: over them its half-transparent lines
         // shimmered on the coloured waveform.
         self.paintBeats(rect, start_beat, beat_offset);
+        self.waveWash(rect, laneWash(slot));
 
         var a: usize = origin;
         while (a < analysis.waveform.len) : (a += bucket) {
@@ -2293,6 +2299,16 @@ pub const App = struct {
                 self.waveFill(&builder, rect.x + x, rect.bottom() - height, width, height, color);
             }
         }
+    }
+
+    /// The lane's own colour, laid under its waveform, so the empty stretch of
+    /// a lane carries colour instead of reading as flat grey in the fold.
+    fn waveWash(self: *App, rect: hit.Rect, colour: dvui.Color) void {
+        if (self.effect.dmt == .off) return;
+        self.washes.append(self.allocator, .{
+            .rect = .{ .x = rect.x, .y = rect.y, .w = rect.w, .h = rect.h },
+            .colour = faded(saturated(colour), dmt_wash),
+        }) catch return;
     }
 
     /// How much of the waveform colour DMT paints back through the fold. The
@@ -2837,6 +2853,16 @@ const dmt_chroma: f32 = 1.3;
 /// How much larger the coloured fills are drawn than the frame they came from,
 /// so they cover more of the fold than the grey chrome.
 const dmt_colour_zoom: f32 = 2;
+
+/// How strongly the lane colour fills the stretch around its waveform.
+const dmt_wash: f32 = 0.5;
+
+/// One colour per lane, so the wash across the lanes covers five hues instead
+/// of averaging to whichever band the tracks share.
+fn laneWash(slot: usize) dvui.Color {
+    const hues = [_]dvui.Color{ Palette.purple, Palette.green, Palette.orange, Palette.yellow, Palette.red };
+    return hues[slot % hues.len];
+}
 
 /// Enlarges a quad about a centre.
 fn grown(quad: geom.Quad, mid_x: f32, mid_y: f32, zoom: f32) geom.Quad {
