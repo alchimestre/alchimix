@@ -1636,11 +1636,9 @@ pub const App = struct {
                 dvui.refresh(null, @src(), null);
             },
             .toggle_transport => {
-                // Autoplay holds the transport, so its stop swaps to global
-                // play instead of going silent.
                 if (self.autoplay_on) {
                     self.pauseAutoplay();
-                    self.replayPlayed();
+                    self.transport.stopAll();
                 } else if (self.transport.anyPlaying()) {
                     self.transport.stopAll();
                 } else {
