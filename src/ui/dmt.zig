@@ -16,6 +16,14 @@ const dvui = @import("dvui");
 const geom = @import("geom.zig");
 
 /// Rings between the centre and the rim.
+/// Folds an angle into one wedge of a kaleidoscope with `mirrors` facets, so
+/// every facet shows the same slice of the frame reflected at its edges.
+fn mirrorFold(angle: f32, mirrors: f32) f32 {
+    const sector = std.math.tau / @max(2, mirrors);
+    const within = @mod(angle, sector);
+    return @min(within, sector - within);
+}
+
 /// The band a ring shows at, with every other ring reflected. Adjacent rings
 /// meet at their edges, so the picture mirrors from the middle outwards.
 fn ringBand(level: f32, band: f32) f32 {
@@ -108,6 +116,7 @@ pub fn fold(
     border: f32,
     rings: f32,
     heart: f32,
+    mirrors: f32,
 ) dvui.Point.Physical {
     if (size.w <= 0 or size.h <= 0) return p;
     const strength = clean(p.x, p.y, size, stills, border);
@@ -134,15 +143,14 @@ pub fn fold(
     // The ring's angle is `turn` twice over, once inside the ring and once as
     // the mirror rotation, so one rotation of the radial unit vector covers
     // both: no atan2, and a single sine and cosine per vertex.
-    const turn = level * twist + turn_phase * 2;
-    const around = @cos(turn);
-    const across = @sin(turn);
+    const turned = std.math.atan2(q.y, q.x) + level * twist + turn_phase * 2;
+    const angle = mirrorFold(turned, mirrors);
+    const around = @cos(angle);
+    const across = @sin(angle);
     const reach = half * band;
-    const unit_x = if (radius > 0.0001) q.x / radius else 1;
-    const unit_y = if (radius > 0.0001) q.y / radius else 0;
     const local = dvui.Point.Physical{
-        .x = @abs(unit_x * around - unit_y * across) * reach,
-        .y = @abs(unit_x * across + unit_y * around) * reach,
+        .x = @abs(around) * reach,
+        .y = @abs(across) * reach,
     };
 
     const source = dvui.Point.Physical{ .x = centre.x + local.x, .y = centre.y + local.y };
@@ -177,6 +185,7 @@ pub fn mesh(
     border: f32,
     rings: f32,
     heart: f32,
+    mirrors: f32,
 ) !geom.Mesh {
     const shape = gridShape(size);
     const across = shape.columns + 1;
@@ -190,7 +199,7 @@ pub fn mesh(
         const y = size.h * @as(f32, @floatFromInt(row)) / down;
         for (0..across) |column| {
             const x = size.w * @as(f32, @floatFromInt(column)) / right;
-            const source = fold(.{ .x = x, .y = y }, clock, size, stills, border, rings, heart);
+            const source = fold(.{ .x = x, .y = y }, clock, size, stills, border, rings, heart, mirrors);
             vertexes[at] = .{
                 .pos = .{ .x = x, .y = y },
                 .col = tint,
@@ -253,11 +262,12 @@ pub fn draw(
     border: f32,
     rings: f32,
     heart: f32,
+    mirrors: f32,
 ) !void {
     if (size.w <= 0 or size.h <= 0) return;
     const bounds = dvui.Rect.Physical{ .x = 0, .y = 0, .w = size.w, .h = size.h };
 
-    const grid = try mesh(arena, clock, size, stills, shade, border, rings, heart);
+    const grid = try mesh(arena, clock, size, stills, shade, border, rings, heart, mirrors);
 
     try dvui.renderTriangles(.{
         .vertexes = grid.vertexes,
@@ -274,6 +284,18 @@ pub fn ringsFraction(value: f32) f32 {
 }
 
 /// Ring count for a slider position, clamped to the range.
+/// Slider range for the kaleidoscope's facet count.
+pub const min_mirrors: f32 = 2;
+pub const max_mirrors: f32 = 16;
+
+pub fn mirrorsFraction(value: f32) f32 {
+    return std.math.clamp((value - min_mirrors) / (max_mirrors - min_mirrors), 0, 1);
+}
+
+pub fn mirrorsAt(fraction: f32) f32 {
+    return @round(min_mirrors + std.math.clamp(fraction, 0, 1) * (max_mirrors - min_mirrors));
+}
+
 pub fn ringsAt(fraction: f32) f32 {
     return min_rings + std.math.clamp(fraction, 0, 1) * (max_rings - min_rings);
 }
@@ -322,7 +344,7 @@ const chips = [_]dvui.Rect.Physical{
 test "the chips do not move" {
     const middle = dvui.Point.Physical{ .x = 1062, .y = 26 };
     for (0..40) |step| {
-        const shown = fold(middle, .{ .rush = @as(f64, @floatFromInt(step)) * 0.6 }, framesize, &chips, 0, rings_default, 0);
+        const shown = fold(middle, .{ .rush = @as(f64, @floatFromInt(step)) * 0.6 }, framesize, &chips, 0, rings_default, 0, 4);
         try std.testing.expectEqual(@as(f32, 1062), shown.x);
         try std.testing.expectEqual(@as(f32, 26), shown.y);
     }
@@ -336,7 +358,7 @@ test "everything outside the stills is transformed" {
             .x = @as(f32, @floatFromInt(step)) * 59,
             .y = 4,
         };
-        const shown = fold(p, .{ .rush = 2.5 }, framesize, &chips, 0, rings_default, 0);
+        const shown = fold(p, .{ .rush = 2.5 }, framesize, &chips, 0, rings_default, 0, 4);
         if (@abs(shown.x - p.x) + @abs(shown.y - p.y) > 5) moved += 1;
     }
     try std.testing.expect(moved > 10);
@@ -350,7 +372,7 @@ test "the fold always samples inside the frame" {
                 .x = @as(f32, @floatFromInt(column)) * 29.5,
                 .y = @as(f32, @floatFromInt(row)) * 18.0,
             };
-            const shown = fold(p, .{ .rush = time }, framesize, &chips, 0, rings_default, 0);
+            const shown = fold(p, .{ .rush = time }, framesize, &chips, 0, rings_default, 0, 4);
             try std.testing.expect(shown.x >= 0 and shown.x <= framesize.w);
             try std.testing.expect(shown.y >= 0 and shown.y <= framesize.h);
         }
@@ -368,7 +390,7 @@ test "the frame is folded, not copied" {
                 .x = 60 + @as(f32, @floatFromInt(column)) * 55,
                 .y = 60 + @as(f32, @floatFromInt(row)) * 32,
             };
-            const shown = fold(p, .{ .rush = time }, framesize, &chips, 0, rings_default, 0);
+            const shown = fold(p, .{ .rush = time }, framesize, &chips, 0, rings_default, 0, 4);
             if (@abs(shown.x - p.x) + @abs(shown.y - p.y) > 20) folded += 1;
         }
     }
@@ -377,8 +399,8 @@ test "the frame is folded, not copied" {
 
 test "the mirror axes turn with the clock" {
     const p = dvui.Point.Physical{ .x = 700, .y = 300 };
-    const before = fold(p, .{ .rush = 0 }, framesize, &chips, 0, rings_default, 0);
-    const after = fold(p, .{ .rush = 1 }, framesize, &chips, 0, rings_default, 0);
+    const before = fold(p, .{ .rush = 0 }, framesize, &chips, 0, rings_default, 0, 4);
+    const after = fold(p, .{ .rush = 1 }, framesize, &chips, 0, rings_default, 0, 4);
     try std.testing.expect(@abs(before.x - after.x) + @abs(before.y - after.y) > 0.5);
 }
 
@@ -445,6 +467,19 @@ test "the grid fits one index buffer at any window size" {
     }
 }
 
+test "the kaleidoscope folds every facet the same way" {
+    const sector: f32 = std.math.tau / @as(f32, 4);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.3), mirrorFold(0.3, 4), 0.0001);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.3), mirrorFold(sector + 0.3, 4), 0.0001);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.2), mirrorFold(sector - 0.2, 4), 0.0001);
+    // Two facets fold into a half turn, so opposite sides of the frame agree.
+    try std.testing.expectApproxEqAbs(mirrorFold(0.7, 2), mirrorFold(std.math.pi + 0.7, 2), 0.0001);
+    // Slider values land on whole facet counts inside the range.
+    try std.testing.expectEqual(min_mirrors, mirrorsAt(0));
+    try std.testing.expectEqual(max_mirrors, mirrorsAt(1));
+    try std.testing.expectEqual(@as(f32, 9), mirrorsAt(0.5));
+}
+
 test "alternate rings are reflected so the picture mirrors outwards" {
     try std.testing.expectEqual(@as(f32, 0.2), ringBand(0, 0.2));
     try std.testing.expectEqual(@as(f32, 0.8), ringBand(1, 0.2));
@@ -478,12 +513,12 @@ test "the pinned look holds the window border still" {
     const clock = Clock{ .rush = 40, .turn = 7 };
 
     const edge = dvui.Point.Physical{ .x = 0, .y = 360 };
-    const shown = fold(edge, clock, framesize, &chips, border_px, rings_default, 0);
+    const shown = fold(edge, clock, framesize, &chips, border_px, rings_default, 0, 4);
     try std.testing.expectEqual(edge.x, shown.x);
     try std.testing.expectEqual(edge.y, shown.y);
 
     // Past the border the fold runs again.
     const inside = dvui.Point.Physical{ .x = 200, .y = 360 };
-    const moved = fold(inside, clock, framesize, &chips, border_px, rings_default, 0);
+    const moved = fold(inside, clock, framesize, &chips, border_px, rings_default, 0, 4);
     try std.testing.expect(@abs(moved.x - inside.x) + @abs(moved.y - inside.y) > 1);
 }

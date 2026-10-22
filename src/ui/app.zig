@@ -260,6 +260,8 @@ pub const App = struct {
     /// dims to, the wash under the lanes, the share of the fills painted back
     /// and the chroma they are pushed to all follow it.
     lane_colour: f32 = 0.6,
+    /// How many kaleidoscope facets the tunnel is folded into.
+    lane_mirrors: f32 = 4,
     /// The kick driving the lane pulse, and the follower that shapes it.
     heartbeat: bool = true,
     beat_power: f32 = 0,
@@ -532,7 +534,7 @@ pub const App = struct {
         }
 
         if (self.effect.dmt != .off) {
-            try dmt.draw(source, arena, self.effect_clock, size, stills, self.foldShade(), 0, self.drawnRings(), self.beat_power);
+            try dmt.draw(source, arena, self.effect_clock, size, stills, self.foldShade(), 0, self.drawnRings(), self.beat_power, self.lane_mirrors);
             try self.paintColours(arena, screen, size);
             // The colour pass folds the whole layer, so the controls come back
             // over it rather than being painted with lane colour.
@@ -571,7 +573,7 @@ pub const App = struct {
 
         _ = dvui.RenderTarget.setAsCurrent(screen);
         const layer_texture = try dvui.textureFromTarget(layer);
-        try dmt.draw(layer_texture, arena, self.effect_clock, size, &.{}, 1, 0, self.drawnRings(), self.beat_power);
+        try dmt.draw(layer_texture, arena, self.effect_clock, size, &.{}, 1, 0, self.drawnRings(), self.beat_power, self.lane_mirrors);
     }
 
     /// LSD's output copy, kept for as long as both modes run.
@@ -703,6 +705,11 @@ pub const App = struct {
 
             if (self.sliderRow("colour", self.lane_colour, 7260)) |fraction| {
                 self.lane_colour = fraction;
+                dvui.refresh(null, @src(), null);
+            }
+
+            if (self.sliderRow("mirror", dmt.mirrorsFraction(self.lane_mirrors), 7280)) |fraction| {
+                self.lane_mirrors = dmt.mirrorsAt(fraction);
                 dvui.refresh(null, @src(), null);
             }
 
@@ -1467,7 +1474,7 @@ pub const App = struct {
         // DMT runs on top of LSD, so a press follows the tunnel first and the
         // drift underneath it second.
         var shown = dvui.Point.Physical{ .x = p.x, .y = p.y };
-        if (self.effect.dmt != .off) shown = dmt.fold(shown, self.effect_clock, size, stills, 0, self.drawnRings(), self.beat_power);
+        if (self.effect.dmt != .off) shown = dmt.fold(shown, self.effect_clock, size, stills, 0, self.drawnRings(), self.beat_power, self.lane_mirrors);
         switch (self.effect.look) {
             .drift => shown = lsd.sample(shown, self.effect_time, size, stills, 1),
             .mushroom => shown = lsd.sample(shown, self.effect_time, size, stills, mushroom.reach),
