@@ -286,7 +286,7 @@ pub const App = struct {
     const lane_panel_width: f32 = 380;
     /// Toolbar, the speed row under the chips, and the footer. Measured once and
     /// fixed: reading them back made a resize lag a frame and flicker.
-    const chrome_height: f32 = 138;
+    const chrome_height: f32 = 160;
 
     pub fn init(allocator: std.mem.Allocator, library: pl.library.Library, io: std.Io) !App {
         const mixer = try allocator.create(pl.mixer.Mixer);
@@ -518,7 +518,10 @@ pub const App = struct {
 
         if (self.effect.dmt != .off) {
             try dmt.draw(source, arena, self.effect_clock, size, stills, dmt_shade, 0, self.lane_rings);
-            try self.paintColours(arena, screen, size);
+            try self.paintColours(arena, screen, size, stills);
+            // The colour pass folds the whole layer, so the stills have to come
+            // back over it or the controls are painted with lane colour.
+            try geom.repaint(arena, stills, size, texture);
         }
     }
 
@@ -532,7 +535,7 @@ pub const App = struct {
 
     /// The coloured fills the frame kept, folded through the same map at half
     /// strength, so the funnel keeps their weight without drowning the type.
-    fn paintColours(self: *App, arena: std.mem.Allocator, screen: dvui.RenderTarget, size: dvui.Size.Physical) !void {
+    fn paintColours(self: *App, arena: std.mem.Allocator, screen: dvui.RenderTarget, size: dvui.Size.Physical, stills: []const dvui.Rect.Physical) !void {
         if (self.colours.items.len == 0) return;
 
         const layer = try sizedTarget(&self.colour_target, size);
@@ -551,7 +554,7 @@ pub const App = struct {
 
         _ = dvui.RenderTarget.setAsCurrent(screen);
         const layer_texture = try dvui.textureFromTarget(layer);
-        try dmt.draw(layer_texture, arena, self.effect_clock, size, &.{}, 1, 0, self.lane_rings);
+        try dmt.draw(layer_texture, arena, self.effect_clock, size, stills, 1, 0, self.lane_rings);
     }
 
     /// LSD's output copy, kept for as long as both modes run.
@@ -659,62 +662,55 @@ pub const App = struct {
         self.hit_map.append(rect, .grow_plant);
     }
 
-    /// Speed for both effects on its own row under the chips, with the lane
-    /// count beside it while the fold runs.
+    /// Speed for both effects on its own row under the chips, and the lane
+    /// count on the row below while the fold runs. The block is held out of the
+    /// fold, so neither slider ever moves under the pointer.
     fn effectSpeed(self: *App) void {
-        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{
+        var column = dvui.box(@src(), .{ .dir = .vertical }, .{
             .expand = .horizontal,
             .padding = .{ .x = 16, .y = 0 },
         });
-        defer row.deinit();
+        defer column.deinit();
 
-        _ = dvui.spacer(@src(), .{ .expand = .horizontal });
-
-        labelStyled(@src(), "speed", .{
-            .font = metaFont(),
-            .color_text = .{ .color = Palette.muted },
-            .gravity_y = 0.5,
-            .margin = .{ .x = 4 },
-        });
-
-        var cluster = dvui.box(@src(), .{ .dir = .horizontal }, .{ .gravity_x = 1 });
-        defer cluster.deinit();
-
-        var fraction = dmt.speedFraction(self.effect_speed);
-        if (dvui.slider(@src(), .{ .fraction = &fraction }, .{
-            .gravity_y = 0.5,
-            .min_size_content = .{ .w = 120, .h = 8 },
-            .max_size_content = .{ .w = 120, .h = 8 },
-        })) {
+        if (self.sliderRow("speed", dmt.speedFraction(self.effect_speed), 7240)) |fraction| {
             self.effect_speed = dmt.speedAt(fraction);
             dvui.refresh(null, @src(), null);
         }
 
-        self.still(rectFrom(cluster.data().rectScaleFromParent().r));
+        if (self.effect.dmt != .off) {
+            if (self.sliderRow("lanes", dmt.ringsFraction(self.lane_rings), 7250)) |fraction| {
+                self.lane_rings = dmt.ringsAt(fraction);
+                dvui.refresh(null, @src(), null);
+            }
+        }
 
-        if (self.effect.dmt == .off) return;
+        self.still(rectFrom(column.data().borderRectScale().r));
+    }
 
-        labelStyled(@src(), "lanes", .{
+    /// A label with a slider hard against the right edge. Returns the new
+    /// position only when it moved.
+    fn sliderRow(self: *App, text: []const u8, start: f32, id: u32) ?f32 {
+        _ = self;
+        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal });
+        defer row.deinit();
+
+        _ = dvui.spacer(@src(), .{ .expand = .horizontal });
+
+        labelStyled(@src(), text, .{
             .font = metaFont(),
             .color_text = .{ .color = Palette.muted },
             .gravity_y = 0.5,
             .margin = .{ .x = 4 },
         });
 
-        var lanes = dvui.box(@src(), .{ .dir = .horizontal }, .{ .gravity_x = 1 });
-        defer lanes.deinit();
-
-        var lane_fraction = dmt.ringsFraction(self.lane_rings);
-        if (dvui.slider(@src(), .{ .fraction = &lane_fraction }, .{
+        var fraction = start;
+        const moved = dvui.slider(@src(), .{ .fraction = &fraction }, .{
             .gravity_y = 0.5,
             .min_size_content = .{ .w = 120, .h = 8 },
             .max_size_content = .{ .w = 120, .h = 8 },
-        })) {
-            self.lane_rings = dmt.ringsAt(lane_fraction);
-            dvui.refresh(null, @src(), null);
-        }
-
-        self.still(rectFrom(lanes.data().rectScaleFromParent().r));
+            .id_extra = id,
+        });
+        return if (moved) fraction else null;
     }
 
     /// A mode switch. `paint` reads the chip's rect back and keeps that patch of
