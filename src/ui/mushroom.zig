@@ -33,7 +33,13 @@ const heart_slots = 10;
 /// Seconds of playback a plant takes to reach full height.
 const season: f32 = 90;
 /// The plant sits here, as a fraction of the window.
-const plant_x: f32 = 0.86;
+/// Where the plant sits, as a fraction of the frame. The app sets it from the
+/// canvas so the plant never hides under the playlist column.
+var plant_x: f32 = 0.76;
+
+pub fn placePlant(fraction: f32) void {
+    plant_x = std.math.clamp(fraction, 0.2, 0.94);
+}
 const plant_base: f32 = 0.92;
 /// Seconds a mushroom takes to reach its cap.
 const grow: f64 = 2.4;
@@ -43,6 +49,7 @@ const life: f64 = 7.0;
 const ripple_life: f64 = 1.1;
 /// Seconds a heart floats before it pops.
 const heart_life: f64 = 9.0;
+const halo_life: f64 = 1.0;
 
 const Mushroom = struct {
     x: f32,
@@ -50,6 +57,8 @@ const Mushroom = struct {
     born: f64,
     /// Signed lean toward the last insect to pass: -1 left, 1 right.
     lean: f32 = 0,
+    /// When this mushroom's growth halo starts.
+    halo: f64 = -1000,
 };
 
 const Drop = struct {
@@ -71,6 +80,8 @@ const Big = struct {
     /// Height varies within a cluster.
     scale: f32,
     born: f64,
+    /// When this mushroom's growth halo starts.
+    halo: f64 = -1000,
 };
 
 const Insect = struct {
@@ -216,8 +227,37 @@ pub const State = struct {
     }
 
     /// The plant grows only while music plays.
-    pub fn grow(self: *State, seconds: f64) void {
+    pub fn grow(self: *State, seconds: f64, now: f64, bpm: f32) void {
+        const before = self.grown;
         self.grown = @min(1, self.grown + @as(f32, @floatCast(seconds)) / season);
+        if (self.grown <= before) return;
+
+        // Every fifth of the growth throws one halo across the whole field.
+        const step: f32 = 0.2;
+        if (@floor(before / step) == @floor(self.grown / step)) return;
+        self.haloSweep(now, bpm);
+    }
+
+    /// Lights every mushroom once, in a random order, three to a beat.
+    fn haloSweep(self: *State, now: f64, bpm: f32) void {
+        const random = self.rng.random();
+        const beat = 60 / @max(1, bpm);
+        const spacing = beat / 3;
+
+        var order: [big_slots + mushroom_slots]f32 = undefined;
+        var count: usize = 0;
+        for (0..self.big.len + self.mushrooms.len) |_| {
+            order[count] = random.float(f32);
+            count += 1;
+        }
+        std.mem.sort(f32, order[0..count], {}, std.sort.asc(f32));
+
+        for (&self.big, 0..) |*bush, slot| {
+            bush.halo = now + order[slot] * @as(f32, @floatFromInt(count)) * spacing;
+        }
+        for (&self.mushrooms, 0..) |*plant, slot| {
+            plant.halo = now + order[self.big.len + slot] * @as(f32, @floatFromInt(count)) * spacing;
+        }
     }
 
     /// A press on the plant: insects pour in from both sides, hearts rise.
@@ -235,7 +275,7 @@ pub const State = struct {
         for (&self.hearts, 0..) |*heart, at| {
             // Spread wide across the field so the burst reads as a shower, not
             // a column rising off the plant.
-            const spread = (random.float(f32) - 0.5) * 0.55;
+            const spread = (random.float(f32) - 0.5) * 0.38;
             heart.* = .{
                 .x = std.math.clamp(plant_x + spread, 0.06, 0.94),
                 .y = plant_base - 0.02 - (random.float(f32)) * 0.10,
@@ -531,6 +571,9 @@ fn drawBig(
         full;
 
     try stack(font, lines, at, tint(fade));
+
+    const cell = @max(1, font.textSize("M").w);
+    try lightHalo(at, now - bush.halo, cell, cell * 6, font);
 }
 
 /// One of the small pop-up mushrooms, tinted by its slot.
@@ -562,6 +605,8 @@ fn drawSmall(
         if (plant.lean != 0) stem_glyph = if (plant.lean < 0) "/" else "\\";
         try put(font, stem_glyph, .{ .x = at.x + cell, .y = at.y + cell * 1.15 }, stem());
     }
+
+    try lightHalo(at, now - plant.halo, cell, cell * 3, font);
 }
 
 fn drawPlant(grown: f32, size: dvui.Size.Physical, font_in: dvui.Font) !void {
@@ -658,6 +703,23 @@ fn ripple(ring: Ripple, radius: f32, size: dvui.Size.Physical, font: dvui.Font, 
 
 /// Draws rows of ASCII as one block: every row starts at the same left edge, so
 /// the art's own leading spaces do the shaping. The block is centred on `centre`.
+/// A growth halo: four marks that widen and fade over a second.
+fn lightHalo(at: dvui.Point.Physical, age: f64, cell: f32, width: f32, font: dvui.Font) !void {
+    if (age < 0 or age > halo_life) return;
+    const t: f32 = @floatCast(age / halo_life);
+    const fade: u8 = @intFromFloat((1 - t) * 210);
+    const spread = cell * (1 + t * 1.4);
+
+    try put(font, "o", .{ .x = at.x - spread, .y = at.y }, halo_colour(fade));
+    try put(font, "o", .{ .x = at.x + width + spread, .y = at.y }, halo_colour(fade));
+    try put(font, ".", .{ .x = at.x + width * 0.5, .y = at.y - spread }, halo_colour(fade));
+    try put(font, ".", .{ .x = at.x + width * 0.5, .y = at.y + cell * 3 }, halo_colour(fade));
+}
+
+fn halo_colour(fade: u8) dvui.Color {
+    return .{ .r = 0xff, .g = 0xf1, .b = 0xc4, .a = fade };
+}
+
 fn stack(font: dvui.Font, lines: []const []const u8, centre: dvui.Point.Physical, colour: dvui.Color) !void {
     const metrics = font.textSize("M");
     const cell = metrics.w;
@@ -828,10 +890,22 @@ test "the insects keep walking and stay in the frame" {
 
 test "the plant grows with playing time and stops at full" {
     var state: State = .{};
-    state.grow(45);
+    state.grow(45, 1, 120);
     try std.testing.expect(state.grown > 0.49 and state.grown < 0.51);
-    state.grow(100);
+    state.grow(100, 2, 120);
     try std.testing.expectEqual(@as(f32, 1), state.grown);
+}
+
+test "growth throws one halo across the whole field" {
+    var state: State = .{};
+    state.tick(0);
+    state.grow(45, 50, 120);
+
+    var lit: usize = 0;
+    for (state.mushrooms) |plant| {
+        if (plant.halo >= 50) lit += 1;
+    }
+    try std.testing.expectEqual(state.mushrooms.len, lit);
 }
 
 test "every insect carries a real glyph index" {
