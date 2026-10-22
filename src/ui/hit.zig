@@ -124,6 +124,9 @@ pub fn isWidth(value: u8) bool {
 pub const HitMap = struct {
     allocator: std.mem.Allocator,
     entries: std.ArrayListUnmanaged(Entry) = .empty,
+    /// While set, everything appended is cut to this viewport: a row that
+    /// scrolled under the chrome cannot take presses meant for it.
+    clip: ?Rect = null,
 
     pub const Entry = struct {
         rect: Rect,
@@ -146,15 +149,25 @@ pub const HitMap = struct {
     }
 
     pub fn append(self: *HitMap, rect: Rect, target: Target) void {
-        if (rect.isEmpty()) return;
-        self.entries.append(self.allocator, .{ .rect = rect, .target = target }) catch {};
+        const bounds = if (self.clip) |clip| rect.clipped(clip) else rect;
+        if (bounds.isEmpty()) return;
+        self.entries.append(self.allocator, .{ .rect = bounds, .target = target }) catch {};
     }
 
+    /// The innermost target wins: a chip drawn over a lane takes the press,
+    /// even though the lane was appended first.
     pub fn hit(self: *const HitMap, p: Point) ?Target {
+        var best: ?Target = null;
+        var smallest = std.math.floatMax(f32);
         for (self.entries.items) |entry| {
-            if (entry.rect.contains(p)) return entry.target;
+            if (!entry.rect.contains(p)) continue;
+            const area = entry.rect.w * entry.rect.h;
+            if (best == null or area < smallest) {
+                best = entry.target;
+                smallest = area;
+            }
         }
-        return null;
+        return best;
     }
 
     const Surface = enum { wave, nav };
@@ -455,6 +468,19 @@ const T = struct {
 };
 
 const viewport: Rect = .{ .x = 0, .y = 0, .w = 800, .h = 600 };
+
+test "a chip over a lane takes the press" {
+    var map = HitMap.init(std.testing.allocator);
+    defer map.deinit();
+    map.append(.{ .x = 0, .y = 0, .w = 1000, .h = 400 }, .{ .lane = 0 });
+    map.append(.{ .x = 900, .y = 350, .w = 60, .h = 30 }, .autoplay);
+
+    try std.testing.expectEqual(Target.autoplay, map.hit(.{ .x = 920, .y = 360 }).?);
+    switch (map.hit(.{ .x = 100, .y = 100 }).?) {
+        .lane => |index| try std.testing.expectEqual(@as(usize, 0), index),
+        else => return error.TestUnexpectedResult,
+    }
+}
 
 test "a target that stops being drawn stops taking presses" {
     var map = HitMap.init(std.testing.allocator);

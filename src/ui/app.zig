@@ -1405,6 +1405,9 @@ pub const App = struct {
         defer stack.deinit();
 
         var next_action: Action = .none;
+        // Rows scroll under the footer; their rects stop at the canvas so a
+        // press on the bar is not taken by a lane behind it.
+        self.hit_map.clip = self.canvas;
 
         for (0..self.crate.len()) |index| {
             const track = self.crate.at(index).?;
@@ -1435,6 +1438,7 @@ pub const App = struct {
 
             if (self.crate.transition(index)) |step| connector(self.allocator, index, step);
         }
+        self.hit_map.clip = null;
 
         // Scroll room past the last block: dropping at the end should not need
         // the pointer on the very last block.
