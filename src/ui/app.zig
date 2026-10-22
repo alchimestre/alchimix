@@ -522,12 +522,15 @@ pub const App = struct {
             // The colour pass folds the whole layer, so the stills have to come
             // back over it or the controls are painted with lane colour.
             try geom.repaint(arena, stills, size, texture);
+
         }
     }
 
     fn drawLook(self: *App, texture: dvui.Texture, arena: std.mem.Allocator, size: dvui.Size.Physical, stills: []const dvui.Rect.Physical) !void {
         switch (self.effect.look) {
-            .drift => try lsd.draw(texture, arena, self.effect_time, size, stills),
+            // Only the fold pins the controls; the drift carries them with the
+            // rest of the frame.
+            .drift => try lsd.draw(texture, arena, self.effect_time, size, if (self.effect.dmt == .off) &.{} else stills),
             .mushroom => try mushroom.draw(texture, arena, &self.mushroom, self.effect_time, size, stills, self.masterBpm(), self.gardenType()),
             .none => {},
         }
@@ -669,6 +672,7 @@ pub const App = struct {
         var column = dvui.box(@src(), .{ .dir = .vertical }, .{
             .gravity_x = 1,
             .padding = .{ .x = 16, .y = 0 },
+            .id_extra = 7230,
         });
         defer column.deinit();
 
@@ -691,7 +695,7 @@ pub const App = struct {
     /// position only when it moved.
     fn sliderRow(self: *App, text: []const u8, start: f32, id: u32) ?f32 {
         _ = self;
-        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .gravity_x = 1 });
+        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .gravity_x = 1, .id_extra = id });
         defer row.deinit();
 
         _ = dvui.spacer(@src(), .{ .expand = .horizontal });
@@ -701,6 +705,7 @@ pub const App = struct {
             .color_text = .{ .color = Palette.muted },
             .gravity_y = 0.5,
             .margin = .{ .x = 4 },
+            .id_extra = id + 1,
         });
 
         var fraction = start;
@@ -708,7 +713,7 @@ pub const App = struct {
             .gravity_y = 0.5,
             .min_size_content = .{ .w = 120, .h = 8 },
             .max_size_content = .{ .w = 120, .h = 8 },
-            .id_extra = id,
+            .id_extra = id + 2,
         });
         return if (moved) fraction else null;
     }

@@ -28,10 +28,10 @@ pub fn run(init: std.process.Init, app: *App) !void {
     });
     defer backend.deinit();
 
-    const theme = switch (backend.preferredColorScheme() orelse .dark) {
+    const theme = quietTheme(switch (backend.preferredColorScheme() orelse .dark) {
         .light => dvui.Theme.builtin.adwaita_light,
         .dark => dvui.Theme.builtin.adwaita_dark,
-    };
+    });
 
     var window_open = true;
     var win = try dvui.Window.init(@src(), init.gpa, backend.backend(), .{
@@ -85,10 +85,10 @@ pub fn runWaveformDemo(init: std.process.Init) !void {
     });
     defer backend.deinit();
 
-    const theme = switch (backend.preferredColorScheme() orelse .dark) {
+    const theme = quietTheme(switch (backend.preferredColorScheme() orelse .dark) {
         .light => dvui.Theme.builtin.adwaita_light,
         .dark => dvui.Theme.builtin.adwaita_dark,
-    };
+    });
 
     var window_open = true;
     var win = try dvui.Window.init(@src(), init.gpa, backend.backend(), .{
@@ -161,4 +161,12 @@ fn loadNerdFont(init: std.process.Init) bool {
         return false;
     };
     return true;
+}
+
+/// Focus rings are noise on a surface driven by the mouse: the ring drew a red
+/// box around whichever slider was last clicked.
+fn quietTheme(base: dvui.Theme) dvui.Theme {
+    var theme = base;
+    theme.focus = .{ .r = 0, .g = 0, .b = 0, .a = 0 };
+    return theme;
 }
