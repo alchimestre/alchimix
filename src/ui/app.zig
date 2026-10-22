@@ -3021,13 +3021,17 @@ const lane_wander_ease: f32 = 3.4;
 /// The kick: the loudest of the lowest bands, once past the floor.
 const kick_bins: usize = 3;
 const kick_floor: f32 = 0.18;
-const kick_fall: f32 = 0.18;
+const kick_fall: f32 = 0.09;
+const kick_rise: f32 = 0.025;
 
-/// One step of the kick follower: the attack is instant, so the frame a kick
-/// lands on already shows it, and the level falls away over `kick_fall`.
+/// One step of the kick follower: a rise of a few tens of milliseconds so the
+/// jump is not a step, and a tail short enough that the next kick lands on a
+/// settled frame.
 fn beatFollow(previous: f32, bass: f32, delta: f32) f32 {
-    const kick = std.math.clamp((bass - kick_floor) / (1 - kick_floor), 0, 1);
-    return @max(kick, previous * @exp(-@max(delta, 0) / kick_fall));
+    const target = std.math.clamp((bass - kick_floor) / (1 - kick_floor), 0, 1);
+    const span = @max(delta, 0);
+    const rate = if (target > previous) kick_rise else kick_fall;
+    return previous + (target - previous) * (1 - @exp(-span / rate));
 }
 
 /// The grid the wash is broken into, so it moves and carries its own
@@ -3380,21 +3384,18 @@ test "a kick opens the colour and thickens the wash" {
     try std.testing.expectApproxEqAbs(washFor(0.6, 0) * 1.45, washFor(0.6, 1), 0.001);
 }
 
-test "a kick lands at once and fades over its tail" {
-    const loud = beatFollow(0, 0.8, @as(f32, 1) / 60);
-    try std.testing.expect(loud > 0.7);
+test "a kick rises over a frame or two and is gone in a tenth of a second" {
+    var level: f32 = 0;
+    for (0..4) |_| level = beatFollow(level, 0.9, @as(f32, 1) / 120);
+    try std.testing.expect(level > 0.45);
+    try std.testing.expect(level < 0.95);
 
-    // Half a tail later most of it is gone, and none of it comes back.
-    const softened = beatFollow(loud, 0, kick_fall);
-    try std.testing.expect(softened < loud * 0.4);
-    try std.testing.expect(beatFollow(softened, 0, kick_fall) < softened);
+    const settled = beatFollow(level, 0, kick_fall);
+    try std.testing.expect(settled < level * 0.4);
+    try std.testing.expect(beatFollow(settled, 0, kick_fall) < settled);
 
-    // Silence never lifts the level, and the floor keeps noise quiet.
+    // The floor keeps silence and rumble at zero.
     try std.testing.expectEqual(@as(f32, 0), beatFollow(0, 0.15, 0.016));
-    // A quiet frame only lets the kick decay, never cut it short.
-    const after = beatFollow(loud, 0.1, 0.016);
-    try std.testing.expect(after < loud);
-    try std.testing.expect(after > loud * 0.85);
 }
 
 test "the wash takes the hue opposite the lane" {

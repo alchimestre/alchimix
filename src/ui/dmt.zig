@@ -18,7 +18,7 @@ const geom = @import("geom.zig");
 /// Rings between the centre and the rim.
 /// How far one kick pushes the rings outward, in ring widths. A beat swells
 /// the lanes and the gap between beats lets them settle back.
-const kick_push: f32 = 0.35;
+const kick_push: f32 = 0.25;
 
 /// Rings per e-fold of radius: the default granularity of the tunnel.
 pub const rings_default: f32 = 2.2;
