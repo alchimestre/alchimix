@@ -529,7 +529,7 @@ pub const App = struct {
     fn drawLook(self: *App, texture: dvui.Texture, arena: std.mem.Allocator, size: dvui.Size.Physical, stills: []const dvui.Rect.Physical) !void {
         switch (self.effect.look) {
             .drift => try lsd.draw(texture, arena, self.effect_time, size, stills),
-            .mushroom => try mushroom.draw(texture, arena, &self.mushroom, self.effect_time, size, stills, self.gardenType()),
+            .mushroom => try mushroom.draw(texture, arena, &self.mushroom, self.effect_time, size, stills, self.masterBpm(), self.gardenType()),
             .none => {},
         }
     }
