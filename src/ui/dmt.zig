@@ -219,47 +219,51 @@ pub fn draw(
     try geom.repaint(arena, stills, size, texture);
 }
 
-/// Colour aberrations, flat figures and flares, seeded so one number redraws
-/// the same frame. They are drawn into the capture before the fold, so the
-/// tunnel repeats them.
+/// Filled figures and flares, seeded so one number redraws the same frame. They
+/// are laid out on a jittered grid, so the window is covered evenly, and drawn
+/// into the capture before the fold, so the tunnel repeats them.
 pub fn decorate(arena: std.mem.Allocator, seed: u64, size: dvui.Size.Physical) !dvui.Triangles {
     var glow = geom.Glow{ .arena = arena };
-    if (size.w <= 0 or size.h <= 0) return glow.triangles(.{ .x = 0, .y = 0, .w = 0, .h = 0 });
+    const bounds = dvui.Rect.Physical{ .x = 0, .y = 0, .w = size.w, .h = size.h };
+    if (size.w <= 0 or size.h <= 0) return glow.triangles(bounds);
 
     var gen = std.Random.DefaultPrng.init(seed);
     const random = gen.random();
     const span = @min(size.w, size.h);
+    const across: u32 = 5;
+    const down: u32 = 3;
+    const gap_x: f32 = size.w / @as(f32, @floatFromInt(across));
+    const gap_y: f32 = size.h / @as(f32, @floatFromInt(down));
 
-    var at: usize = 0;
-    while (at < 2 + random.uintLessThan(u32, 3)) : (at += 1) {
-        const flare = lit(0xff, 0xd7, 0x5e, 0.10 + 0.12 * random.float(f32));
-        const rx = span * (0.06 + 0.14 * random.float(f32));
-        glow.disc(spot(&random, size), rx, rx * (0.6 + 0.8 * random.float(f32)), flare) catch {};
-    }
+    var row: u32 = 0;
+    while (row < down) : (row += 1) {
+        var column: u32 = 0;
+        while (column < across) : (column += 1) {
+            const slot = dvui.Point.Physical{
+                .x = (gap_x * @as(f32, @floatFromInt(column)) + gap_x / 2) + (random.float(f32) - 0.5) * gap_x * 0.6,
+                .y = (gap_y * @as(f32, @floatFromInt(row)) + gap_y / 2) + (random.float(f32) - 0.5) * gap_y * 0.6,
+            };
+            if (random.float(f32) < 0.25) continue;
 
-    at = 0;
-    while (at < 3 + random.uintLessThan(u32, 3)) : (at += 1) {
-        const from = spot(&random, size);
-        const to = spot(&random, size);
-        const wide = 0.6 + 1.4 * random.float(f32);
-        glow.limb(.{ .x = from.x - 2, .y = from.y }, .{ .x = to.x - 2, .y = to.y }, wide, lit(0xff, 0x30, 0x40, 0.30)) catch {};
-        glow.limb(.{ .x = from.x + 2, .y = from.y }, .{ .x = to.x + 2, .y = to.y }, wide, lit(0x30, 0x70, 0xff, 0.30)) catch {};
-    }
+            if (random.float(f32) < 0.3) {
+                const radius = span * (0.03 + 0.03 * random.float(f32));
+                glow.disc(slot, radius, radius * (0.7 + 0.6 * random.float(f32)), lit(0xff, 0xd7, 0x5e, 0.22)) catch {};
+                continue;
+            }
 
-    at = 0;
-    while (at < 1 + random.uintLessThan(u32, 3)) : (at += 1) {
-        const corners = [_]dvui.Point.Physical{ spot(&random, size), spot(&random, size), spot(&random, size) };
-        const colour = if (random.boolean()) lit(0xbd, 0x93, 0xf9, 0.28) else lit(0x50, 0xfa, 0x7b, 0.22);
-        for (corners, 0..) |corner, corner_at| {
-            glow.limb(corner, corners[(corner_at + 1) % corners.len], 1, colour) catch {};
+            const sides = 3 + random.uintLessThan(usize, 3);
+            const radius = span * (0.02 + 0.025 * random.float(f32));
+            const shape = figure(&random, slot, radius, sides);
+            const colour = if (random.boolean()) lit(0xbd, 0x93, 0xf9, 0.40) else lit(0x50, 0xfa, 0x7b, 0.32);
+            const red = offset(shape, -2);
+            const blue = offset(shape, 2);
+            glow.polygon(red[0..shape.count], lit(0xff, 0x30, 0x40, 0.30)) catch {};
+            glow.polygon(blue[0..shape.count], lit(0x30, 0x70, 0xff, 0.30)) catch {};
+            glow.polygon(shape.points[0..shape.count], colour) catch {};
         }
     }
 
-    return glow.triangles(.{ .x = 0, .y = 0, .w = size.w, .h = size.h });
-}
-
-fn spot(random: *const std.Random, size: dvui.Size.Physical) dvui.Point.Physical {
-    return .{ .x = random.float(f32) * size.w, .y = random.float(f32) * size.h };
+    return glow.triangles(bounds);
 }
 
 fn lit(r: u8, g: u8, b: u8, alpha: f32) dvui.Color.PMA {
@@ -269,6 +273,31 @@ fn lit(r: u8, g: u8, b: u8, alpha: f32) dvui.Color.PMA {
         .b = @intFromFloat(@as(f32, @floatFromInt(b)) * alpha),
         .a = @intFromFloat(alpha * 255),
     };
+}
+
+const Figure = struct { points: [6]dvui.Point.Physical, count: usize };
+
+/// A regular polygon with a fixed radius, squashed on each axis. The fan that
+/// fills it needs a convex outline, so the corners keep their distance.
+fn figure(random: *const std.Random, centre: dvui.Point.Physical, radius: f32, sides: usize) Figure {
+    var shape = Figure{ .points = undefined, .count = @min(sides, 6) };
+    const angle: f32 = random.float(f32) * std.math.tau;
+    const squash_x = 0.6 + 0.5 * random.float(f32);
+    const squash_y = 0.6 + 0.5 * random.float(f32);
+    for (shape.points[0..shape.count], 0..) |*point, corner| {
+        const turn = angle + @as(f32, @floatFromInt(corner)) / @as(f32, @floatFromInt(shape.count)) * std.math.tau;
+        point.* = .{
+            .x = centre.x + @cos(turn) * radius * squash_x,
+            .y = centre.y + @sin(turn) * radius * squash_y,
+        };
+    }
+    return shape;
+}
+
+fn offset(source: Figure, by: f32) [6]dvui.Point.Physical {
+    var moved: [6]dvui.Point.Physical = undefined;
+    for (source.points, 0..) |point, at| moved[at] = .{ .x = point.x + by, .y = point.y };
+    return moved;
 }
 
 /// Shared effect-speed range, driven by the slider under the mode chips.
@@ -444,6 +473,22 @@ test "the fold is drawn at the shade it is given" {
     try std.testing.expectEqual(@as(u8, 0), shadeColour(0).r);
     try std.testing.expectEqual(@as(u8, 140), shadeColour(damp).g);
     try std.testing.expectEqual(@as(u8, 255), shadeColour(damp).a);
+}
+
+test "the seeded figures stay inside the frame and keep their distance" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const size = dvui.Size.Physical{ .w = 1180, .h = 720 };
+    var seed: u64 = 1;
+    while (seed <= 8) : (seed += 1) {
+        const shown = try decorate(arena.allocator(), seed, size);
+        try std.testing.expect(shown.vertexes.len > 0);
+        for (shown.vertexes) |vertex| {
+            try std.testing.expect(vertex.pos.x >= -4 and vertex.pos.x <= size.w + 4);
+            try std.testing.expect(vertex.pos.y >= -4 and vertex.pos.y <= size.h + 4);
+        }
+    }
 }
 
 test "the seeded decoration repeats for one seed and moves for another" {
