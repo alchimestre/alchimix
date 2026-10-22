@@ -19,6 +19,7 @@ const geom = @import("geom.zig");
 /// Folds an angle into one wedge of a kaleidoscope with `mirrors` facets, so
 /// every facet shows the same slice of the frame reflected at its edges.
 fn mirrorFold(angle: f32, mirrors: f32) f32 {
+    if (mirrors < 1) return @abs(angle);
     const sector = std.math.tau / @max(2, mirrors);
     const within = @mod(angle, sector);
     return @min(within, sector - within);
@@ -285,7 +286,7 @@ pub fn ringsFraction(value: f32) f32 {
 
 /// Ring count for a slider position, clamped to the range.
 /// Slider range for the kaleidoscope's facet count.
-pub const min_mirrors: f32 = 2;
+pub const min_mirrors: f32 = 0;
 pub const max_mirrors: f32 = 16;
 
 pub fn mirrorsFraction(value: f32) f32 {
@@ -476,8 +477,10 @@ test "the kaleidoscope folds every facet the same way" {
     try std.testing.expectApproxEqAbs(mirrorFold(0.7, 2), mirrorFold(std.math.pi + 0.7, 2), 0.0001);
     // Slider values land on whole facet counts inside the range.
     try std.testing.expectEqual(min_mirrors, mirrorsAt(0));
+    // Zero facets means no fold: the rings keep their own direction.
+    try std.testing.expectApproxEqAbs(@as(f32, 0.7), mirrorFold(-0.7, 0), 0.0001);
     try std.testing.expectEqual(max_mirrors, mirrorsAt(1));
-    try std.testing.expectEqual(@as(f32, 9), mirrorsAt(0.5));
+    try std.testing.expectEqual(@as(f32, 8), mirrorsAt(0.5));
 }
 
 test "alternate rings are reflected so the picture mirrors outwards" {
