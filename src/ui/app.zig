@@ -2836,7 +2836,7 @@ const dmt_chroma: f32 = 1.3;
 
 /// How much larger the coloured fills are drawn than the frame they came from,
 /// so they cover more of the fold than the grey chrome.
-const dmt_colour_zoom: f32 = 1.35;
+const dmt_colour_zoom: f32 = 2;
 
 /// Enlarges a quad about a centre.
 fn grown(quad: geom.Quad, mid_x: f32, mid_y: f32, zoom: f32) geom.Quad {
