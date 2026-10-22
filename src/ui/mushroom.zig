@@ -16,19 +16,18 @@ const shimmer: f32 = 18;
 const mushroom_slots = 40;
 const spore_slots = 24;
 const spore_life = 1.4;
-const ring_period = 48;
-const ring_radius = 0.18;
-const ring_life = 2.4;
+const ring_period = 18;
+const ring_radius = 0.22;
+const ring_life = 3.6;
 
 // Feature order, matching the panel in `features.zig`.
 const ring_feature = 0;
-const weather_feature = 1;
-const wave_feature = 2;
-const wet_feature = 3;
-const inherit_feature = 4;
-const lean_feature = 5;
-const spore_feature = 6;
-const snail_feature = 7;
+const wave_feature = 1;
+const wet_feature = 2;
+const inherit_feature = 3;
+const lean_feature = 4;
+const spore_feature = 5;
+const snail_feature = 6;
 /// Each cluster fills a range of slots with tall mushrooms; the slots from
 /// `tall_slots` on are the wide, solitary ones.
 const Cluster = struct { start: usize, len: usize };
@@ -63,6 +62,8 @@ const Mushroom = struct {
     born: f64,
     /// 1 when freshly watered, drying to 0.
     wet: f32 = 0,
+    /// Signed lean toward the last insect to pass: -1 left, 1 right.
+    lean: f32 = 0,
 };
 
 const Drop = struct {
@@ -117,6 +118,7 @@ pub const State = struct {
     /// Whether any lane is playing; the weather answers it.
     playing: bool = true,
     ring_at: f64 = -1000,
+    wave_at: f64 = -1000,
     ring_x: f32 = 0.5,
     ring_y: f32 = 0.5,
     spores: [spore_slots]Spore = @splat(.{ .x = 0.5, .y = 0.5, .born = -1 }),
@@ -206,9 +208,7 @@ pub const State = struct {
         const random = self.rng.random();
         const step: f32 = @floatCast(seconds);
 
-        const weather = self.features.enabled(weather_feature) and self.playing;
-
-        if (weather) for (&self.insects, 0..) |*insect, at| {
+        for (&self.insects, 0..) |*insect, at| {
             insect.glyph = @intCast(at % bug_art.len);
             if (now > insect.turn) {
                 insect.vx = (random.float(f32) - 0.5) * 0.05;
@@ -221,10 +221,22 @@ pub const State = struct {
             if (insect.x > 0.99) insect.x = 0.01;
             if (insect.y < 0.05) insect.y = 0.95;
             if (insect.y > 0.95) insect.y = 0.05;
-        };
+        }
 
         for (&self.mushrooms) |*plant| {
-            if (plant.wet > 0) plant.wet = @max(0, plant.wet - step * 0.12);
+            if (plant.wet > 0) plant.wet = @max(0, plant.wet - step * 0.06);
+
+            if (!self.features.enabled(lean_feature)) {
+                plant.lean = 0;
+                continue;
+            }
+            // The lean fades over about a second after the bug has gone.
+            if (plant.lean != 0) plant.lean *= @max(0, 1 - step * 0.9);
+            for (self.insects) |insect| {
+                if (@abs(insect.x - plant.x) > 0.07 or @abs(insect.y - plant.y) > 0.09) continue;
+                plant.lean = if (insect.x < plant.x) -1 else 1;
+                break;
+            }
         }
         for (&self.spores) |*spore| {
             if (spore.born < 0 or now - spore.born > spore_life) continue;
@@ -241,12 +253,6 @@ pub const State = struct {
 
             self.ring(drop.x, drop.land, now, random);
             self.water(drop.x, drop.land, now);
-
-            // Silence: the drops finish and nothing replaces them.
-            if (self.features.enabled(weather_feature) and !self.playing) {
-                drop.y = -100;
-                continue;
-            }
 
             drop.* = .{
                 .x = 0.05 + random.float(f32) * 0.9,
@@ -265,13 +271,8 @@ pub const State = struct {
     /// A press on the plant: insects pour in from both sides, hearts rise.
     pub fn poke(self: *State, now: f64) void {
         if (self.features.enabled(wave_feature)) {
-            // Delayed births: the pop reaches each mushroom in distance order.
-            for (&self.mushrooms) |*plant| {
-                const dx = plant.x - plant_x;
-                const dy = plant.y - plant_base;
-                const distance = @sqrt(dx * dx + dy * dy);
-                plant.born = now + distance * 1.1;
-            }
+            // A flash travels out from the plant; the field stays standing.
+            self.wave_at = now;
         }
 
         const random = self.rng.random();
@@ -379,16 +380,18 @@ pub const State = struct {
         }
     }
 
-    /// Three dots rise where a mushroom stood.
+    /// Five dots rise where a mushroom stood, spread across its cap.
     fn puff(self: *State, at: dvui.Point.Physical, now: f64) void {
+        var placed: usize = 0;
         for (&self.spores, 0..) |*spore, index| {
+            if (placed == 5) return;
             if (spore.born >= 0 and now - spore.born <= spore_life) continue;
             spore.* = .{
-                .x = at.x + @as(f32, @floatFromInt(index % 3)) * 0.008 - 0.008,
-                .y = at.y,
-                .born = now + @as(f64, @floatFromInt(index % 3)) * 0.12,
+                .x = at.x + (@as(f32, @floatFromInt(placed)) - 2) * 0.010,
+                .y = at.y - 0.01,
+                .born = now + @as(f64, @floatFromInt(index % 2)) * 0.1,
             };
-            return;
+            placed += 1;
         }
     }
 
@@ -511,8 +514,8 @@ fn undergrowth(
 
     for (state.spores) |spore| {
         if (spore.born < 0 or now - spore.born > spore_life) continue;
-        const fade: u8 = @intFromFloat((1 - (now - spore.born) / spore_life) * 190);
-        try put(font, ".", onScreen(spore.x, spore.y, size), stemFade(fade));
+        const fade: u8 = @intFromFloat((1 - (now - spore.born) / spore_life) * 230);
+        try put(font, "*", onScreen(spore.x, spore.y, size), amber(fade));
     }
 
     if (state.features.enabled(snail_feature)) {
@@ -671,6 +674,15 @@ fn drawSmall(
         }
     }
 
+    // The press wave: a bright edge travelling out from the plant.
+    const wave_age = now - state.wave_at;
+    if (state.features.enabled(wave_feature) and wave_age >= 0) {
+        const dx = plant.x - plant_x;
+        const dy = plant.y - plant_base;
+        const front = @sqrt(dx * dx + dy * dy) * 0.8;
+        if (wave_age > front and wave_age < front + 0.45) lit = true;
+    }
+
     const wet = plant.wet;
 
     if (lit) {
@@ -688,14 +700,9 @@ fn drawSmall(
     } else {
         try put(font, ".-.", at, wetTint(tint, wet, fade));
 
-        // A passing insect bends the nearest stems toward it.
         var stem_glyph: []const u8 = "|";
-        if (state.features.enabled(lean_feature)) {
-            for (state.insects) |insect| {
-                if (@abs(insect.x - plant.x) > 0.05 or @abs(insect.y - plant.y) > 0.06) continue;
-                stem_glyph = if (insect.x < plant.x) "/" else "\\";
-                break;
-            }
+        if (state.features.enabled(lean_feature) and plant.lean != 0) {
+            stem_glyph = if (plant.lean < 0) "/" else "\\";
         }
         try put(font, stem_glyph, .{ .x = at.x + cell, .y = at.y + cell * 1.15 }, stem());
     }
@@ -845,8 +852,8 @@ fn put(font: dvui.Font, text: []const u8, at: dvui.Point.Physical, colour: dvui.
 fn wetTint(tint: *const fn (u8) dvui.Color, wet: f32, fade: u8) dvui.Color {
     if (wet <= 0.01) return tint(fade);
     const base = tint(fade);
-    const cool = rain(fade);
-    const t = @min(1, wet);
+    const cool = water(fade);
+    const t = @min(1, wet * 1.4);
     return .{
         .r = @intFromFloat(@as(f32, @floatFromInt(base.r)) * (1 - t) + @as(f32, @floatFromInt(cool.r)) * t),
         .g = @intFromFloat(@as(f32, @floatFromInt(base.g)) * (1 - t) + @as(f32, @floatFromInt(cool.g)) * t),
@@ -875,9 +882,10 @@ fn amber(fade: u8) dvui.Color {
 const caps = [_]*const fn (u8) dvui.Color{ pink, lilac, sky, amber };
 
 const snail_art = [_][]const u8{
-    " ___",
-    "(o_o)",
-    "`---'",
+    "  .--.",
+    " ( @@ )__",
+    "  `--'  oo",
+    " ~~~~~~~~~~",
 };
 
 fn stemFade(fade: u8) dvui.Color {
@@ -990,37 +998,22 @@ test "every insect carries a real glyph index" {
 }
 
 
-test "a press schedules its pops in distance order" {
+test "a press starts a wave and leaves the field standing" {
     var state: State = .{};
     state.tick(0);
+    const before = state.mushrooms[0].born;
     state.poke(10);
 
-    var farthest: f64 = 10;
-    for (state.mushrooms) |mushroom| {
-        try std.testing.expect(mushroom.born >= 10);
-        farthest = @max(farthest, mushroom.born);
-    }
-    try std.testing.expect(farthest > 10);
+    try std.testing.expectEqual(@as(f64, 10), state.wave_at);
+    try std.testing.expectEqual(before, state.mushrooms[0].born);
 }
 
-test "without the wave the press leaves the field alone" {
+test "without the wave a press starts no front" {
     var state: State = .{};
     state.tick(0);
-    state.features.on[2] = false;
+    state.features.on[1] = false;
     state.poke(10);
-    for (state.mushrooms) |mushroom| {
-        try std.testing.expect(mushroom.born < 1);
-    }
-}
-
-test "silence lets the rain run out" {
-    var state: State = .{};
-    state.tick(0);
-    state.playing = false;
-    state.fall(6, 6);
-    for (state.drops) |drop| {
-        try std.testing.expect(drop.y < 0);
-    }
+    try std.testing.expect(state.wave_at < 0);
 }
 
 test "a landing drop wets the mushroom under it" {
