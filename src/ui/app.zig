@@ -176,6 +176,8 @@ pub const App = struct {
     save_until: f64 = 0,
     /// The playlist row open for an inline rename, by id, and the text in it.
     renaming: ?[]u8 = null,
+    /// Where the rename field's caret goes this frame, painted after the row.
+    rename_caret: ?hit.Rect = null,
     rename_text: std.ArrayList(u8) = .empty,
     /// A rename just started, so the next frame focuses its field and puts the
     /// cursor at the end.
@@ -1178,13 +1180,21 @@ pub const App = struct {
             self.rename_focus = false;
         }
         self.noteTyping(entry.data().id);
+        const field = entry.data().borderRectScale().r;
         const caret = entry.textLayout.screenRectScale(entry.textLayout.cursor_rect).r;
         const enter = entry.enter_pressed;
         entry.deinit();
-        // dvui paints the caret with the widget, so the cover comes after it.
-        if (@mod(secondsNow(), 1.06) >= 0.53) {
-            caret.plus(.{ .x = -1, .w = 2 }).fill(.{}, .{ .color = .{ .color = Palette.field }, .fade = 1.0 });
-        }
+
+        // dvui's own caret sits past the field's right edge once the name is
+        // wider than the row, so this one is clamped into the field and blinks.
+        // The row paints its background after its children, so the caret is
+        // only kept here and drawn by the row once that background is down.
+        self.rename_caret = .{
+            .x = @min(caret.x, field.x + field.w - 5),
+            .y = caret.y,
+            .w = 2,
+            .h = caret.h,
+        };
 
         if (enter) self.commitRename();
     }
@@ -1232,6 +1242,13 @@ pub const App = struct {
             if (!std.mem.eql(u8, playlist.parent, parent)) continue;
             if (playlist.kind == .smart) continue;
             self.playlistRow(playlist, index, depth);
+            if (self.rename_caret) |caret| {
+                const phase = @mod(secondsNow(), 1.06);
+                if (phase < 0.53) {
+                    fillRect(self.allocator, caret.x, caret.y, caret.w, caret.h, Palette.ink);
+                }
+                self.rename_caret = null;
+            }
             if (playlist.kind == .folder and self.folderOpen(playlist.id)) {
                 self.playlistChildren(playlist.id, depth + 1);
             }
