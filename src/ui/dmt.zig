@@ -19,7 +19,7 @@ const geom = @import("geom.zig");
 /// Folds an angle into one wedge of a kaleidoscope with `mirrors` facets, so
 /// every facet shows the same slice of the frame reflected at its edges.
 fn mirrorFold(angle: f32, mirrors: f32) f32 {
-    if (mirrors < 1) return @abs(angle);
+    if (mirrors < 1) return angle;
     const sector = std.math.tau / @max(2, mirrors);
     const within = @mod(angle, sector);
     return @min(within, sector - within);
@@ -149,10 +149,12 @@ pub fn fold(
     const around = @cos(angle);
     const across = @sin(angle);
     const reach = half * band;
-    const local = dvui.Point.Physical{
-        .x = @abs(around) * reach,
-        .y = @abs(across) * reach,
-    };
+    // Folding into one quadrant is what mirrors the frame; with no facets the
+    // angle keeps its sign and the frame turns once around the centre instead.
+    const local = if (mirrors < 1)
+        dvui.Point.Physical{ .x = around * reach, .y = across * reach }
+    else
+        dvui.Point.Physical{ .x = @abs(around) * reach, .y = @abs(across) * reach };
 
     const source = dvui.Point.Physical{ .x = centre.x + local.x, .y = centre.y + local.y };
     return .{
@@ -477,10 +479,23 @@ test "the kaleidoscope folds every facet the same way" {
     try std.testing.expectApproxEqAbs(mirrorFold(0.7, 2), mirrorFold(std.math.pi + 0.7, 2), 0.0001);
     // Slider values land on whole facet counts inside the range.
     try std.testing.expectEqual(min_mirrors, mirrorsAt(0));
-    // Zero facets means no fold: the rings keep their own direction.
-    try std.testing.expectApproxEqAbs(@as(f32, 0.7), mirrorFold(-0.7, 0), 0.0001);
+    // Zero facets leaves the frame unfolded, so directions keep their sign.
+    try std.testing.expectApproxEqAbs(@as(f32, -0.7), mirrorFold(-0.7, 0), 0.0001);
     try std.testing.expectEqual(max_mirrors, mirrorsAt(1));
     try std.testing.expectEqual(@as(f32, 8), mirrorsAt(0.5));
+}
+
+test "no facets leave the frame unfolded" {
+    const size = dvui.Size.Physical{ .w = 400, .h = 400 };
+    const clock: Clock = .{};
+    const left = dvui.Point.Physical{ .x = 120, .y = 200 };
+
+    // Facets fold everything into one quadrant of the copy, so a point left of
+    // the centre samples the right of it. Zero facets keeps the direction.
+    const folded = fold(left, clock, size, &.{}, 0, rings_default, 0, 4);
+    const plain = fold(left, clock, size, &.{}, 0, rings_default, 0, 0);
+    try std.testing.expect(folded.x >= 200);
+    try std.testing.expect(plain.x < 200);
 }
 
 test "alternate rings are reflected so the picture mirrors outwards" {
