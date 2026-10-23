@@ -171,6 +171,15 @@ pub const App = struct {
     /// Owning copies: the source may rebuild its playlist list after a write.
     /// The playlist currently open in the crate, for the row highlight.
     selected_playlist: ?[]const u8 = null,
+    /// What the last save did, shown on its chip until `save_until`.
+    save_outcome: SaveOutcome = .none,
+    save_until: f64 = 0,
+    /// The playlist row open for an inline rename, by id, and the text in it.
+    renaming: ?[]u8 = null,
+    rename_text: std.ArrayList(u8) = .empty,
+    /// A rename just started, so the next frame focuses its field and puts the
+    /// cursor at the end.
+    rename_focus: bool = false,
     /// Lanes inside the canvas viewport this frame; global transport uses them
     /// once more than four tracks are loaded.
     lane_rects: [64]hit.Rect = undefined,
@@ -272,6 +281,8 @@ pub const App = struct {
     /// The kick driving the lane pulse, and the follower that shapes it.
     heartbeat: bool = true,
     beat_power: f32 = 0,
+    /// Sound stops on the beat each lane reached and the effect clock holds.
+    paused: bool = false,
     // Six effect chips, the speed slider, the garden panel and its chrome all
     // want a slot, so the list is sized for the panel too.
     stills: [24]dvui.Rect.Physical = @splat(.{}),
@@ -305,6 +316,7 @@ pub const App = struct {
 
     /// Every visible row is a real widget, so the list is capped.
     const visible_rows = 60;
+    const SaveOutcome = enum { none, saved, failed };
     const lane_panel_width: f32 = 380;
     /// Toolbar, the speed row under the chips, and the footer. Measured once and
     /// fixed: reading them back made a resize lag a frame and flicker.
@@ -356,6 +368,8 @@ pub const App = struct {
         if (self.selected_playlist) |id| {
             if (id.len > 0) self.allocator.free(id);
         }
+        if (self.renaming) |id| self.allocator.free(id);
+        self.rename_text.deinit(self.allocator);
         self.crate.deinit();
     }
 
@@ -415,8 +429,10 @@ pub const App = struct {
         // The whole frame has to exist before it can be warped, so while the
         // mode runs it is drawn into an offscreen copy and blitted back.
         self.colours.clearRetainingCapacity();
-        self.driftLanes();
-        self.pulseKick();
+        if (!self.paused) {
+            self.driftLanes();
+            self.pulseKick();
+        }
         const previous = self.capture();
 
         var root = dvui.box(@src(), .{ .dir = .vertical }, .{
@@ -721,17 +737,31 @@ pub const App = struct {
                 dvui.refresh(null, @src(), null);
             }
 
-            self.heartbeatChip();
+            self.effectChips();
         }
 
         self.still(rectFrom(column.data().borderRectScale().r));
     }
 
-    /// The kick pulse switch, under the colour slider.
-    fn heartbeatChip(self: *App) void {
-        var chip = dvui.box(@src(), .{ .dir = .horizontal }, .{
+    /// The kick pulse and the pause switch, side by side under the colour
+    /// slider.
+    fn effectChips(self: *App) void {
+        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{
             .gravity_x = 1,
             .margin = .{ .y = 2 },
+            .id_extra = 7290,
+        });
+        defer row.deinit();
+
+        self.heartbeatChip();
+        self.pauseChip();
+    }
+
+    /// The kick pulse switch, left of the pause chip.
+    fn heartbeatChip(self: *App) void {
+        var chip = dvui.box(@src(), .{ .dir = .horizontal }, .{
+            .gravity_y = 0.5,
+            .margin = .{ .x = 2 },
             .padding = .{ .x = 8, .y = 2 },
             .background = true,
             .color_fill = .{ .color = if (self.heartbeat) Palette.selection else Palette.field },
@@ -748,6 +778,29 @@ pub const App = struct {
         });
 
         self.hit_map.append(rectFrom(chip.data().contentRectScale().r), .heartbeat);
+    }
+
+    /// Silences every lane and holds the effect, or lets both run again.
+    fn pauseChip(self: *App) void {
+        var chip = dvui.box(@src(), .{ .dir = .horizontal }, .{
+            .gravity_y = 0.5,
+            .margin = .{ .x = 2 },
+            .padding = .{ .x = 8, .y = 2 },
+            .background = true,
+            .color_fill = .{ .color = if (self.paused) Palette.selection else Palette.field },
+            .corners = square,
+            .id_extra = 7272,
+        });
+        defer chip.deinit();
+
+        labelStyled(@src(), "pause", .{
+            .gravity_y = 0.5,
+            .color_text = .{ .color = if (self.paused) Palette.heat4 else Palette.muted },
+            .font = metaFont(),
+            .id_extra = 7273,
+        });
+
+        self.hit_map.append(rectFrom(chip.data().contentRectScale().r), .pause);
     }
 
     /// Eases the lane count towards a fresh goal every few seconds. The wander
@@ -932,6 +985,53 @@ pub const App = struct {
         dvui.refresh(null, @src(), null);
     }
 
+    /// Shift-click on a playlist row: the name becomes a field in place.
+    fn startRename(self: *App, index: usize) void {
+        if (index >= self.playlists.len) return;
+        const playlist = self.playlists[index];
+        self.cancelRename();
+        self.rename_text.appendSlice(self.allocator, playlist.name) catch return;
+        self.renaming = self.allocator.dupe(u8, playlist.id) catch null;
+        self.rename_focus = true;
+        dvui.refresh(null, @src(), null);
+    }
+
+    fn cancelRename(self: *App) void {
+        if (self.renaming) |id| self.allocator.free(id);
+        self.renaming = null;
+        self.rename_text.clearRetainingCapacity();
+        self.rename_focus = false;
+        dvui.refresh(null, @src(), null);
+    }
+
+    /// Writes the field through the source, then reloads the rows. The crate
+    /// stays on its playlist because the selection is a copy of the id.
+    fn commitRename(self: *App) void {
+        const id = self.renaming orelse return;
+        const name = std.mem.trim(u8, self.rename_text.items, " \t");
+        if (name.len == 0) {
+            self.cancelRename();
+            return;
+        }
+        self.library.renamePlaylist(id, name) catch {
+            self.cancelRename();
+            return;
+        };
+        self.playlists = self.library.playlists() catch &.{};
+        self.cancelRename();
+    }
+
+    /// True when the press lands on the row being renamed, where the field
+    /// handles its own clicks.
+    fn renamingRow(self: *const App, p: hit.Point) bool {
+        const id = self.renaming orelse return false;
+        const target = self.hit_map.hit(p) orelse return false;
+        return switch (target) {
+            .playlist => |index| index < self.playlists.len and std.mem.eql(u8, self.playlists[index].id, id),
+            else => false,
+        };
+    }
+
     /// Opens a playlist in the crate, in playlist order, ready to edit.
     fn selectPlaylist(self: *App, index: usize) void {
         const playlist = self.playlists[index];
@@ -972,29 +1072,43 @@ pub const App = struct {
         dvui.refresh(null, @src(), null);
     }
 
-    fn saveCratePlaylist(self: *App) void {
+    /// Seconds the save chip keeps its result before returning to its label.
+    const save_flash_seconds: f64 = 1.5;
+
+    fn saveFlash(self: *const App) SaveOutcome {
+        if (self.save_outcome == .none) return .none;
+        if (secondsNow() >= self.save_until) return .none;
+        return self.save_outcome;
+    }
+
+    /// Writes the crate back to its playlist, or into a new one. `ids` is built
+    /// compactly: a slot with no track leaves no hole, so nothing past the
+    /// written count is ever stored.
+    fn saveCratePlaylist(self: *App) SaveOutcome {
         var ids: [256]u64 = undefined;
-        const count = @min(self.crate.len(), ids.len);
-        for (0..count) |index| {
+        var count: usize = 0;
+        const limit = @min(self.crate.len(), ids.len);
+        for (0..limit) |index| {
             const track = self.crate.at(index) orelse continue;
-            ids[index] = track.id;
+            ids[count] = track.id;
+            count += 1;
         }
-        if (count == 0) return;
+        if (count == 0) return .failed;
 
         // A crate opened from a playlist writes back into it; only a crate
         // with no playlist of its own creates one.
         if (self.selected_playlist) |playlist_id| {
-            self.library.replacePlaylistTracks(playlist_id, ids[0..count]) catch return;
+            self.library.replacePlaylistTracks(playlist_id, ids[0..count]) catch return .failed;
         } else {
             var name_buffer: [128]u8 = undefined;
             const name = if (self.crate.seedTrack()) |seed|
                 std.fmt.bufPrint(&name_buffer, "Crate · {s}", .{seed.title}) catch "Crate"
             else
                 "Crate";
-            self.library.createPlaylist(name, ids[0..count]) catch return;
+            self.library.createPlaylist(name, ids[0..count]) catch return .failed;
         }
         self.playlists = self.library.playlists() catch &.{};
-        dvui.refresh(null, @src(), null);
+        return .saved;
     }
 
     fn playlistRow(self: *App, playlist: pl.library.Playlist, index: usize, depth: usize) void {
@@ -1011,6 +1125,19 @@ pub const App = struct {
         });
         defer row.deinit();
 
+        const target: hit.Target = if (playlist.kind == .folder)
+            .{ .playlist_toggle = index }
+        else
+            .{ .playlist = index };
+        self.hit_map.append(rectFrom(row.data().contentRectScale().r), target);
+
+        if (self.renaming) |renaming_id| {
+            if (std.mem.eql(u8, renaming_id, playlist.id)) {
+                self.renameField(index);
+                return;
+            }
+        }
+
         const glyph = switch (playlist.kind) {
             .folder => if (self.folderOpen(playlist.id)) "▾ " else "▸ ",
             .smart => "◆ ",
@@ -1025,12 +1152,36 @@ pub const App = struct {
             .font = if (playlist.kind == .folder) headingFont() else bodyFont(),
             .id_extra = 7100 + index,
         });
+    }
 
-        const target: hit.Target = if (playlist.kind == .folder)
-            .{ .playlist_toggle = index }
-        else
-            .{ .playlist = index };
-        self.hit_map.append(rectFrom(row.data().contentRectScale().r), target);
+    /// The row's name as a field. Enter writes it, Escape and any click
+    /// elsewhere revert.
+    fn renameField(self: *App, index: usize) void {
+        var entry = dvui.textEntry(@src(), .{ .text = .{ .array_list = .{
+            .backing = &self.rename_text,
+            .allocator = self.allocator,
+        } } }, .{
+            .expand = .horizontal,
+            .min_size_content = .{ .h = 20 },
+            .padding = .{ .x = 4, .y = 1 },
+            .margin = .{ .y = 0 },
+            .corners = square,
+            .background = true,
+            .color_fill = .{ .color = Palette.field },
+            .color_text = .{ .color = Palette.ink },
+            .font = bodyFont(),
+            .id_extra = 7200 + index,
+        });
+        if (self.rename_focus) {
+            dvui.focusWidget(entry.data().id, null, null);
+            entry.textLayout.selection.moveCursor(self.rename_text.items.len, false);
+            self.rename_focus = false;
+        }
+        self.noteTyping(entry.data().id);
+        const enter = entry.enter_pressed;
+        entry.deinit();
+
+        if (enter) self.commitRename();
     }
 
     fn playlistStats(self: *App) void {
@@ -1110,6 +1261,12 @@ pub const App = struct {
             var gap = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal });
             gap.deinit();
 
+            const flash = self.saveFlash();
+            const save_text = switch (flash) {
+                .none => "save crate",
+                .saved => "saved",
+                .failed => "failed",
+            };
             var save = dvui.box(@src(), .{ .dir = .horizontal }, .{
                 .min_size_content = .{ .w = 74, .h = 20 },
                 .margin = .{ .x = 2, .y = 2 },
@@ -1118,14 +1275,20 @@ pub const App = struct {
                 .id_extra = 7201,
             });
             defer save.deinit();
-            labelStyled(@src(), "save crate", .{
+            labelStyled(@src(), save_text, .{
                 .gravity_x = 0.5,
                 .gravity_y = 0.5,
-                .color_text = .{ .color = Palette.muted },
+                .color_text = .{ .color = switch (flash) {
+                    .none => Palette.muted,
+                    .saved => Palette.green,
+                    .failed => Palette.red,
+                } },
                 .font = metaFont(),
                 .id_extra = 7202,
             });
             self.hit_map.append(rectFrom(save.data().contentRectScale().r), .save_playlist);
+            // The flash reverts on the clock, so it needs its own frames.
+            if (flash != .none) dvui.refresh(null, @src(), null);
         }
 
         self.playlistChildren("root", 0);
@@ -1468,7 +1631,7 @@ pub const App = struct {
         const now = dvui.currentWindow().backend.nanoTime();
         const last = self.effect_last_ns;
         self.effect_last_ns = now;
-        if (!self.effect.any() or last == 0 or now <= last) return;
+        if (self.paused or !self.effect.any() or last == 0 or now <= last) return;
 
         const elapsed = @as(f64, @floatFromInt(now - last)) * 1e-9;
         const step = dmt.tempoStep(elapsed, self.masterBpm()) * self.effect_speed;
@@ -1506,7 +1669,13 @@ pub const App = struct {
             switch (event.evt) {
                 .mouse => self.handleMouse(event),
                 .key => |key| {
-                    if (key.action != .down or key.code != .space) continue;
+                    if (key.action != .down) continue;
+                    if (self.renaming != null and key.code == .escape) {
+                        self.cancelRename();
+                        event.handled = true;
+                        continue;
+                    }
+                    if (key.code != .space) continue;
                     // A text field owns the keyboard: space types there.
                     if (self.typing) continue;
                     self.apply(.toggle_transport);
@@ -1554,6 +1723,13 @@ pub const App = struct {
                     self.mushroom.poke(self.effect_time);
                     dvui.refresh(null, @src(), null);
                     return;
+                }
+
+                // The field owns clicks inside its own row; a click anywhere
+                // else ends the rename.
+                if (self.renaming != null) {
+                    if (self.renamingRow(p)) return;
+                    self.cancelRename();
                 }
 
                 const target = self.hit_map.hit(p) orelse return;
@@ -1640,7 +1816,13 @@ pub const App = struct {
                 dvui.refresh(null, @src(), null);
             },
             .toggle_transport => {
-                if (self.autoplay_on) {
+                if (self.paused) {
+                    // Stop rather than resume: the lanes were running when the
+                    // pause took them, so a transport press ends them.
+                    self.paused = false;
+                    self.pauseAutoplay();
+                    self.transport.stopAll();
+                } else if (self.autoplay_on) {
                     self.pauseAutoplay();
                     self.transport.stopAll();
                 } else if (self.transport.anyPlaying()) {
@@ -1650,7 +1832,9 @@ pub const App = struct {
                 }
                 dvui.refresh(null, @src(), null);
             },
+            .toggle_pause => self.setPaused(!self.paused),
             .clear_all => {
+                self.paused = false;
                 self.pauseAutoplay();
                 self.finishAutoplay();
                 self.clearAll();
@@ -1672,17 +1856,23 @@ pub const App = struct {
                 if (index >= self.playlists.len) return;
                 self.selectPlaylist(index);
             },
+            .rename_playlist => |index| self.startRename(index),
             .toggle_playlist => |index| {
                 if (index >= self.playlists.len) return;
                 self.toggleFolder(self.playlists[index].id);
             },
-            .save_playlist => self.saveCratePlaylist(),
+            .save_playlist => {
+                self.save_outcome = self.saveCratePlaylist();
+                self.save_until = secondsNow() + save_flash_seconds;
+                dvui.refresh(null, @src(), null);
+            },
             .grow_plant => {
                 self.mushroom.stepGrowth(self.effect_time, self.masterBpm());
                 dvui.refresh(null, @src(), null);
             },
             .toggle_lane_play => |index| {
                 if (index >= self.grid.items.len) return;
+                self.setPaused(false);
                 self.pauseAutoplay();
                 if (self.transport.isPlaying(index)) {
                     self.transport.stop(index);
@@ -2066,8 +2256,16 @@ pub const App = struct {
         if (self.transport.isPlaying(self.autoplay_index)) self.transport.stop(self.autoplay_index);
     }
 
+    fn setPaused(self: *App, on: bool) void {
+        if (on == self.paused) return;
+        self.paused = on;
+        if (on) self.transport.pauseAll() else self.transport.resumeAll();
+        dvui.refresh(null, @src(), null);
+    }
+
     /// Pulls the next crate track once the lane autoplay was running stops.
     fn advanceAutoplay(self: *App) void {
+        if (self.paused) return;
         if (!self.autoplay_on) return;
         if (self.autoplayLane()) |index| self.autoplay_index = index;
         if (self.transport.isPlaying(self.autoplay_index)) return;
@@ -2077,6 +2275,7 @@ pub const App = struct {
     }
 
     fn toggleAutoplay(self: *App) void {
+        self.setPaused(false);
         if (self.autoplay_on) {
             self.pauseAutoplay();
             return;
@@ -2143,6 +2342,7 @@ pub const App = struct {
             if (id.len > 0) self.allocator.free(id);
         }
         self.selected_playlist = null;
+        self.cancelRename();
         self.open_count = 0;
         self.played = .{};
         self.selected.clearRetainingCapacity();
@@ -2484,6 +2684,20 @@ pub const App = struct {
         fillRect(self.allocator, rect.x - 2, knob_y - 3.5, rect.w + 4, 7, Palette.ink);
         const grab = hit.Rect{ .x = rect.x - 2, .y = rect.y, .w = rect.w + 4, .h = rect.h };
         self.hit_map.append(grab, .{ .trim = index });
+    }
+
+    /// The lane sitting on this crate position, when the source analysed it.
+    fn laneAnalysis(self: *App, index: usize) ?*const pl.analysis.Analysis {
+        if (index >= self.grid.items.len) return null;
+        return if (self.grid.items[index].analysis) |*analysis| analysis else null;
+    }
+
+    /// Playhead of the lane on this crate position, zero while it is stopped.
+    fn laneElapsedMs(self: *App, index: usize, analysis: *const pl.analysis.Analysis, total_ms: u32) u32 {
+        if (!self.transport.isPlaying(index)) return 0;
+        const elapsed = analysis.beatTimeMs(self.transport.beat(index));
+        const total: f64 = @floatFromInt(total_ms);
+        return @intFromFloat(@min(total, @max(0, elapsed)));
     }
 
     /// Beat count of the lane's track, from its grid.
@@ -2829,8 +3043,8 @@ fn drawBlock(app: *App, index: usize, track: Track) Block {
         // Every card the same width, so the grid beside it starts at the same
         // x on every row and the playheads stack.
         .max_size_content = .{ .w = 380, .h = 100000 },
-        .padding = .{ .x = 14, .y = 10 },
-        .margin = .{ .x = 6, .y = 6 },
+        .padding = .{ .x = 14, .y = 8 },
+        .margin = .{ .x = 6, .y = 4 },
         .background = true,
         .color_fill = .{ .color = blockColor(app, index, is_seed) },
         .color_fill_hover = .{ .color = if (is_seed) Palette.selection else Palette.hover },
@@ -2877,8 +3091,24 @@ fn drawBlock(app: *App, index: usize, track: Track) Block {
         .id_extra = index * 16 + 2,
     });
 
-    var meta_buffer: [32]u8 = undefined;
-    labelStyled(@src(), trackMeta(track, &meta_buffer, app.note_names), .{
+    var meta_buffer: [96]u8 = undefined;
+    var meta_text = trackMeta(track, &meta_buffer, app.note_names);
+    if (app.laneAnalysis(index)) |analysis| {
+        const total_ms = analysis.durationMs();
+        var elapsed_buffer: [24]u8 = undefined;
+        var total_buffer: [24]u8 = undefined;
+        var pair_buffer: [24]u8 = undefined;
+        const pair = std.fmt.bufPrint(&pair_buffer, "{s}/{s}", .{
+            clockText(app.laneElapsedMs(index, analysis, total_ms), &elapsed_buffer),
+            clockText(total_ms, &total_buffer),
+        }) catch "";
+        if (pair.len > 0) {
+            // trackMeta wrote the prefix here, so the pair continues it.
+            const tail = std.fmt.bufPrint(meta_buffer[meta_text.len..], " · {s}", .{pair}) catch "";
+            meta_text = meta_buffer[0 .. meta_text.len + tail.len];
+        }
+    }
+    labelStyled(@src(), meta_text, .{
         .expand = .horizontal,
         .color_text = .{ .color = Palette.ink },
         .font = metaFont(),
@@ -2916,7 +3146,7 @@ fn drawBlock(app: *App, index: usize, track: Track) Block {
 /// or an equals sign when it holds, coloured by the size of the step.
 fn connector(allocator: std.mem.Allocator, gap: usize, step: Transition) void {
     var area = dvui.box(@src(), .{ .dir = .horizontal }, .{
-        .min_size_content = .{ .w = 380, .h = 40 },
+        .min_size_content = .{ .w = 380, .h = 34 },
         .id_extra = gap,
     });
     defer area.deinit();
@@ -2931,7 +3161,7 @@ fn connector(allocator: std.mem.Allocator, gap: usize, step: Transition) void {
             .gravity_x = 0.5,
             .gravity_y = 0.5,
             .color_text = .{ .color = color },
-            .font = headingFont().withSize(22),
+            .font = headingFont().withSize(18),
             .id_extra = gap * 8,
         });
         return;
@@ -2945,8 +3175,8 @@ fn connector(allocator: std.mem.Allocator, gap: usize, step: Transition) void {
     const points_up = direction == .up;
 
     for (0..3) |index| {
-        const offset = (@as(f32, @floatFromInt(index)) - 1) * 18 * scale;
-        drawTriangle(allocator, center_x + offset, center_y, 6 * scale, points_up, color);
+        const offset = (@as(f32, @floatFromInt(index)) - 1) * 15 * scale;
+        drawTriangle(allocator, center_x + offset, center_y, 5 * scale, points_up, color);
     }
 }
 
@@ -2964,7 +3194,7 @@ fn drawBpmDelta(rs: dvui.RectScale, delta: f64) void {
         .font = metaFont(),
         .text = text,
         .rs = rs,
-        .p = .{ .x = center_x + 34 * rs.s, .y = center_y - 8 * rs.s },
+        .p = .{ .x = center_x + 30 * rs.s, .y = center_y - 7 * rs.s },
         .color = Palette.muted,
     }) catch {};
 }
@@ -3359,6 +3589,16 @@ fn trackMeta(track: Track, buffer: []u8, note_names: bool) []const u8 {
     else
         std.fmt.bufPrint(&key_buffer, "{d}{c}", .{ key.number, key.side() }) catch "";
     return std.fmt.bufPrint(buffer, "{s} · {d:.1} bpm", .{ label, track.bpm }) catch "";
+}
+
+/// h:mm:ss, the shape of the rekordbox time column.
+fn clockText(ms: u32, buffer: []u8) []const u8 {
+    const seconds = ms / 1000;
+    return std.fmt.bufPrint(buffer, "{d}:{d:0>2}:{d:0>2}", .{
+        seconds / 3600,
+        (seconds / 60) % 60,
+        seconds % 60,
+    }) catch "";
 }
 
 fn stepColor(step: Transition) dvui.Color {

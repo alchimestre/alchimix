@@ -12,6 +12,7 @@ pub const Source = struct {
     arena: std.heap.ArenaAllocator,
     items: std.ArrayListUnmanaged(Track) = .empty,
     hits: std.ArrayListUnmanaged(Track) = .empty,
+    playlists: std.ArrayListUnmanaged(library.Playlist) = .empty,
 
     pub fn init(allocator: std.mem.Allocator) Source {
         return .{ .arena = std.heap.ArenaAllocator.init(allocator) };
@@ -57,8 +58,8 @@ pub const Source = struct {
         return self.hits.items;
     }
 
-    fn playlistsFn(_: *anyopaque) anyerror![]const library.Playlist {
-        return &.{};
+    fn playlistsFn(ctx: *anyopaque) anyerror![]const library.Playlist {
+        return ctxOf(ctx).playlists.items;
     }
 
     fn playlistTracksFn(_: *anyopaque, allocator: std.mem.Allocator, _: []const u8) anyerror![]const u64 {
@@ -71,6 +72,16 @@ pub const Source = struct {
 
     fn replacePlaylistTracksFn(_: *anyopaque, _: []const u8, _: []const u64) anyerror!void {
         return error.Unsupported;
+    }
+
+    fn renamePlaylistFn(ctx: *anyopaque, playlist_id: []const u8, playlist_name: []const u8) anyerror!void {
+        const self = ctxOf(ctx);
+        for (self.playlists.items) |*playlist| {
+            if (!std.mem.eql(u8, playlist.id, playlist_id)) continue;
+            playlist.name = try self.arena.allocator().dupe(u8, playlist_name);
+            return;
+        }
+        return error.PlaylistNotFound;
     }
 
     fn nameFn(_: *anyopaque) []const u8 {
@@ -92,6 +103,7 @@ pub const Source = struct {
         .playlistTracks = playlistTracksFn,
         .createPlaylist = createPlaylistFn,
         .replacePlaylistTracks = replacePlaylistTracksFn,
+        .renamePlaylist = renamePlaylistFn,
         .name = nameFn,
         .deinit = deinitFn,
     };
@@ -138,4 +150,25 @@ test "an unreadable key leaves the track usable" {
     const all = try lib.all();
     try std.testing.expectEqual(@as(?camelot.Key, null), all[0].key);
     try std.testing.expectApproxEqAbs(@as(f64, 128), all[0].bpm, 1e-9);
+}
+
+test "rename keeps the playlist id and replaces its name" {
+    var src = Source.init(std.testing.allocator);
+    const lib = src.port();
+    defer lib.deinit();
+
+    try src.playlists.append(src.arena.allocator(), .{
+        .id = "12",
+        .name = "Old name",
+        .parent = "root",
+        .kind = .list,
+    });
+
+    try lib.renamePlaylist("12", "Warm up");
+    const lists = try lib.playlists();
+    try std.testing.expectEqual(@as(usize, 1), lists.len);
+    try std.testing.expectEqualStrings("12", lists[0].id);
+    try std.testing.expectEqualStrings("Warm up", lists[0].name);
+
+    try std.testing.expectError(error.PlaylistNotFound, lib.renamePlaylist("99", "Nope"));
 }
