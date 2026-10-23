@@ -1178,6 +1178,11 @@ pub const App = struct {
             self.rename_focus = false;
         }
         self.noteTyping(entry.data().id);
+        // dvui draws a solid caret; covering it on the off phase makes it blink.
+        if (@mod(secondsNow(), 1.06) >= 0.53) {
+            const caret = entry.textLayout.screenRectScale(entry.textLayout.cursor_rect).r;
+            caret.fill(.{}, .{ .color = .{ .color = Palette.field }, .fade = 1.0 });
+        }
         const enter = entry.enter_pressed;
         entry.deinit();
 
@@ -1487,7 +1492,7 @@ pub const App = struct {
             .data_out = &widget,
             .id_extra = @backingInt(toggle) + 1,
             .corners = square,
-            .font = headingFont().withSize(18),
+            .font = headingFont().withSize(16),
             .background = true,
             .color_fill = .{ .color = if (on) Palette.field else Palette.background },
             .color_text = .{ .color = if (on) color else Palette.muted },
@@ -1960,7 +1965,8 @@ pub const App = struct {
     }
 
     pub fn animating(self: *const App) bool {
-        return self.transport.anyPlaying() or self.effect.any();
+        // A caret needs frames to blink.
+        return self.transport.anyPlaying() or self.effect.any() or self.renaming != null;
     }
 
     /// Loads a grid lane for every block. Lanes survive edits: a lane matched
@@ -3043,8 +3049,8 @@ fn drawBlock(app: *App, index: usize, track: Track) Block {
         // Every card the same width, so the grid beside it starts at the same
         // x on every row and the playheads stack.
         .max_size_content = .{ .w = 380, .h = 100000 },
-        .padding = .{ .x = 14, .y = 8 },
-        .margin = .{ .x = 6, .y = 4 },
+        .padding = .{ .x = 14, .y = 7 },
+        .margin = .{ .x = 6, .y = 3 },
         .background = true,
         .color_fill = .{ .color = blockColor(app, index, is_seed) },
         .color_fill_hover = .{ .color = if (is_seed) Palette.selection else Palette.hover },
@@ -3146,7 +3152,7 @@ fn drawBlock(app: *App, index: usize, track: Track) Block {
 /// or an equals sign when it holds, coloured by the size of the step.
 fn connector(allocator: std.mem.Allocator, gap: usize, step: Transition) void {
     var area = dvui.box(@src(), .{ .dir = .horizontal }, .{
-        .min_size_content = .{ .w = 380, .h = 34 },
+        .min_size_content = .{ .w = 380, .h = 30 },
         .id_extra = gap,
     });
     defer area.deinit();
@@ -3175,8 +3181,8 @@ fn connector(allocator: std.mem.Allocator, gap: usize, step: Transition) void {
     const points_up = direction == .up;
 
     for (0..3) |index| {
-        const offset = (@as(f32, @floatFromInt(index)) - 1) * 15 * scale;
-        drawTriangle(allocator, center_x + offset, center_y, 5 * scale, points_up, color);
+        const offset = (@as(f32, @floatFromInt(index)) - 1) * 12 * scale;
+        drawTriangle(allocator, center_x + offset, center_y, 4 * scale, points_up, color);
     }
 }
 
@@ -3194,7 +3200,7 @@ fn drawBpmDelta(rs: dvui.RectScale, delta: f64) void {
         .font = metaFont(),
         .text = text,
         .rs = rs,
-        .p = .{ .x = center_x + 30 * rs.s, .y = center_y - 7 * rs.s },
+        .p = .{ .x = center_x + 26 * rs.s, .y = center_y - 6 * rs.s },
         .color = Palette.muted,
     }) catch {};
 }
