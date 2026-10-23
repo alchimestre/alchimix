@@ -27,6 +27,9 @@ pub fn run(init: std.process.Init, app: *App) !void {
         .title = "alchimix",
     });
     defer backend.deinit();
+    // Registered after the backend so it runs first: the backend shuts SDL
+    // down, and SDL frees the audio stream the pump thread polls.
+    defer app.mixer.shutdown();
 
     const theme = quietTheme(switch (backend.preferredColorScheme() orelse .dark) {
         .light => dvui.Theme.builtin.adwaita_light,

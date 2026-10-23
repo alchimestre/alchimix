@@ -340,6 +340,8 @@ pub const Mixer = struct {
     device: device_mod.Device = .{},
     slots: [max_lanes]Slot = undefined,
     thread: ?std.Thread = null,
+    /// Set by shutdown: no pump may start again after the device is closed.
+    closed: bool = false,
     running: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     /// Frames actually written to the device, the transport's clock.
     clock_frames: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
@@ -361,15 +363,20 @@ pub const Mixer = struct {
         return self;
     }
 
-    pub fn deinit(self: *Mixer) void {
-        // Stop the pump first: once the device is closed the thread must not
-        // call into SDL again, or the stream is queried after destruction.
+    /// Stops the pump and closes the device. Has to run before the window
+    /// backend shuts SDL down: SDL frees the stream itself, and the pump
+    /// queries it from its own thread.
+    pub fn shutdown(self: *Mixer) void {
+        self.closed = true;
         self.running.store(false, .release);
         if (self.thread) |thread| thread.join();
         self.thread = null;
-        self.stop();
-        self.thread = null;
         self.device.close();
+    }
+
+    pub fn deinit(self: *Mixer) void {
+        self.shutdown();
+        self.stop();
         for (&self.slots) |*slot| {
             if (slot.ring.len > 0) self.allocator.free(slot.ring);
         }
@@ -381,6 +388,7 @@ pub const Mixer = struct {
     /// decoder unless their position or tempo changed; EQ changes are applied
     /// in place, so they never interrupt the audio.
     pub fn play(self: *Mixer, lanes: []const Lane) void {
+        if (self.closed) return;
         self.ensureThread();
         self.device.open() catch return;
 
@@ -503,7 +511,7 @@ pub const Mixer = struct {
     }
 
     fn ensureThread(self: *Mixer) void {
-        if (self.thread != null) return;
+        if (self.closed or self.thread != null) return;
         self.running.store(true, .release);
         self.thread = std.Thread.spawn(.{}, pumpMain, .{self}) catch null;
     }
