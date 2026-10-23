@@ -1178,13 +1178,13 @@ pub const App = struct {
             self.rename_focus = false;
         }
         self.noteTyping(entry.data().id);
-        // dvui draws a solid caret; covering it on the off phase makes it blink.
-        if (@mod(secondsNow(), 1.06) >= 0.53) {
-            const caret = entry.textLayout.screenRectScale(entry.textLayout.cursor_rect).r;
-            caret.fill(.{}, .{ .color = .{ .color = Palette.field }, .fade = 1.0 });
-        }
+        const caret = entry.textLayout.screenRectScale(entry.textLayout.cursor_rect).r;
         const enter = entry.enter_pressed;
         entry.deinit();
+        // dvui paints the caret with the widget, so the cover comes after it.
+        if (@mod(secondsNow(), 1.06) >= 0.53) {
+            caret.plus(.{ .x = -1, .w = 2 }).fill(.{}, .{ .color = .{ .color = Palette.field }, .fade = 1.0 });
+        }
 
         if (enter) self.commitRename();
     }
@@ -1492,7 +1492,7 @@ pub const App = struct {
             .data_out = &widget,
             .id_extra = @backingInt(toggle) + 1,
             .corners = square,
-            .font = headingFont().withSize(16),
+            .font = headingFont().withSize(18),
             .background = true,
             .color_fill = .{ .color = if (on) Palette.field else Palette.background },
             .color_text = .{ .color = if (on) color else Palette.muted },
@@ -3045,12 +3045,12 @@ fn drawBlock(app: *App, index: usize, track: Track) Block {
     const is_seed = app.crate.seed == index;
 
     var block = dvui.box(@src(), .{ .dir = .vertical }, .{
-        .min_size_content = .{ .w = 380, .h = 112 },
+        .min_size_content = .{ .w = 380, .h = 0 },
         // Every card the same width, so the grid beside it starts at the same
         // x on every row and the playheads stack.
         .max_size_content = .{ .w = 380, .h = 100000 },
-        .padding = .{ .x = 14, .y = 7 },
-        .margin = .{ .x = 6, .y = 3 },
+        .padding = .{ .x = 14, .y = 6 },
+        .margin = .{ .x = 6, .y = 2 },
         .background = true,
         .color_fill = .{ .color = blockColor(app, index, is_seed) },
         .color_fill_hover = .{ .color = if (is_seed) Palette.selection else Palette.hover },
@@ -3093,7 +3093,7 @@ fn drawBlock(app: *App, index: usize, track: Track) Block {
         .expand = .horizontal,
         .color_text = .{ .color = Palette.secondary },
         .font = metaFont(),
-        .margin = .{ .y = 4 },
+        .margin = .{ .y = 2 },
         .id_extra = index * 16 + 2,
     });
 
@@ -3163,13 +3163,16 @@ fn connector(allocator: std.mem.Allocator, gap: usize, step: Transition) void {
     drawBpmDelta(area.data().contentRectScale(), step.bpm_delta);
 
     if (direction == .held) {
-        labelStyled(@src(), "=", .{
-            .gravity_x = 0.5,
-            .gravity_y = 0.5,
-            .color_text = .{ .color = color },
-            .font = headingFont().withSize(18),
-            .id_extra = gap * 8,
-        });
+        // Two bars rather than a glyph: a label's line height made this row
+        // taller than the triangle rows, so the gaps came out uneven.
+        const rs = area.data().contentRectScale();
+        const center_x = rs.r.x + rs.r.w / 2;
+        const center_y = rs.r.y + rs.r.h / 2;
+        for (0..2) |index| {
+            const y = center_y + (@as(f32, @floatFromInt(index)) - 0.5) * 7 * rs.s;
+            const bar = dvui.Rect.Physical{ .x = center_x - 8 * rs.s, .y = y - 1.5 * rs.s, .w = 16 * rs.s, .h = 3 * rs.s };
+            bar.fill(.{}, .{ .color = .{ .color = color }, .fade = 1.0 });
+        }
         return;
     }
 
@@ -3598,13 +3601,16 @@ fn trackMeta(track: Track, buffer: []u8, note_names: bool) []const u8 {
 }
 
 /// h:mm:ss, the shape of the rekordbox time column.
+/// h:mm:ss only from an hour up; m:ss from a minute; bare seconds below that.
 fn clockText(ms: u32, buffer: []u8) []const u8 {
     const seconds = ms / 1000;
-    return std.fmt.bufPrint(buffer, "{d}:{d:0>2}:{d:0>2}", .{
-        seconds / 3600,
-        (seconds / 60) % 60,
-        seconds % 60,
-    }) catch "";
+    const text = if (seconds >= 3600)
+        std.fmt.bufPrint(buffer, "{d}:{d:0>2}:{d:0>2}", .{ seconds / 3600, (seconds / 60) % 60, seconds % 60 })
+    else if (seconds >= 60)
+        std.fmt.bufPrint(buffer, "{d}:{d:0>2}", .{ seconds / 60, seconds % 60 })
+    else
+        std.fmt.bufPrint(buffer, "{d}", .{seconds});
+    return text catch "";
 }
 
 fn stepColor(step: Transition) dvui.Color {
