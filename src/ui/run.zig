@@ -20,7 +20,7 @@ const garden_files = [_][]const u8{
 pub fn run(init: std.process.Init, app: *App) !void {
     var backend = try SDLBackend.initWindow(.{
         .io = init.io,
-        .environ_map = init.environ_map,
+        .allocator = init.gpa,
         .size = .{ .w = 1180, .h = 720 },
         .min_size = .{ .w = 720, .h = 460 },
         .vsync = true,
@@ -47,7 +47,7 @@ pub fn run(init: std.process.Init, app: *App) !void {
     while (window_open) {
         const frame_start = win.beginWait(interrupted);
         try win.begin(frame_start);
-        try backend.addAllEvents(&win);
+        if (try backend.addAllEvents(&win)) break;
 
         if (!fonts_ready) {
             fonts_ready = true;
@@ -77,7 +77,7 @@ pub fn runWaveformDemo(init: std.process.Init) !void {
 
     var backend = try SDLBackend.initWindow(.{
         .io = init.io,
-        .environ_map = init.environ_map,
+        .allocator = init.gpa,
         .size = .{ .w = 1000, .h = 700 },
         .min_size = .{ .w = 760, .h = 620 },
         .vsync = true,
@@ -101,7 +101,7 @@ pub fn runWaveformDemo(init: std.process.Init) !void {
     while (window_open) {
         const frame_start = win.beginWait(interrupted);
         try win.begin(frame_start);
-        try backend.addAllEvents(&win);
+        if (try backend.addAllEvents(&win)) break;
         demo.frame(init.gpa);
         const frame_end = try win.end(.{});
         interrupted = try backend.waitEventTimeout(win.waitTime(frame_end));

@@ -83,13 +83,18 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(hit_tests).step);
 }
 
-/// dvui draws the blocks; SDL3 opens the window. Both come from packages.
+/// dvui draws the blocks; SDL3 opens the window and its GPU device fills them.
+/// Both come from packages.
 fn linkUi(b: *std.Build, mod: *std.Build.Module, target: std.Build.ResolvedTarget, optimize: std.builtin.Optimize) void {
+    // dvui compiles SDL3 from source unless the system copy is enabled; the
+    // app links the Homebrew dylib itself, and two copies of SDL in one
+    // process duplicate every Objective-C class.
+    _ = b.systemIntegrationOption("sdl3", .{ .default = true });
     const dvui = b.dependency("dvui", .{
         .target = target,
         .optimize = optimize,
-        .backend = .sdl3,
+        .backend = .sdl3gpu,
     });
-    mod.addImport("dvui", dvui.module("dvui_sdl3"));
-    mod.addImport("sdl-backend", dvui.module("sdl3"));
+    mod.addImport("dvui", dvui.module("dvui_sdl3gpu"));
+    mod.addImport("sdl-backend", dvui.module("sdl3gpu"));
 }
