@@ -27,7 +27,9 @@ fn mirrorFold(angle: f32, mirrors: f32) f32 {
 
 /// The band a ring shows at, with every other ring reflected. Adjacent rings
 /// meet at their edges, so the picture mirrors from the middle outwards.
-fn ringBand(level: f32, band: f32) f32 {
+/// The reflection off means the rings repeat outward without flipping.
+fn ringBand(level: f32, band: f32, mirrors: f32) f32 {
+    if (mirrors < 1) return band;
     const parity = @mod(level, 2);
     return if (parity < 1) band else 1 - band;
 }
@@ -134,7 +136,7 @@ pub fn fold(
     // outward, so the frame is always leaving the fulcrum.
     const depth = @log(radius / half + 0.01) * rings - rush_phase - heart * kick_push;
     const level = @floor(depth);
-    const band = ringBand(level, depth - level);
+    const band = ringBand(level, depth - level, mirrors);
 
     // Each ring shows the frame again at a full radius, turned against its
     // neighbour, and alternate rings are turned inside out, so the picture
@@ -499,13 +501,14 @@ test "no facets leave the frame unfolded" {
 }
 
 test "alternate rings are reflected so the picture mirrors outwards" {
-    try std.testing.expectEqual(@as(f32, 0.2), ringBand(0, 0.2));
-    try std.testing.expectEqual(@as(f32, 0.8), ringBand(1, 0.2));
-    try std.testing.expectEqual(@as(f32, 0.2), ringBand(2, 0.2));
+    try std.testing.expectEqual(@as(f32, 0.2), ringBand(0, 0.2, 4));
+    try std.testing.expectEqual(@as(f32, 0.8), ringBand(1, 0.2, 4));
+    try std.testing.expectEqual(@as(f32, 0.2), ringBand(2, 0.2, 4));
 
     // The seam between two rings is continuous: both sides show the edge.
-    try std.testing.expectApproxEqAbs(ringBand(0, 1), ringBand(1, 0), 0.0001);
-    try std.testing.expectApproxEqAbs(ringBand(-1, 0.3), 0.7, 0.0001);
+    try std.testing.expectApproxEqAbs(ringBand(0, 1, 4), ringBand(1, 0, 4), 0.0001);
+    try std.testing.expectApproxEqAbs(ringBand(-1, 0.3, 4), 0.7, 0.0001);
+    try std.testing.expectEqual(@as(f32, 0.3), ringBand(1, 0.3, 0));
 }
 
 test "the lane slider round-trips and stays in range" {
