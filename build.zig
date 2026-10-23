@@ -56,7 +56,7 @@ pub fn build(b: *std.Build) void {
             .imports = &.{.{ .name = "alchimix", .module = core }},
         }),
     });
-    linkUi(b, exe.root_module, target, optimize, .sdl3gpu);
+    linkUi(b, exe.root_module, target, optimize);
     b.installArtifact(exe);
 
     const run_cmd = b.addRunArtifact(exe);
@@ -75,27 +75,8 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .imports = &.{.{ .name = "alchimix", .module = core }},
     });
-    linkUi(b, ui_tests, target, optimize, .sdl3gpu);
+    linkUi(b, ui_tests, target, optimize);
     const hit_tests = b.addTest(.{ .root_module = ui_tests });
-
-    // One fixed frame through the fold, for comparing backends by eye and by
-    // pixel diff. `-Drender-backend=sdl3` builds the same frame on the old one.
-    const render_backend = b.option([]const u8, "render-backend", "dvui backend for render-check: sdl3 or sdl3gpu") orelse "sdl3gpu";
-    const render_check = b.addExecutable(.{
-        .name = "render-check",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/ui/render_check.zig"),
-            .target = target,
-            .optimize = optimize,
-            .imports = &.{.{ .name = "alchimix", .module = core }},
-        }),
-    });
-    linkUi(b, render_check.root_module, target, optimize, if (std.mem.eql(u8, render_backend, "sdl3")) .sdl3 else .sdl3gpu);
-    const render_run = b.addRunArtifact(render_check);
-    b.step("render-check", "Draw the fixed comparison frame").dependOn(&render_run.step);
-    b.installArtifact(render_check);
-    b.step("render-check-build", "Build the comparison frame without running it")
-        .dependOn(b.getInstallStep());
 
     const test_step = b.step("test", "Run tests");
     test_step.dependOn(&b.addRunArtifact(tests).step);
@@ -104,13 +85,7 @@ pub fn build(b: *std.Build) void {
 
 /// dvui draws the blocks; SDL3 opens the window and its GPU device fills them.
 /// Both come from packages.
-fn linkUi(
-    b: *std.Build,
-    mod: *std.Build.Module,
-    target: std.Build.ResolvedTarget,
-    optimize: std.builtin.Optimize,
-    backend: enum { sdl3, sdl3gpu },
-) void {
+fn linkUi(b: *std.Build, mod: *std.Build.Module, target: std.Build.ResolvedTarget, optimize: std.builtin.Optimize) void {
     // dvui compiles SDL3 from source unless the system copy is enabled; the
     // app links the Homebrew dylib itself, and two copies of SDL in one
     // process duplicate every Objective-C class.
@@ -118,20 +93,8 @@ fn linkUi(
     const dvui = b.dependency("dvui", .{
         .target = target,
         .optimize = optimize,
-        .backend = backend,
+        .backend = .sdl3gpu,
     });
-    switch (backend) {
-        .sdl3 => {
-            mod.addImport("dvui", dvui.module("dvui_sdl3"));
-            mod.addImport("sdl-backend", dvui.module("sdl3"));
-            // The window monitor is Objective-C, and the system SDL build does
-            // not bring the frameworks in with it.
-            mod.linkFramework("AppKit", .{});
-            mod.linkFramework("Foundation", .{});
-        },
-        .sdl3gpu => {
-            mod.addImport("dvui", dvui.module("dvui_sdl3gpu"));
-            mod.addImport("sdl-backend", dvui.module("sdl3gpu"));
-        },
-    }
+    mod.addImport("dvui", dvui.module("dvui_sdl3gpu"));
+    mod.addImport("sdl-backend", dvui.module("sdl3gpu"));
 }
