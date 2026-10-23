@@ -94,6 +94,10 @@ fn linkUi(b: *std.Build, mod: *std.Build.Module, target: std.Build.ResolvedTarge
         .target = target,
         .optimize = optimize,
         .backend = .sdl3gpu,
+        // dvui's default u16 index wraps once a frame pushes more than 65,535
+        // vertices; the full-screen effect meshes pass that and the wrapped
+        // indices drew stray red triangles.
+        .@"vertex-index" = .u32,
     });
     mod.addImport("dvui", dvui.module("dvui_sdl3gpu"));
     mod.addImport("sdl-backend", dvui.module("sdl3gpu"));
