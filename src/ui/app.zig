@@ -512,8 +512,9 @@ pub const App = struct {
             };
         }
 
+        // A texture target starts its render pass with a clear, so nothing is
+        // painted over the previous frame in the copy.
         const target = self.effect_target.?;
-        target.clear();
         return dvui.RenderTarget.setAsCurrent(.{ .texture = target, .offset = .{} });
     }
 
@@ -547,7 +548,6 @@ pub const App = struct {
         var source = texture;
         if (self.effect.look != .none and self.effect.dmt != .off) {
             const under = try self.driftTarget(size);
-            under.clear();
             _ = dvui.RenderTarget.setAsCurrent(.{ .texture = under, .offset = .{} });
             // A failed drift draw must not leave the window drawing into the
             // throwaway copy, or the screen stays frozen when the modes drop.
@@ -586,7 +586,6 @@ pub const App = struct {
         if (self.colours.items.len == 0) return;
 
         const layer = try sizedTarget(&self.colour_target, size);
-        layer.clear();
         _ = dvui.RenderTarget.setAsCurrent(.{ .texture = layer, .offset = .{} });
         errdefer _ = dvui.RenderTarget.setAsCurrent(screen);
 
