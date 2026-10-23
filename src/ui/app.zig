@@ -279,6 +279,12 @@ pub const App = struct {
     lane_colour: f32 = 0.6,
     /// How many kaleidoscope facets the tunnel is folded into.
     lane_mirrors: f32 = 4,
+    /// Scale of the virtual window the tunnel is laid out on: one is the
+    /// window DMT was switched on in. A later resize leaves the effect alone.
+    virtual_scale: f32 = 1,
+    /// The real window's size when DMT was switched on, before the slider
+    /// scales it.
+    virtual_base: dvui.Size.Physical = .{ .w = 1180, .h = 720 },
 
     /// The kick driving the lane pulse, and the follower that shapes it.
     heartbeat: bool = true,
@@ -322,7 +328,7 @@ pub const App = struct {
     const lane_panel_width: f32 = 380;
     /// Toolbar, the speed row under the chips, and the footer. Measured once and
     /// fixed: reading them back made a resize lag a frame and flicker.
-    const chrome_height: f32 = 160;
+    const chrome_height: f32 = 184;
 
     pub fn init(allocator: std.mem.Allocator, library: pl.library.Library, io: std.Io) !App {
         const mixer = try allocator.create(pl.mixer.Mixer);
@@ -560,7 +566,7 @@ pub const App = struct {
         }
 
         if (self.effect.dmt != .off) {
-            try dmt.draw(source, arena, self.effect_clock, size, stills, self.foldShade(), 0, self.drawnRings(), self.beat_power, self.lane_mirrors);
+            try dmt.draw(source, arena, self.effect_clock, size, self.foldCanvas(), stills, self.foldShade(), 0, self.drawnRings(), self.beat_power, self.lane_mirrors);
             try self.paintColours(arena, screen, size);
             // The colour pass folds the whole layer, so the controls come back
             // over it rather than being painted with lane colour.
@@ -598,12 +604,23 @@ pub const App = struct {
 
         _ = dvui.RenderTarget.setAsCurrent(screen);
         const layer_texture = try dvui.textureFromTarget(layer);
-        try dmt.draw(layer_texture, arena, self.effect_clock, size, &.{}, 1, 0, self.drawnRings(), self.beat_power, self.lane_mirrors);
+        try dmt.draw(layer_texture, arena, self.effect_clock, size, self.foldCanvas(), &.{}, 1, 0, self.drawnRings(), self.beat_power, self.lane_mirrors);
     }
 
     /// LSD's output copy, kept for as long as both modes run.
     fn driftTarget(self: *App, size: dvui.Size.Physical) !dvui.Texture.Target {
         return sizedTarget(&self.lsd_target, size);
+    }
+
+    /// The virtual window the tunnel's geometry is laid out on.
+    fn foldCanvas(self: *const App) dvui.Size.Physical {
+        return dmt.virtualSize(self.virtual_base, self.virtual_scale);
+    }
+
+    /// The window's size in physical pixels, for the effects.
+    fn currentSize() dvui.Size.Physical {
+        const rect = dvui.currentWindow().rect_pixels;
+        return .{ .w = rect.w, .h = rect.h };
     }
 
     fn dropEffects(self: *App) void {
@@ -622,7 +639,12 @@ pub const App = struct {
         switch (which) {
             .lsd => self.effect.look = if (self.effect.look == .drift) .none else .drift,
             .mushroom => self.effect.look = if (self.effect.look == .mushroom) .none else .mushroom,
-            .dmt => self.effect.dmt = pressed(self.effect.dmt, .plain),
+            .dmt => {
+                self.effect.dmt = pressed(self.effect.dmt, .plain);
+                // The window that DMT starts in is the virtual window at
+                // scale one: the fold it drew before the slider existed.
+                if (self.effect.dmt != .off) self.virtual_base = currentSize();
+            },
         }
         if (!self.effect.any()) {
             self.dropEffects();
@@ -723,6 +745,11 @@ pub const App = struct {
         }
 
         if (self.effect.dmt != .off) {
+            if (self.sliderRow("window", dmt.virtualFraction(self.virtual_scale), 7270)) |fraction| {
+                self.virtual_scale = dmt.virtualAt(fraction);
+                dvui.refresh(null, @src(), null);
+            }
+
             if (self.sliderRow("lanes", dmt.ringsFraction(self.lane_rings), 7250)) |fraction| {
                 self.lane_rings = dmt.ringsAt(fraction);
                 dvui.refresh(null, @src(), null);
@@ -1674,7 +1701,7 @@ pub const App = struct {
         // DMT runs on top of LSD, so a press follows the tunnel first and the
         // drift underneath it second.
         var shown = dvui.Point.Physical{ .x = p.x, .y = p.y };
-        if (self.effect.dmt != .off) shown = dmt.fold(shown, self.effect_clock, size, stills, 0, self.drawnRings(), self.beat_power, self.lane_mirrors);
+        if (self.effect.dmt != .off) shown = dmt.fold(shown, self.effect_clock, size, self.foldCanvas(), stills, 0, self.drawnRings(), self.beat_power, self.lane_mirrors);
         switch (self.effect.look) {
             .drift => shown = lsd.sample(shown, self.effect_time, size, stills, 1),
             .mushroom => shown = lsd.sample(shown, self.effect_time, size, stills, mushroom.reach),

@@ -10,6 +10,12 @@
 //! the UI repeats as nested, mirrored copies. The funnel pull grows toward the
 //! middle, which bends those copies into a funnel. Colour is the frame's own;
 //! the effect only moves pixels.
+//!
+//! The fold is laid out on a virtual window of its own, centred in the real
+//! one: the real window's size when DMT was switched on, scaled by the window
+//! slider. The middle of the slider is that window exactly, so the fold there
+//! is the one the effect drew before the slider existed; left zooms inside the
+//! window, right expands past it. A later resize leaves the fold alone.
 
 const std = @import("std");
 const dvui = @import("dvui");
@@ -54,13 +60,19 @@ const twist: f32 = 0.55;
 const speed: f32 = 1.6;
 /// The pinned look: the window border never samples outside the frame.
 pub const border_px: f32 = 26;
+/// The virtual window the fold is laid out on. It is the real window's size
+/// when DMT is switched on, so the middle of the window slider is the fold
+/// exactly as it was before the virtual window existed.
+pub const min_virtual: f32 = 1.0 / 3.0;
+pub const max_virtual: f32 = 3;
+
 /// Pixels between a still rect and the full fold around it.
 const calm: f32 = 1.5;
 /// Vertex every this many physical pixels. Mirror seams are sharp, so the grid
 /// has to be fine.
 const cell: f32 = 9;
-/// One index buffer addresses u16 vertexes, so a window larger than this many
-/// cells gets a coarser stride instead of an overflowing index.
+/// Grid vertexes per frame. A window that would need more gets a coarser
+/// stride, so the fold's cost stays flat as the window grows.
 const vertex_budget: f32 = 60_000;
 
 /// Motion for the effect: seeded speed wander and a turn that flips
@@ -111,10 +123,14 @@ fn seeded(epoch: i64) u64 {
 
 /// The texel shown at `p`. Identity only inside `stills`: everything else is
 /// part of the transformation.
+///
+/// `size` is the real window, which bounds the sampled texels and the pointer
+/// map; `canvas` is the virtual window the tunnel's geometry is laid out on.
 pub fn fold(
     p: dvui.Point.Physical,
     clock: Clock,
     size: dvui.Size.Physical,
+    canvas: dvui.Size.Physical,
     stills: []const dvui.Rect.Physical,
     border: f32,
     rings: f32,
@@ -122,12 +138,15 @@ pub fn fold(
     mirrors: f32,
 ) dvui.Point.Physical {
     if (size.w <= 0 or size.h <= 0) return p;
+    if (canvas.w <= 0 or canvas.h <= 0) return p;
     const strength = clean(p.x, p.y, size, stills, border);
     if (strength <= 0) return p;
 
     const rush_phase: f32 = @floatCast(clock.rush * speed);
     const turn_phase: f32 = @floatCast(clock.turn * speed);
-    const half = @min(size.w, size.h) / 2;
+    // Radius is measured against the virtual window, so the ring the point
+    // lands in depends on the canvas and never on how big the real window is.
+    const half = @min(canvas.w, canvas.h) / 2;
     const centre = dvui.Point.Physical{ .x = size.w / 2, .y = size.h / 2 };
     const q = dvui.Point.Physical{ .x = p.x - centre.x, .y = p.y - centre.y };
     const radius = @sqrt(q.x * q.x + q.y * q.y);
@@ -185,6 +204,7 @@ pub fn mesh(
     arena: std.mem.Allocator,
     clock: Clock,
     size: dvui.Size.Physical,
+    canvas: dvui.Size.Physical,
     stills: []const dvui.Rect.Physical,
     shade: f32,
     border: f32,
@@ -204,7 +224,7 @@ pub fn mesh(
         const y = size.h * @as(f32, @floatFromInt(row)) / down;
         for (0..across) |column| {
             const x = size.w * @as(f32, @floatFromInt(column)) / right;
-            const source = fold(.{ .x = x, .y = y }, clock, size, stills, border, rings, heart, mirrors);
+            const source = fold(.{ .x = x, .y = y }, clock, size, canvas, stills, border, rings, heart, mirrors);
             vertexes[at] = .{
                 .pos = .{ .x = x, .y = y },
                 .col = tint,
@@ -262,6 +282,7 @@ pub fn draw(
     arena: std.mem.Allocator,
     clock: Clock,
     size: dvui.Size.Physical,
+    canvas: dvui.Size.Physical,
     stills: []const dvui.Rect.Physical,
     shade: f32,
     border: f32,
@@ -272,7 +293,7 @@ pub fn draw(
     if (size.w <= 0 or size.h <= 0) return;
     const bounds = dvui.Rect.Physical{ .x = 0, .y = 0, .w = size.w, .h = size.h };
 
-    const grid = try mesh(arena, clock, size, stills, shade, border, rings, heart, mirrors);
+    const grid = try mesh(arena, clock, size, canvas, stills, shade, border, rings, heart, mirrors);
 
     try dvui.renderTriangles(.{
         .vertexes = grid.vertexes,
@@ -303,6 +324,24 @@ pub fn mirrorsAt(fraction: f32) f32 {
 
 pub fn ringsAt(fraction: f32) f32 {
     return min_rings + std.math.clamp(fraction, 0, 1) * (max_rings - min_rings);
+}
+
+/// Slider position for a virtual window scale, clamped to the track. The
+/// track is geometric, so equal moves are equal magnifications and the middle
+/// lands on exactly one.
+pub fn virtualFraction(scale: f32) f32 {
+    return std.math.clamp(@log(scale / min_virtual) / @log(max_virtual / min_virtual), 0, 1);
+}
+
+/// Virtual window scale for a slider position.
+pub fn virtualAt(fraction: f32) f32 {
+    return min_virtual * std.math.pow(f32, max_virtual / min_virtual, std.math.clamp(fraction, 0, 1));
+}
+
+/// The virtual window: the real window at the moment DMT was switched on,
+/// scaled by the slider.
+pub fn virtualSize(base: dvui.Size.Physical, scale: f32) dvui.Size.Physical {
+    return .{ .w = base.w * scale, .h = base.h * scale };
 }
 
 /// Shared effect-speed range, driven by the slider under the mode chips.
@@ -349,7 +388,7 @@ const chips = [_]dvui.Rect.Physical{
 test "the chips do not move" {
     const middle = dvui.Point.Physical{ .x = 1062, .y = 26 };
     for (0..40) |step| {
-        const shown = fold(middle, .{ .rush = @as(f64, @floatFromInt(step)) * 0.6 }, framesize, &chips, 0, rings_default, 0, 4);
+        const shown = fold(middle, .{ .rush = @as(f64, @floatFromInt(step)) * 0.6 }, framesize, framesize, &chips, 0, rings_default, 0, 4);
         try std.testing.expectEqual(@as(f32, 1062), shown.x);
         try std.testing.expectEqual(@as(f32, 26), shown.y);
     }
@@ -363,7 +402,7 @@ test "everything outside the stills is transformed" {
             .x = @as(f32, @floatFromInt(step)) * 59,
             .y = 4,
         };
-        const shown = fold(p, .{ .rush = 2.5 }, framesize, &chips, 0, rings_default, 0, 4);
+        const shown = fold(p, .{ .rush = 2.5 }, framesize, framesize, &chips, 0, rings_default, 0, 4);
         if (@abs(shown.x - p.x) + @abs(shown.y - p.y) > 5) moved += 1;
     }
     try std.testing.expect(moved > 10);
@@ -377,7 +416,7 @@ test "the fold always samples inside the frame" {
                 .x = @as(f32, @floatFromInt(column)) * 29.5,
                 .y = @as(f32, @floatFromInt(row)) * 18.0,
             };
-            const shown = fold(p, .{ .rush = time }, framesize, &chips, 0, rings_default, 0, 4);
+            const shown = fold(p, .{ .rush = time }, framesize, framesize, &chips, 0, rings_default, 0, 4);
             try std.testing.expect(shown.x >= 0 and shown.x <= framesize.w);
             try std.testing.expect(shown.y >= 0 and shown.y <= framesize.h);
         }
@@ -395,7 +434,7 @@ test "the frame is folded, not copied" {
                 .x = 60 + @as(f32, @floatFromInt(column)) * 55,
                 .y = 60 + @as(f32, @floatFromInt(row)) * 32,
             };
-            const shown = fold(p, .{ .rush = time }, framesize, &chips, 0, rings_default, 0, 4);
+            const shown = fold(p, .{ .rush = time }, framesize, framesize, &chips, 0, rings_default, 0, 4);
             if (@abs(shown.x - p.x) + @abs(shown.y - p.y) > 20) folded += 1;
         }
     }
@@ -404,8 +443,8 @@ test "the frame is folded, not copied" {
 
 test "the mirror axes turn with the clock" {
     const p = dvui.Point.Physical{ .x = 700, .y = 300 };
-    const before = fold(p, .{ .rush = 0 }, framesize, &chips, 0, rings_default, 0, 4);
-    const after = fold(p, .{ .rush = 1 }, framesize, &chips, 0, rings_default, 0, 4);
+    const before = fold(p, .{ .rush = 0 }, framesize, framesize, &chips, 0, rings_default, 0, 4);
+    const after = fold(p, .{ .rush = 1 }, framesize, framesize, &chips, 0, rings_default, 0, 4);
     try std.testing.expect(@abs(before.x - after.x) + @abs(before.y - after.y) > 0.5);
 }
 
@@ -461,14 +500,87 @@ test "the effect clock follows the tempo" {
     try std.testing.expect(tempoStep(1.0, 90) < 0.8);
 }
 
-test "the grid fits one index buffer at any window size" {
+test "the window slider round-trips and clamps" {
+    var scale = min_virtual;
+    while (scale < max_virtual) : (scale *= 1.25) {
+        try std.testing.expectApproxEqAbs(scale, virtualAt(virtualFraction(scale)), 0.001);
+    }
+    try std.testing.expectApproxEqAbs(min_virtual, virtualAt(0), 1e-6);
+    try std.testing.expectApproxEqAbs(max_virtual, virtualAt(1), 1e-6);
+    try std.testing.expectEqual(@as(f32, 0), virtualFraction(0));
+    try std.testing.expectEqual(@as(f32, 1), virtualFraction(99));
+}
+
+test "the middle of the slider is the window DMT started in" {
+    const base = dvui.Size.Physical{ .w = 1920, .h = 1080 };
+    try std.testing.expectApproxEqAbs(@as(f32, 1), virtualAt(0.5), 1e-6);
+    try std.testing.expectEqual(base, virtualSize(base, virtualAt(0.5)));
+
+    // Half the track either side magnifies by the same factor.
+    try std.testing.expectApproxEqAbs(virtualAt(0.75), 1 / virtualAt(0.25), 1e-6);
+}
+
+test "the tunnel keeps its size when the real window resizes" {
+    const clock = Clock{ .rush = 3.5, .turn = 1 };
+    const narrow = dvui.Size.Physical{ .w = 1180, .h = 720 };
+    const wide = dvui.Size.Physical{ .w = 1920, .h = 1080 };
+    const canvas = virtualSize(narrow, 1);
+
+    // The same offset from the centre lands on the same texel offset in both
+    // windows: the real window reveals more rings, it does not rescale them.
+    for (0..10) |step| {
+        const offset = 40 + @as(f32, @floatFromInt(step)) * 90;
+        const a = fold(.{ .x = narrow.w / 2 + offset, .y = narrow.h / 2 - offset * 0.4 }, clock, narrow, canvas, &.{}, 0, rings_default, 0, 4);
+        const b = fold(.{ .x = wide.w / 2 + offset, .y = wide.h / 2 - offset * 0.4 }, clock, wide, canvas, &.{}, 0, rings_default, 0, 4);
+        try std.testing.expectApproxEqAbs(a.x - narrow.w / 2, b.x - wide.w / 2, 0.001);
+        try std.testing.expectApproxEqAbs(a.y - narrow.h / 2, b.y - wide.h / 2, 0.001);
+    }
+}
+
+test "the window slider changes where the tunnel samples" {
+    const clock = Clock{ .rush = 2 };
+    const p = dvui.Point.Physical{ .x = 900, .y = 500 };
+
+    const tight = fold(p, clock, framesize, virtualSize(framesize, min_virtual), &.{}, 0, rings_default, 0, 4);
+    const wide = fold(p, clock, framesize, virtualSize(framesize, max_virtual), &.{}, 0, rings_default, 0, 4);
+    try std.testing.expect(@abs(tight.x - wide.x) + @abs(tight.y - wide.y) > 5);
+}
+
+test "the fold stays inside the frame at any window and canvas" {
+    const clock = Clock{ .rush = 7.3, .turn = 2 };
+    for ([_]dvui.Size.Physical{
+        .{ .w = 1920, .h = 1080 },
+        .{ .w = 3840, .h = 2160 },
+        .{ .w = 800, .h = 1400 },
+    }) |size| {
+        for ([_]f32{ min_virtual, 1, max_virtual }) |scale| {
+            for (0..12) |row| {
+                for (0..12) |column| {
+                    const p = dvui.Point.Physical{
+                        .x = @as(f32, @floatFromInt(column)) * size.w / 11,
+                        .y = @as(f32, @floatFromInt(row)) * size.h / 11,
+                    };
+                    const shown = fold(p, clock, size, virtualSize(size, scale), &.{}, 0, rings_default, 0, 4);
+                    try std.testing.expect(shown.x >= 0 and shown.x <= size.w);
+                    try std.testing.expect(shown.y >= 0 and shown.y <= size.h);
+                }
+            }
+        }
+    }
+}
+
+test "the grid stays inside the vertex budget at any window size" {
     for ([_]dvui.Size.Physical{
         framesize,
         .{ .w = 3840, .h = 2160 },
         .{ .w = 7680, .h = 4320 },
     }) |size| {
         const shape = gridShape(size);
-        try std.testing.expect((shape.columns + 1) * (shape.rows + 1) <= 65535);
+        const across = @as(f32, @floatFromInt(shape.columns + 1));
+        const down = @as(f32, @floatFromInt(shape.rows + 1));
+        // The stride bounds columns x rows to the budget; rounding each side
+        // up costs at most one row and one column apiece.
+        try std.testing.expect(across * down <= vertex_budget + 2 * (across + down));
     }
 }
 
@@ -494,8 +606,8 @@ test "no facets leave the frame unfolded" {
 
     // Facets fold everything into one quadrant of the copy, so a point left of
     // the centre samples the right of it. Zero facets keeps the direction.
-    const folded = fold(left, clock, size, &.{}, 0, rings_default, 0, 4);
-    const plain = fold(left, clock, size, &.{}, 0, rings_default, 0, 0);
+    const folded = fold(left, clock, size, size, &.{}, 0, rings_default, 0, 4);
+    const plain = fold(left, clock, size, size, &.{}, 0, rings_default, 0, 0);
     try std.testing.expect(folded.x >= 200);
     try std.testing.expect(plain.x < 200);
 }
@@ -534,12 +646,12 @@ test "the pinned look holds the window border still" {
     const clock = Clock{ .rush = 40, .turn = 7 };
 
     const edge = dvui.Point.Physical{ .x = 0, .y = 360 };
-    const shown = fold(edge, clock, framesize, &chips, border_px, rings_default, 0, 4);
+    const shown = fold(edge, clock, framesize, framesize, &chips, border_px, rings_default, 0, 4);
     try std.testing.expectEqual(edge.x, shown.x);
     try std.testing.expectEqual(edge.y, shown.y);
 
     // Past the border the fold runs again.
     const inside = dvui.Point.Physical{ .x = 200, .y = 360 };
-    const moved = fold(inside, clock, framesize, &chips, border_px, rings_default, 0, 4);
+    const moved = fold(inside, clock, framesize, framesize, &chips, border_px, rings_default, 0, 4);
     try std.testing.expect(@abs(moved.x - inside.x) + @abs(moved.y - inside.y) > 1);
 }
