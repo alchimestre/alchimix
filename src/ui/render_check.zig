@@ -35,16 +35,11 @@ const columns = 8;
 const rows = 5;
 
 pub fn main(init: std.process.Init) !void {
-    // The two backends take different init fields, so only the shared ones are
-    // set here and the rest are added when the field exists.
-    var options: SDLBackend.InitOptions = .{
-        .io = init.io,
-        .size = window_size,
-        .vsync = false,
-        .title = "alchimix render check",
-    };
-    if (@hasField(SDLBackend.InitOptions, "allocator")) options.allocator = init.gpa;
-    if (@hasField(SDLBackend.InitOptions, "environ_map")) options.environ_map = init.environ_map;
+    // The two backends take different init fields for the same job.
+    const options: SDLBackend.InitOptions = if (@hasField(SDLBackend.InitOptions, "allocator"))
+        .{ .io = init.io, .allocator = init.gpa, .size = window_size, .vsync = false, .title = "alchimix render check" }
+    else
+        .{ .io = init.io, .environ_map = init.environ_map, .size = window_size, .vsync = false, .title = "alchimix render check" };
 
     var backend = try SDLBackend.initWindow(options);
     defer backend.deinit();
