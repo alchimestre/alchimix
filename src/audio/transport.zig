@@ -60,6 +60,9 @@ const Slot = struct {
     /// Unrounded pose, so sub-beat drags are not lost to snapping.
     beat_raw: f32 = 0,
     playing: bool = false,
+    /// Stopped by the global pause on the exact beat it had reached, so a
+    /// resume drops it back in there.
+    held: bool = false,
     /// Waiting for the first lane's audio to start the clock: with no bar to
     /// join, starting now would land this lane off the other lanes' grid.
     awaiting_clock: bool = false,
@@ -109,6 +112,8 @@ pub const Transport = struct {
     /// How the release rejoins: the waveform resumes at once, the navigator
     /// waits for the next master bar so the lane stays on the grid.
     jog_join: Join = .now,
+    /// True between a global pause and its resume.
+    paused: bool = false,
     /// True while the mixer holds a batch, so an identical one is not resent.
     mixed: bool = false,
     mix_key: u64 = 0,
@@ -343,6 +348,7 @@ pub const Transport = struct {
     pub fn stop(self: *Transport, index: usize) void {
         const slot = self.slotAt(index) orelse return;
         if (self.jog == index) self.jog = null;
+        slot.held = false;
         if (!slot.playing) return;
         self.finishAt(slot, self.nowNs());
         self.pushMix();
@@ -352,11 +358,48 @@ pub const Transport = struct {
     pub fn stopAll(self: *Transport) void {
         const now = self.nowNs();
         self.jog = null;
+        self.paused = false;
         for (self.slots.items) |*slot| {
+            slot.held = false;
             if (slot.playing) self.finishAt(slot, now);
         }
         self.pushMix();
         self.stopClock();
+    }
+
+    /// Stops every playing lane on the exact beat it reached, without snapping
+    /// to a bar, and freezes the master clock with them.
+    pub fn pauseAll(self: *Transport) void {
+        if (self.paused) return;
+        self.paused = true;
+        const now = self.nowNs();
+        for (self.slots.items) |*slot| {
+            if (!slot.playing) continue;
+            self.foldAt(slot, now);
+            slot.playing = false;
+            slot.held = true;
+            slot.awaiting_clock = false;
+        }
+        self.pushMix();
+        self.stopClock();
+    }
+
+    /// Restarts the lanes the pause stopped, each on the beat it held.
+    pub fn resumeAll(self: *Transport) void {
+        if (!self.paused) return;
+        self.paused = false;
+        var any = false;
+        for (self.slots.items) |*slot| {
+            if (!slot.held) continue;
+            slot.held = false;
+            if (slot.analysis == null) continue;
+            slot.playing = true;
+            slot.start_latched = false;
+            slot.rejoin = false;
+            slot.start_at_ns = 0;
+            any = true;
+        }
+        if (any) self.pushMix();
     }
 
     pub fn seek(self: *Transport, index: usize, target: f32) void {
@@ -364,6 +407,7 @@ pub const Transport = struct {
         const was_playing = slot.playing;
         if (was_playing) self.foldAt(slot, self.nowNs());
         slot.playing = false;
+        slot.held = false;
         slot.start_latched = false;
         slot.beat_raw = target;
         self.snapToBar(slot);
@@ -622,6 +666,7 @@ pub const Transport = struct {
             .now => 0,
         };
         slot.playing = true;
+        slot.held = false;
         slot.start_latched = false;
         slot.rejoin = join == .next_bar;
         slot.start_at_ns = start_at;
@@ -1051,6 +1096,48 @@ test "mute reaches the mixer lane and the beat keeps advancing" {
     t.setMute(0, false);
     const unmuted = fake.playingLane(1) orelse return error.NoLane;
     try testing.expect(!unmuted.muted);
+}
+
+test "a global pause holds every lane on the beat it reached" {
+    var fake = FakeOutput{};
+    var clock = TestClock{};
+    var t = setup(&fake, &clock);
+    defer t.deinit();
+
+    t.beginSync();
+    t.resolve(0, laneInfo(1));
+    t.resolve(1, laneInfo(2));
+    t.endSync();
+    t.startAll();
+
+    fake.markStarted(1, 0);
+    fake.markStarted(2, 0);
+    clock.now = 1_000_000_000;
+    t.sync();
+    try expectApprox(2, t.beat(0));
+    try expectApprox(2, t.beat(1));
+
+    t.pauseAll();
+    try testing.expect(!t.anyPlaying());
+    try testing.expectEqual(@as(usize, 1), fake.stops);
+    try expectApprox(2, t.beat(0));
+
+    clock.now = 5_000_000_000;
+    t.sync();
+    try expectApprox(2, t.beat(0));
+    try expectApprox(2, t.beat(1));
+
+    t.resumeAll();
+    try testing.expect(t.anyPlaying());
+    const resumed = fake.playingLane(1) orelse return error.NoLane;
+    try expectApprox(1.0, @floatCast(resumed.start_s));
+
+    fake.markStarted(1, 5_000_000_000);
+    fake.markStarted(2, 5_000_000_000);
+    t.sync();
+    clock.now = 5_500_000_000;
+    t.sync();
+    try expectApprox(3, t.beat(0));
 }
 
 test "late join waits for the next bar and starts pending" {

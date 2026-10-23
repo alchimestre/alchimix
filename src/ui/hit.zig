@@ -101,6 +101,8 @@ pub const Target = union(enum) {
     /// with colour aberrations.
     dmt,
     heartbeat,
+    /// Stops every lane on the beat it reached and holds the effect clock.
+    pause,
     /// Freezes the master tempo to the seed's BPM, or frees it.
     master_lock,
     /// Keeps the pitch while the master tempo changes.
@@ -296,7 +298,10 @@ pub const Drag = struct {
         toggle_mushroom,
         toggle_dmt,
         heartbeat,
+        toggle_pause,
         select_playlist: usize,
+        /// A shift press on a playlist row: rename it in place.
+        rename_playlist: usize,
         toggle_playlist: usize,
         save_playlist,
         toggle_master_lock,
@@ -320,7 +325,7 @@ pub const Drag = struct {
     };
 
     /// `shift` adds the block to the selection instead of making it the seed,
-    /// and never starts a drag.
+    /// renames a playlist row instead of loading it, and never starts a drag.
     pub fn press(self: *Drag, target: Target, p: Point, shift: bool) Action {
         self.* = .{ .press_at = p };
         return switch (target) {
@@ -335,7 +340,8 @@ pub const Drag = struct {
             .mushroom => .toggle_mushroom,
             .dmt => .toggle_dmt,
             .heartbeat => .heartbeat,
-            .playlist => |index| .{ .select_playlist = index },
+            .pause => .toggle_pause,
+            .playlist => |index| if (shift) .{ .rename_playlist = index } else .{ .select_playlist = index },
             .playlist_toggle => |index| .{ .toggle_playlist = index },
             .save_playlist => .save_playlist,
             .master_lock => .toggle_master_lock,
@@ -396,7 +402,7 @@ pub const Drag = struct {
     pub fn motion(self: *Drag, p: Point, threshold: f32, canvas: Rect, rows: []const Rect) bool {
         const pressed = self.pressed orelse return false;
         switch (pressed) {
-            .lane, .nav, .eq_node, .eq_plot, .eq_preset, .trim, .clear, .playlist, .playlist_toggle, .save_playlist, .sort_bpm, .lsd, .mushroom, .dmt, .heartbeat => return false,
+            .lane, .nav, .eq_node, .eq_plot, .eq_preset, .trim, .clear, .playlist, .playlist_toggle, .save_playlist, .sort_bpm, .lsd, .mushroom, .dmt, .heartbeat, .pause => return false,
             else => {},
         }
         if (self.carrying == null) {
@@ -417,7 +423,7 @@ pub const Drag = struct {
         return switch (target) {
             .block => |from| .{ .move_block = .{ .from = from, .gap = to } },
             .row => |track| .{ .drop_track = .{ .gap = to, .track = track } },
-            .toggle, .notation, .lane, .nav, .eq_node, .eq_plot, .eq_preset, .trim, .transport, .autoplay, .clear, .playlist, .playlist_toggle, .save_playlist, .sort_bpm, .lsd, .mushroom, .dmt, .heartbeat, .master_lock, .pitch_lock, .lane_play, .lane_mute, .width, .grow_plant => .none,
+            .toggle, .notation, .lane, .nav, .eq_node, .eq_plot, .eq_preset, .trim, .transport, .autoplay, .clear, .playlist, .playlist_toggle, .save_playlist, .sort_bpm, .lsd, .mushroom, .dmt, .heartbeat, .pause, .master_lock, .pitch_lock, .lane_play, .lane_mute, .width, .grow_plant => .none,
         };
     }
 
@@ -717,6 +723,23 @@ test "a press on the mute button toggles that lane and carries nothing" {
     const action = drag.press(.{ .lane_mute = 2 }, .{ .x = 10, .y = 10 }, false);
     switch (action) {
         .toggle_lane_mute => |index| try std.testing.expectEqual(@as(usize, 2), index),
+        else => return error.WrongAction,
+    }
+    var rows_buffer: [8]Rect = undefined;
+    const rows = blockRows(&map, &rows_buffer);
+    try std.testing.expect(!drag.motion(.{ .x = 90, .y = 60 }, 6, viewport, rows));
+    try std.testing.expect(isNone(drag.release()));
+}
+
+test "a press on the pause chip toggles it and carries nothing" {
+    var map = HitMap.init(std.testing.allocator);
+    defer map.deinit();
+    map.append(.{ .x = 0, .y = 0, .w = 60, .h = 24 }, .pause);
+
+    var drag = Drag{};
+    const target = map.hit(.{ .x = 10, .y = 10 }) orelse return error.WrongTarget;
+    switch (drag.press(target, .{ .x = 10, .y = 10 }, false)) {
+        .toggle_pause => {},
         else => return error.WrongAction,
     }
     var rows_buffer: [8]Rect = undefined;
