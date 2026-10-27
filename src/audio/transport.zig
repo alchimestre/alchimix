@@ -71,6 +71,9 @@ const Slot = struct {
     start_latched: bool = false,
     /// Master beat when the lane's audio actually began.
     started_master: f32 = 0,
+    /// The mixer's own report of when the current stream began, so a staged
+    /// pass taking over is visible as a new instant.
+    started_at_ns: ?i128 = null,
     /// Audio-clock time the lane may become audible; zero means as soon as the
     /// decoder is ready. Absolute so a repeated mix cannot push it later.
     start_at_ns: i128 = 0,
@@ -268,8 +271,15 @@ pub const Transport = struct {
                     }
                 },
                 .started => |started| {
-                    if (!slot.start_latched) {
+                    // A staged pass begins at the loop start, not where the old
+                    // one had reached: fold the beat when it takes over.
+                    if (slot.start_latched and slot.loop_armed and slot.started_at_ns != null and started != slot.started_at_ns.?) {
+                        slot.beat = slot.loop_begin;
+                        slot.beat_raw = slot.loop_begin;
+                        slot.started_master = self.masterBeatAt(started);
                         slot.loop_armed = false;
+                    }
+                    if (!slot.start_latched) {
                         if (!self.running) {
                             self.running = true;
                             self.clock_base_ns = started;
@@ -278,6 +288,7 @@ pub const Transport = struct {
                         slot.start_latched = true;
                         slot.started_master = self.masterBeatAt(started);
                     }
+                    slot.started_at_ns = started;
                 },
             }
             if (slot.start_latched and slot.loop_end > slot.loop_begin) {
@@ -771,6 +782,15 @@ pub const Transport = struct {
         const pose = self.beatAt(slot, now);
         const length = slot.loop_end - slot.loop_begin;
         const remaining = slot.loop_end - pose;
+
+        // The wrap is staged: the mixer decodes the next pass beside the one
+        // still sounding and hands over at the instant, so the playhead keeps
+        // advancing to the loop end while that happens.
+        if (slot.loop_armed) {
+            if (now < slot.start_at_ns + start_grace_ns) return false;
+            slot.loop_armed = false;
+        }
+
         if (remaining <= 0) {
             const wrapped = slot.loop_begin + @mod(pose - slot.loop_begin, length);
             slot.beat = wrapped;
@@ -787,10 +807,7 @@ pub const Transport = struct {
 
         // The instant the beat reaches the loop end, in this lane's own beats.
         const wrap_at = now + @as(i128, @intFromFloat(@as(f64, remaining) * 60 / self.bpm * 1_000_000_000));
-        slot.beat = slot.loop_begin;
-        slot.beat_raw = slot.loop_begin;
         slot.start_at_ns = wrap_at;
-        slot.start_latched = false;
         slot.rejoin = true;
         slot.restart = true;
         slot.loop_armed = true;
@@ -2104,10 +2121,22 @@ test "a loop wraps on its bar with the decoder pre-rolled" {
     const armed = fake.playingLane(1) orelse return error.NoLane;
     try testing.expect(armed.restart);
     try testing.expect(armed.start_at_ns > clock.now);
-    try expectApprox(4, t.beat(0));
+    // The old pass keeps sounding until the loop end, so the playhead keeps
+    // moving towards it rather than jumping back early.
+    try expectApprox(7.8, t.beat(0));
     // Beat 7.8 of 8 leaves a fifth of a beat, a tenth of a second at 120.
     const wait: f64 = @as(f64, @floatFromInt(armed.start_at_ns - clock.now)) * 1e-9;
     try testing.expect(@abs(wait - 0.1) < 0.02);
+
+    // The mixer hands the staged pass over at that instant: the beat folds to
+    // the loop start and the next pass runs from there.
+    fake.markStarted(1, armed.start_at_ns);
+    clock.now = armed.start_at_ns;
+    t.sync();
+    try expectApprox(4, t.beat(0));
+    clock.now = armed.start_at_ns + 1_000_000_000;
+    t.sync();
+    try expectApprox(6, t.beat(0));
 }
 
 test "a loop that is missed folds back instead of running on" {

@@ -339,6 +339,10 @@ pub const Mixer = struct {
     mutex: std.Io.Mutex = .init,
     device: device_mod.Device = .{},
     slots: [max_lanes]Slot = undefined,
+    /// The next pass of a lane whose start is still ahead: it decodes under the
+    /// old pass and takes the slot over at its start time, so a loop or a
+    /// rejoin has no hole while its decoder fills.
+    incoming: [max_lanes]Slot = undefined,
     thread: ?std.Thread = null,
     /// Set by shutdown: no pump may start again after the device is closed.
     closed: bool = false,
@@ -358,6 +362,10 @@ pub const Mixer = struct {
         };
         for (&self.slots) |*slot| slot.* = .{};
         for (&self.slots) |*slot| {
+            slot.ring = allocator.alloc(f32, ring_frames * channels) catch break;
+        }
+        for (&self.incoming) |*slot| slot.* = .{};
+        for (&self.incoming) |*slot| {
             slot.ring = allocator.alloc(f32, ring_frames * channels) catch break;
         }
         return self;
@@ -380,6 +388,9 @@ pub const Mixer = struct {
         for (&self.slots) |*slot| {
             if (slot.ring.len > 0) self.allocator.free(slot.ring);
         }
+        for (&self.incoming) |*slot| {
+            if (slot.ring.len > 0) self.allocator.free(slot.ring);
+        }
         if (self.out.len > 0) self.allocator.free(self.out);
         self.* = undefined;
     }
@@ -400,26 +411,26 @@ pub const Mixer = struct {
         var reused = false;
         var restarted_count: usize = 0;
         for (lanes) |lane| {
-            var target: ?*Slot = null;
+            var target_index: ?usize = null;
             for (&self.slots, 0..) |*slot, index| {
                 if (!used[index] and slot.active and slot.uid == lane.uid) {
                     used[index] = true;
-                    target = slot;
+                    target_index = index;
                     reused = true;
                     break;
                 }
             }
-            if (target == null) {
+            if (target_index == null) {
                 for (&self.slots, 0..) |*slot, index| {
                     if (!used[index] and !slot.active) {
                         used[index] = true;
-                        target = slot;
+                        target_index = index;
                         break;
                     }
                 }
             }
-            if (target) |slot| {
-                if (self.apply(slot, lane)) restarted_count += 1;
+            if (target_index) |index| {
+                if (self.applyAt(index, lane) == .in_place) restarted_count += 1;
             }
         }
 
@@ -455,6 +466,12 @@ pub const Mixer = struct {
                 finished[finished_count] = slot;
                 finished_count += 1;
             }
+        }
+        for (&self.incoming) |*slot| {
+            if (!slot.active) continue;
+            self.beginRelease(slot);
+            finished[finished_count] = slot;
+            finished_count += 1;
         }
         self.mutex.unlock(self.io);
 
@@ -516,27 +533,60 @@ pub const Mixer = struct {
         self.thread = std.Thread.spawn(.{}, pumpMain, .{self}) catch null;
     }
 
-    /// Returns true when the decoder was restarted, which needs the joint
-    /// start gate: otherwise the restarted lanes begin at different times.
-    fn apply(self: *Mixer, slot: *Slot, lane: Lane) bool {
+    const Applied = enum {
+        /// Nothing changed: the lane keeps decoding.
+        none,
+        /// The decoder was restarted now, which needs the joint start gate.
+        in_place,
+        /// The next pass decodes beside the current one until its start time.
+        staged,
+    };
+
+    /// A start scheduled ahead of the clock is staged rather than applied: the
+    /// old pass keeps sounding while the new decoder fills, and the slot is
+    /// handed over at the start time. A restart with no time ahead of it can
+    /// only be done in place.
+    fn applyAt(self: *Mixer, index: usize, lane: Lane) Applied {
+        const slot = &self.slots[index];
         const same_track = slot.active and slot.uid == lane.uid;
         const same_start = @abs(slot.start_s - lane.start_s) < 0.001;
         const same_tempo = @abs(slot.tempo - lane.tempo) < 0.0005 and slot.keylock == lane.keylock;
 
-        var restarted = false;
-        if (lane.restart or !same_track or !same_start or !same_tempo) {
-            self.beginRelease(slot);
-            self.endRelease(slot);
-            self.start(slot, lane);
-            restarted = true;
+        if (!(lane.restart or !same_track or !same_start or !same_tempo)) {
+            slot.eq = lane.eq;
+            slot.eq_dirty = true;
+            slot.muted = lane.muted;
+            slot.trim_db = lane.trim_db;
+            return .none;
         }
 
-        slot.eq = lane.eq;
-        slot.eq_dirty = true;
-        slot.muted = lane.muted;
-        slot.trim_db = lane.trim_db;
-        slot.start_at_ns = lane.start_at_ns;
-        return restarted;
+        if (slot.active and lane.start_at_ns > self.nowNs()) {
+            const incoming = &self.incoming[index];
+            self.beginRelease(incoming);
+            self.endRelease(incoming);
+            self.start(incoming, lane);
+            return .staged;
+        }
+
+        self.beginRelease(slot);
+        self.endRelease(slot);
+        self.start(slot, lane);
+        return .in_place;
+    }
+
+    /// Hands a staged pass over the moment its start time is inside this block,
+    /// so its first sample lands where the transport said it would. The rings
+    /// are swapped with the slots: each keeps its own buffer.
+    fn promoteStaged(self: *Mixer, now: i128, block_ns: i128) void {
+        for (&self.slots, &self.incoming) |*slot, *incoming| {
+            if (!incoming.active) continue;
+            if (incoming.start_at_ns > now + block_ns) continue;
+            const ring = slot.ring;
+            self.beginRelease(slot);
+            self.endRelease(slot);
+            slot.* = incoming.*;
+            incoming.* = .{ .ring = ring };
+        }
     }
 
     fn start(self: *Mixer, slot: *Slot, lane: Lane) void {
@@ -707,6 +757,11 @@ fn freeFrames(slot: *const Slot) usize {
     fn mixFrames(self: *Mixer, frames: usize, now: i128) void {
         @memset(self.out[0 .. frames * channels], 0);
 
+        const block_ns: i128 = @intFromFloat(@as(f64, @floatFromInt(frames)) * 1_000_000_000 / sample_rate);
+        // A staged pass takes over exactly at its start time, so the seam is a
+        // sample boundary rather than the next pump tick.
+        self.promoteStaged(now, block_ns);
+
         if (self.gate) {
             var waiting = false;
             for (&self.slots) |*slot| {
@@ -717,7 +772,6 @@ fn freeFrames(slot: *const Slot) usize {
             self.gate = false;
         }
 
-        const block_ns: i128 = @intFromFloat(@as(f64, @floatFromInt(frames)) * 1_000_000_000 / sample_rate);
         for (&self.slots) |*slot| {
             if (!slot.active or slot.start_at_ns > now + block_ns) continue;
 
@@ -861,6 +915,10 @@ fn freeFrames(slot: *const Slot) usize {
                 if (!slot.active) continue;
                 self.drain(slot);
             }
+            for (&self.incoming) |*slot| {
+                if (!slot.active) continue;
+                self.drain(slot);
+            }
             self.mixFrames(frames, now);
             self.mutex.unlock(self.io);
 
@@ -921,6 +979,38 @@ test "a high shelf cuts the top without touching the bass" {
     var bands = bandChain(params);
     try testing.expect(sineGainDb(&bands, 16000) < -8);
     try testing.expect(@abs(sineGainDb(&bands, 200)) < 1);
+}
+
+test "a staged pass takes its slot only at the start time" {
+    var mixer = Mixer.init(testing.allocator, std.testing.io);
+    defer mixer.deinit();
+
+    // The old pass holds a marker the new one does not.
+    mixer.slots[0] = .{ .active = true, .uid = 7, .ring = mixer.slots[0].ring };
+    const old_ring = mixer.slots[0].ring.ptr;
+    const incoming_ring = mixer.incoming[0].ring.ptr;
+    mixer.incoming[0] = .{
+        .active = true,
+        .uid = 7,
+        .start_at_ns = 1_000_000,
+        .ring = mixer.incoming[0].ring,
+    };
+    mixer.incoming[0].ring[0] = 0.5;
+
+    // Before the start time, the slot keeps decoding the old pass.
+    mixer.promoteStaged(100, 1_000);
+    try testing.expectEqual(@as(usize, 0), @intFromBool(!mixer.slots[0].active));
+    try testing.expect(mixer.incoming[0].active);
+    try testing.expectEqual(old_ring, mixer.slots[0].ring.ptr);
+
+    // At the start time, the staged stream becomes the lane's stream, and the
+    // two slots keep their own rings rather than sharing one.
+    mixer.promoteStaged(1_000_000, 1_000);
+    try testing.expect(!mixer.incoming[0].active);
+    try testing.expect(mixer.slots[0].active);
+    try testing.expectEqual(incoming_ring, mixer.slots[0].ring.ptr);
+    try testing.expectEqual(@as(f32, 0.5), mixer.slots[0].ring[0]);
+    try testing.expectEqual(old_ring, mixer.incoming[0].ring.ptr);
 }
 
 test "all bands at unity are flat" {
