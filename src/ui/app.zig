@@ -189,11 +189,6 @@ fn pressed(current: Dmt, choice: Dmt) Dmt {
 
 pub const EffectMode = enum { lsd, mushroom, dmt };
 
-/// The bundled emoji family, loaded at startup.
-pub const emoji_family = "noto emoji";
-/// Loaded from the system at startup; Courier is what the art was drawn for.
-pub const garden_family = "garden";
-
 pub const App = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -226,10 +221,6 @@ pub const App = struct {
     mushroom: mushroom.State = .{},
     /// A text field held the keyboard last frame, so space is a space.
     typing: bool = false,
-    /// The bundled emoji font loaded, so the garden can draw real glyphs.
-    emoji_font: bool = false,
-    /// A terminal mono loaded, so the ASCII art keeps its grid.
-    garden_font: bool = false,
     /// A preview waiting for the next master bar so it lands in sync.
     preview_pending: ?Track = null,
     preview_at_ns: i128 = 0,
@@ -348,8 +339,6 @@ pub const App = struct {
 
     /// Set on press, applied once the frame has finished drawing.
     pending_select: ?usize = null,
-    /// True once a font with arrows is loaded, so the list can show ↑ and ↓.
-    arrow_font: bool = false,
     /// Height of the window's content, so the list can fill what is left.
     viewport_h: f32 = 600,
     scale_hint: f32 = 1,
@@ -739,7 +728,7 @@ pub const App = struct {
 
             self.still_count = 0;
             self.effectChip("LSD", .lsd, .lsd, 7120);
-            self.effectChip(if (self.emoji_font) "🍄" else ".-.", .mushroom, .mushroom, 7122);
+            self.effectChip(".-.", .mushroom, .mushroom, 7122);
             self.effectChip("DMT", .dmt, .dmt, 7125);
             if (self.effect.look == .mushroom) self.growChip();
         }
@@ -984,7 +973,7 @@ pub const App = struct {
         labelStyled(@src(), text, .{
             .gravity_y = 0.5,
             .color_text = .{ .color = if (on) Palette.background else Palette.muted },
-            .font = if (self.emoji_font and which == .mushroom) self.emojiType(metaFont().size) else metaFont(),
+            .font = metaFont(),
             .id_extra = id + 1,
         });
 
@@ -1469,14 +1458,8 @@ pub const App = struct {
     }
 
     fn gardenType(self: *const App) dvui.Font {
-        const body = dvui.themeGet().font_body;
-        return if (self.garden_font) body.withFamily(garden_family) else dvui.themeGet().font_mono;
-    }
-
-    /// The bundled emoji family at a size, or the body font when it did not load.
-    fn emojiType(self: *const App, px: f32) dvui.Font {
-        const body = dvui.themeGet().font_body;
-        return if (self.emoji_font) body.withFamily(emoji_family).withSize(px) else body.withSize(px);
+        _ = self;
+        return dvui.themeGet().font_mono;
     }
 
     fn onPlant(at: dvui.Point.Physical) bool {
@@ -3465,11 +3448,12 @@ fn passesFilter(app: *const App, step: Transition) bool {
 /// The suggestion list mirrors the canvas: colour is the size of the step, the
 /// arrow is its direction.
 fn directionGlyph(app: *const App, step: ?Transition) []const u8 {
+    _ = app;
     const known = step orelse return "";
     if (!known.key_known) return "";
     return switch (known.key.direction) {
-        .up => if (app.arrow_font) "↑" else "+",
-        .down => if (app.arrow_font) "↓" else "-",
+        .up => "↑",
+        .down => "↓",
         .held => "",
     };
 }
