@@ -2434,6 +2434,7 @@ pub const App = struct {
                         .id_extra = 9200 + index,
                     });
                 }
+                self.paintLoopBand(index, wave_rect, view);
                 if (lane.analysis != null) {
                     fillRect(self.allocator, wave_rect.x + wave_rect.w / 2 - 1, wave_rect.y, 2.5, wave_rect.h, Palette.ink);
                 }
@@ -2848,6 +2849,23 @@ pub const App = struct {
             const color = if (has_bands) waveColor(wave_colour.tintBands(smoothed, analysis.bands[from..to])) else bandColor(smoothed);
             self.waveFill(&builder, rect.x + x, rect.bottom() - height, 6, height, color);
         }
+    }
+
+    /// The loop over the lane's visible window, under the playhead, so the
+    /// passage it holds is visible where the music is.
+    fn paintLoopBand(self: *App, index: usize, rect: hit.Rect, start_beat: f32) void {
+        const loop = self.transport.loopOf(index) orelse return;
+        const visible = self.visibleBeats();
+        if (visible <= 0) return;
+        const from = @max(loop.begin, start_beat);
+        const to = @min(loop.end, start_beat + visible);
+        if (to <= from) return;
+        const x = rect.x + (from - start_beat) / visible * rect.w;
+        const w = (to - from) / visible * rect.w;
+        fillRect(self.allocator, x, rect.y, w, rect.h, fade(Palette.green, 34));
+        fillRect(self.allocator, x, rect.y, 1.5, rect.h, Palette.green);
+        if (to < loop.end) return;
+        fillRect(self.allocator, x + w - 1.5, rect.y, 1.5, rect.h, Palette.green);
     }
 
     /// The loop's reach over the whole track, with an edge on each bar it
