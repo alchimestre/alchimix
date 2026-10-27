@@ -263,10 +263,6 @@ pub const App = struct {
     window_goal: f32 = 0,
     window_wait: f32 = 0,
     window_rng: std.Random.DefaultPrng = .init(0x7a11_0eed),
-    /// Gaussian-ish blur on the window, 0 to 1. The bottom of the slider is no
-    /// blur at all.
-    blur: f32 = 0,
-    blur_target: ?dvui.Texture.Target = null,
     /// How far the window may wander from the scale the slider set: the same
     /// role `lane_wander_limit` plays for the ring count, but adjustable.
     window_wander_limit: f32 = 0.45,
@@ -534,32 +530,6 @@ pub const App = struct {
         };
     }
 
-    /// Copies the frame into a smaller target. Reading that copy back over the
-    /// whole window is what softens it: one bilinear step for each pixel of the
-    /// downsample, so the slider's bottom is untouched and the top is a smear.
-    fn blurred(self: *App, arena: std.mem.Allocator, texture: dvui.Texture, size: dvui.Size.Physical, screen: dvui.RenderTarget) !dvui.Texture {
-        const factor = 1 + self.blur * (blur_max - 1);
-        const small = dvui.Size.Physical{
-            .w = @max(1, @round(size.w / factor)),
-            .h = @max(1, @round(size.h / factor)),
-        };
-        const target = try sizedTarget(&self.blur_target, small);
-        _ = dvui.RenderTarget.setAsCurrent(.{ .texture = target, .offset = .{} });
-        // The clip is still the window's, and the target is smaller; drawing
-        // with the larger scissor trips SDL's assertion.
-        dvui.clipSet(.{ .x = 0, .y = 0, .w = small.w, .h = small.h });
-        errdefer _ = dvui.RenderTarget.setAsCurrent(screen);
-        const mesh = try geom.quadMesh(arena, .{ .x = 0, .y = 0, .w = small.w, .h = small.h }, small);
-        try dvui.renderTriangles(.{
-            .vertexes = mesh.vertexes,
-            .indices = mesh.indices,
-            .bounds = .{ .x = 0, .y = 0, .w = small.w, .h = small.h },
-        }, texture);
-        _ = dvui.RenderTarget.setAsCurrent(screen);
-        dvui.clipSet(dvui.currentWindow().rect_pixels);
-        return dvui.textureFromTarget(target);
-    }
-
     fn blit(self: *App, target: dvui.Texture.Target, screen: dvui.RenderTarget) !void {
         const texture = try dvui.textureFromTarget(target);
         const rect = dvui.currentWindow().rect_pixels;
@@ -583,8 +553,6 @@ pub const App = struct {
         } else if (self.effect.look != .none) {
             try self.drawLook(texture, arena, size, stills);
         }
-
-        if (self.blur > 0) source = try self.blurred(arena, source, size, screen);
 
         if (self.effect.dmt != .off) {
             try dmt.draw(source, arena, self.effect_clock, size, self.foldCanvas(), stills, self.foldShade(), 0, self.foldShape());
@@ -663,8 +631,6 @@ pub const App = struct {
         self.colour_target = null;
         if (self.lsd_target) |target| target.destroyLater();
         self.lsd_target = null;
-        if (self.blur_target) |target| target.destroyLater();
-        self.blur_target = null;
         dvui.refresh(null, @src(), null);
     }
 
@@ -805,11 +771,6 @@ pub const App = struct {
 
             if (self.sliderRow("colour", self.lane_colour, 7260)) |fraction| {
                 self.lane_colour = fraction;
-                dvui.refresh(null, @src(), null);
-            }
-
-            if (self.sliderRow("blur", self.blur, 7248)) |fraction| {
-                self.blur = fraction;
                 dvui.refresh(null, @src(), null);
             }
 
@@ -3202,9 +3163,6 @@ const lane_wander_limit: f32 = 1.1;
 const lane_wander_ease: f32 = 3.4;
 
 /// The kick: the loudest of the lowest bands, once past the floor.
-/// Downsample factor the blur slider reaches at full travel.
-const blur_max: f32 = 6;
-
 const kick_bins: usize = 3;
 const kick_floor: f32 = 0.34;
 const kick_fall: f32 = 0.18;

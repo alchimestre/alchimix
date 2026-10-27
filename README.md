@@ -113,10 +113,9 @@ chips scales both effects.
 The fold carries its own sliders: `window` scales the small virtual window the
 tunnel is laid out on, `wander` sets how far that window breathes by itself
 (every five to eleven seconds), `lanes` sets how many rings it repeats, `colour`
-how much of the picture the colour pass carries, `mirror` how many mirrored
-sectors it turns through, and `blur` softens the frame before it is folded — the
-bottom of the slider is no blur at all. A kick swells both the window and the
-ring count with the beat.
+how much of the picture the colour pass carries, and `mirror` how many mirrored
+sectors it turns through. A kick swells both the window and the ring count with
+the beat.
 
 `OG DMT` is the pinned look: full brightness, constant turn, and the window
 border held still so nothing samples past the frame. It runs on tempo alone, so
