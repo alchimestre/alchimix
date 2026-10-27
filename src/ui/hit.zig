@@ -111,12 +111,6 @@ pub const Target = union(enum) {
     master_down,
     /// Keeps the pitch while the master tempo changes.
     pitch_lock,
-    /// Grows the whole interface by one step.
-    scale_up,
-    /// Shrinks the whole interface by one step.
-    scale_down,
-    /// Back to 100 %.
-    scale_reset,
     /// Starts or stops one grid lane.
     lane_play: usize,
     /// Silences one grid lane without stopping it.
@@ -322,9 +316,6 @@ pub const Drag = struct {
         step_master_up,
         step_master_down,
         toggle_pitch,
-        step_scale_up,
-        step_scale_down,
-        reset_scale,
         toggle_lane_play: usize,
         toggle_lane_mute: usize,
         /// A press on the width selector: show this many beats per lane.
@@ -368,9 +359,6 @@ pub const Drag = struct {
             .master_up => .step_master_up,
             .master_down => .step_master_down,
             .pitch_lock => .toggle_pitch,
-            .scale_up => .step_scale_up,
-            .scale_down => .step_scale_down,
-            .scale_reset => .reset_scale,
             .lane_play => |index| .{ .toggle_lane_play = index },
             .lane_mute => |index| .{ .toggle_lane_mute = index },
             .width => |beats| .{ .set_width = beats },
@@ -448,7 +436,7 @@ pub const Drag = struct {
         return switch (target) {
             .block => |from| .{ .move_block = .{ .from = from, .gap = to } },
             .row => |track| .{ .drop_track = .{ .gap = to, .track = track } },
-            .toggle, .notation, .lane, .nav, .eq_node, .eq_plot, .eq_preset, .trim, .transport, .autoplay, .clear, .playlist, .playlist_toggle, .save_playlist, .sort_bpm, .lsd, .mushroom, .dmt, .heartbeat, .pause, .master_lock, .master_up, .master_down, .pitch_lock, .scale_up, .scale_down, .scale_reset, .lane_play, .lane_mute, .width, .grow_plant => .none,
+            .toggle, .notation, .lane, .nav, .eq_node, .eq_plot, .eq_preset, .trim, .transport, .autoplay, .clear, .playlist, .playlist_toggle, .save_playlist, .sort_bpm, .lsd, .mushroom, .dmt, .heartbeat, .pause, .master_lock, .master_up, .master_down, .pitch_lock, .lane_play, .lane_mute, .width, .grow_plant => .none,
         };
     }
 
