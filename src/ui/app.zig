@@ -1569,6 +1569,8 @@ pub const App = struct {
                 self.beats_visible = beats;
                 dvui.refresh(null, @src(), null);
             },
+            .step_master_up => self.stepMaster(1),
+            .step_master_down => self.stepMaster(-1),
             .toggle_master_lock => {
                 self.master_locked = !self.master_locked;
                 if (!self.master_locked) self.master_bpm = self.masterBpm();
@@ -1823,9 +1825,44 @@ pub const App = struct {
         self.selected.append(self.allocator, index) catch {};
     }
 
+    /// One BPM on the master, taken from what the field shows. Stepping frees
+    /// the tempo, as typing a value does.
+    fn stepMaster(self: *App, delta: f32) void {
+        const stepped = steppedBpm(self.masterBpm(), delta);
+        self.master_bpm = stepped;
+        self.master_locked = false;
+        self.master_text.clearRetainingCapacity();
+        var buffer: [8]u8 = undefined;
+        const text = std.fmt.bufPrint(&buffer, "{d:.0}", .{stepped}) catch "";
+        self.master_text.appendSlice(self.allocator, text) catch {};
+        self.transport.setTempo(self.masterBpm());
+        dvui.refresh(null, @src(), null);
+    }
+
+    /// One of the two one-BPM chips beside the master field.
+    fn masterStepButton(self: *App, slot: usize, label: []const u8, target: hit.Target) void {
+        var chip = dvui.box(@src(), .{ .dir = .horizontal }, .{
+            .min_size_content = .{ .w = 14, .h = 12 },
+            .padding = .{ .x = 2, .y = 0 },
+            .background = true,
+            .color_fill = .{ .color = Palette.field },
+            .color_fill_hover = .{ .color = Palette.hover },
+            .id_extra = 76 + slot,
+        });
+        defer chip.deinit();
+        labelStyled(@src(), label, .{
+            .gravity_x = 0.5,
+            .gravity_y = 0.5,
+            .color_text = .{ .color = Palette.muted },
+            .font = metaFont(),
+            .id_extra = 78 + slot,
+        });
+        self.hit_map.append(rectFrom(chip.data().contentRectScale().r), target);
+    }
+
     fn commitMaster(self: *App) void {
         const parsed = std.fmt.parseFloat(f32, self.master_text.items) catch null;
-        if (parsed) |value| self.master_bpm = std.math.clamp(value, 40, 220);
+        if (parsed) |value| self.master_bpm = std.math.clamp(value, min_master_bpm, max_master_bpm);
         self.master_locked = false;
         self.transport.setTempo(self.masterBpm());
     }
@@ -1875,6 +1912,19 @@ pub const App = struct {
         self.master_focus = focused;
 
         if (enter or left_box) self.commitMaster();
+
+        {
+            // Two half-height chips make a pair as tall as the field.
+            var stepper = dvui.box(@src(), .{ .dir = .vertical }, .{
+                .gravity_y = 0.5,
+                .margin = .{ .x = 1, .y = 0 },
+                .padding = .{},
+                .id_extra = 71,
+            });
+            defer stepper.deinit();
+            self.masterStepButton(0, "+", .master_up);
+            self.masterStepButton(1, "\u{2212}", .master_down);
+        }
 
         {
             var chip = dvui.box(@src(), .{ .dir = .horizontal }, .{
@@ -2992,6 +3042,16 @@ fn drawTriangle(allocator: std.mem.Allocator, x: f32, y: f32, size: f32, points_
     dvui.Path.fillConvex(builder.build(), .{ .color = .{ .color = color } });
 }
 
+/// The master tempo one step further, whole and inside the range typing
+/// accepts, so a stepped value reads the same as a typed one.
+fn steppedBpm(value: f32, delta: f32) f32 {
+    return @round(std.math.clamp(value + delta, min_master_bpm, max_master_bpm));
+}
+
+/// Bounds a typed or stepped master tempo is held to.
+const min_master_bpm: f32 = 40;
+const max_master_bpm: f32 = 220;
+
 /// The same rect with every edge on a whole pixel. An edge between two pixels
 /// leaves one half-covered column, which reads as a stair step at 1x.
 pub fn snappedRect(x: f32, y: f32, w: f32, h: f32) dvui.Rect.Physical {
@@ -3659,4 +3719,13 @@ test "a rect at a fractional edge snaps to whole pixels" {
     const hairline = snappedRect(5, 5, 0.1, 0.1);
     try std.testing.expectEqual(@as(f32, 1), hairline.w);
     try std.testing.expectEqual(@as(f32, 1), hairline.h);
+}
+
+test "a step moves the master one whole BPM and stops at the ends" {
+    try std.testing.expectEqual(@as(f32, 129), steppedBpm(128, 1));
+    try std.testing.expectEqual(@as(f32, 127), steppedBpm(128, -1));
+    try std.testing.expectEqual(@as(f32, max_master_bpm), steppedBpm(max_master_bpm, 1));
+    try std.testing.expectEqual(@as(f32, min_master_bpm), steppedBpm(min_master_bpm, -1));
+    // A stepped tempo reads the same as a typed one: whole numbers only.
+    try std.testing.expectEqual(@as(f32, 129), steppedBpm(128.37, 1));
 }
