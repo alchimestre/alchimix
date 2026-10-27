@@ -2773,12 +2773,17 @@ fn blockColor(app: *const App, index: usize, is_seed: bool) dvui.Color {
 /// nothing, the drop does.
 fn pickRow(app: *App, row_index: usize, track: Track, step: ?Transition) void {
     var meta_buffer: [32]u8 = undefined;
-    const meta = trackMeta(track, &meta_buffer, app.note_names);
+    var length_buffer: [12]u8 = undefined;
+    var line_buffer: [64]u8 = undefined;
+    const meta = std.fmt.bufPrint(&line_buffer, "{s} · {s}", .{
+        trackMeta(track, &meta_buffer, app.note_names),
+        clockText(track.length_s * 1000, &length_buffer),
+    }) catch trackMeta(track, &meta_buffer, app.note_names);
 
     var outer = dvui.box(@src(), .{ .dir = .vertical }, .{
         .expand = .horizontal,
-        .padding = .{ .x = 12, .y = 6 },
-        .margin = .{ .y = 1 },
+        .padding = .{ .x = 12, .y = 2 },
+        .margin = .{ .y = 0 },
         .background = true,
         .color_fill = .{ .color = Palette.panel },
         .color_fill_hover = .{ .color = Palette.hover },
@@ -3040,7 +3045,7 @@ fn progressBar(app: *App, track: Track, id_extra: usize, height: f32) void {
     var bar = dvui.box(@src(), .{ .dir = .horizontal }, .{
         .expand = .horizontal,
         .min_size_content = .{ .h = height },
-        .margin = .{ .y = 6, .w = 6 },
+        .margin = .{ .y = 3, .w = 6 },
         .background = true,
         .color_fill = .{ .color = Palette.field },
         .corners = square,
@@ -3405,14 +3410,14 @@ fn trackMeta(track: Track, buffer: []u8, note_names: bool) []const u8 {
     return std.fmt.bufPrint(buffer, "{s} · {d:.1} bpm", .{ label, track.bpm }) catch "";
 }
 
-/// h:mm:ss, the shape of the rekordbox time column.
-/// h:mm:ss only from an hour up; m:ss from a minute; bare seconds below that.
+/// m:ss, or h:mm:ss from an hour up. A bare second count would read as
+/// "0/2:03" beside a longer track.
 fn clockText(ms: u32, buffer: []u8) []const u8 {
     const seconds = ms / 1000;
     const text = if (seconds >= 3600)
         std.fmt.bufPrint(buffer, "{d}:{d:0>2}:{d:0>2}", .{ seconds / 3600, (seconds / 60) % 60, seconds % 60 })
     else
-        std.fmt.bufPrint(buffer, "{d}", .{seconds});
+        std.fmt.bufPrint(buffer, "{d}:{d:0>2}", .{ seconds / 60, seconds % 60 });
     return text catch "";
 }
 
@@ -3655,3 +3660,11 @@ test "replay skips tracks the crate no longer holds" {
     try std.testing.expectEqualSlices(usize, &.{0}, out[0..1]);
 }
 
+test "a time under a minute still reads as m:ss" {
+    var buffer: [12]u8 = undefined;
+    try std.testing.expectEqualStrings("0:00", clockText(0, &buffer));
+    try std.testing.expectEqualStrings("0:03", clockText(3_000, &buffer));
+    try std.testing.expectEqualStrings("0:59", clockText(59_900, &buffer));
+    try std.testing.expectEqualStrings("2:03", clockText(123_000, &buffer));
+    try std.testing.expectEqualStrings("1:02:03", clockText(3_723_000, &buffer));
+}
