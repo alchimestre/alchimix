@@ -633,16 +633,20 @@ pub const Transport = struct {
     }
 
     fn fill(self: *Transport, slot: *Slot, index: usize, info: LaneInfo) void {
-        _ = self;
+        const grid_bpm: f32 = if (info.grid_bpm > 0) info.grid_bpm else 128;
+        // A lane's rate is the master against its own grid, so a lane resolved
+        // at a new grid needs a new mix even though the master never moved.
+        const rate_changed = slot.playing and @abs(slot.grid_bpm - grid_bpm) > 0.0005;
         slot.index = index;
         slot.seen = true;
         slot.track_id = info.track.id;
         slot.track = info.track;
         slot.analysis = info.analysis;
-        slot.grid_bpm = if (info.grid_bpm > 0) info.grid_bpm else 128;
+        slot.grid_bpm = grid_bpm;
         slot.total_beats = info.total_beats;
         slot.offset = info.offset;
         slot.first_downbeat = info.first_downbeat;
+        if (rate_changed) self.pushMix();
     }
 
     fn slotAt(self: *Transport, index: usize) ?*Slot {
@@ -1891,4 +1895,81 @@ test "crate index zero is a real lane" {
     t.start(0, .now);
     try testing.expect(t.isPlaying(0));
     try testing.expectEqual(@as(usize, 1), fake.count);
+}
+
+/// A lane whose own grid differs from the fixture's, so its rate is not 1.
+fn laneInfoAt(id: u64, grid_bpm: f32) LaneInfo {
+    var info = laneInfo(id);
+    info.grid_bpm = grid_bpm;
+    return info;
+}
+
+test "every playing lane takes the master rate, scrubbed or not" {
+    var fake = FakeOutput{};
+    var clock = TestClock{};
+    var t = setup(&fake, &clock);
+    defer t.deinit();
+
+    t.setTempo(126);
+    t.beginSync();
+    t.resolve(0, laneInfoAt(1, 120));
+    t.resolve(1, laneInfoAt(2, 128));
+    t.endSync();
+    t.startAll();
+
+    fake.markStarted(1, 0);
+    fake.markStarted(2, 0);
+    clock.now = 1_000_000;
+    t.sync();
+
+    const slow = fake.playingLane(1) orelse return error.NoLane;
+    const fast = fake.playingLane(2) orelse return error.NoLane;
+    try expectApprox(126.0 / 120.0, slow.tempo);
+    try expectApprox(126.0 / 128.0, fast.tempo);
+
+    // The master moves; both lanes are retuned, not just the one touched.
+    t.setTempo(132);
+    const retuned_slow = fake.playingLane(1) orelse return error.NoLane;
+    const retuned_fast = fake.playingLane(2) orelse return error.NoLane;
+    try expectApprox(132.0 / 120.0, retuned_slow.tempo);
+    try expectApprox(132.0 / 128.0, retuned_fast.tempo);
+    try testing.expect(retuned_slow.restart and retuned_fast.restart);
+
+    // Scrubbing a synced lane must not hand the mixer its own tempo.
+    t.seek(1, 8);
+    const scrubbed = fake.playingLane(2) orelse return error.NoLane;
+    try expectApprox(132.0 / 128.0, scrubbed.tempo);
+
+    // Nor may a lane keep the old rate once the master moves again.
+    t.setTempo(124);
+    const moved = fake.playingLane(2) orelse return error.NoLane;
+    try expectApprox(124.0 / 128.0, moved.tempo);
+}
+
+test "a lane re-resolved at a new grid takes the new rate at once" {
+    var fake = FakeOutput{};
+    var clock = TestClock{};
+    var t = setup(&fake, &clock);
+    defer t.deinit();
+
+    t.beginSync();
+    t.resolve(0, laneInfoAt(1, 120));
+    t.endSync();
+    t.start(0, .now);
+
+    fake.markStarted(1, 0);
+    clock.now = 1_000_000;
+    t.sync();
+    const first = fake.playingLane(1) orelse return error.NoLane;
+    try expectApprox(1, first.tempo);
+
+    // The analysis lands while the lane is playing: its grid is now 128, and
+    // the master did not move, so nothing else would retune it.
+    t.resolve(0, laneInfoAt(1, 128));
+    const retuned = fake.playingLane(1) orelse return error.NoLane;
+    try expectApprox(120.0 / 128.0, retuned.tempo);
+
+    // The mixer was restarted at the new rate, not merely told about it.
+    const entry = fake.findByTrack(1) orelse return error.NoLane;
+    try expectApprox(120.0 / 128.0, entry.tempo);
 }
