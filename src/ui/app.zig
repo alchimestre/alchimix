@@ -196,6 +196,13 @@ pub const LoopGesture = struct {
     anchor_bar: f32,
 };
 
+pub const LoopEdge = enum { begin, end };
+
+pub const LoopEdgeDrag = struct {
+    slot: usize,
+    edge: LoopEdge,
+};
+
 pub const App = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -351,6 +358,8 @@ pub const App = struct {
     /// A shift drag on an overview: the bar it started on, so the loop grows
     /// with the pointer.
     loop_gesture: ?LoopGesture = null,
+    /// A shift drag on a loop edge over the waveform, moving that edge only.
+    loop_edge: ?LoopEdgeDrag = null,
     /// The edits U walks back through.
     undo_history: undo_mod.Undo,
     /// Key bindings, from the config file over the defaults.
@@ -1547,6 +1556,11 @@ pub const App = struct {
                 self.last_point = p;
                 // A loop press picks its bar from the pointer, not last frame's.
                 self.pointer = p;
+                // Shift on the waveform grabs a loop edge instead of the jog.
+                if (mouse.mod.shift() and target == .lane and self.grabLoopEdge(target.lane)) {
+                    self.apply(self.drag.press(target, p, true));
+                    return;
+                }
                 self.apply(self.drag.press(target, p, mouse.mod.shift()));
                 switch (target) {
                     .lane => |index| {
@@ -1565,6 +1579,7 @@ pub const App = struct {
                 if (!mouse.button.pointer()) return;
                 self.apply(self.drag.release());
                 self.loop_gesture = null;
+                self.loop_edge = null;
                 self.transport.jogResume();
             },
             else => {},
@@ -2313,6 +2328,43 @@ pub const App = struct {
         dvui.refresh(null, @src(), null);
     }
 
+    /// Grabs the loop edge nearest the pointer on this lane's waveform. A lane
+    /// without a loop has no edge to grab, and the press stays a jog.
+    fn grabLoopEdge(self: *App, slot: usize) bool {
+        const loop = self.transport.loopOf(slot) orelse return false;
+        const rect = self.hit_map.laneRect(slot) orelse return false;
+        const edge = loopEdgeAt(
+            self.pointer.x,
+            rect.x,
+            rect.w,
+            self.laneStart(slot),
+            self.visibleBeats(),
+            loop.begin,
+            loop.end,
+            10 * self.scale_hint,
+        ) orelse return false;
+        self.loop_edge = .{ .slot = slot, .edge = edge };
+        return true;
+    }
+
+    /// Moves the held edge to the bar under the pointer, leaving the other one
+    /// where it is. A loop is at least one bar long.
+    fn resizeLoop(self: *App, slot: usize) void {
+        const held = self.loop_edge orelse return;
+        const loop = self.transport.loopOf(slot) orelse return;
+        const rect = self.hit_map.laneRect(slot) orelse return;
+        if (rect.w <= 0) return;
+        const visible = self.visibleBeats();
+        if (visible <= 0) return;
+
+        const beat = self.laneStart(slot) + (self.pointer.x - rect.x) / rect.w * visible;
+        const bar = @floor(beat / 4) * 4;
+        const total: f32 = @floatFromInt(totalBeats(&self.grid.items[slot]));
+        const bounded = resizedLoop(loop, bar, held.edge, total);
+        self.transport.setLoop(slot, bounded.begin, bounded.end);
+        dvui.refresh(null, @src(), null);
+    }
+
     /// Grows the loop to cover every bar between the anchor and the pointer.
     fn dragLoop(self: *App, slot: usize, anchor_bar: f32) void {
         const total: f32 = @floatFromInt(totalBeats(&self.grid.items[slot]));
@@ -2335,6 +2387,12 @@ pub const App = struct {
         switch (pull.target) {
             .lane => |slot| {
                 if (slot >= self.grid.items.len) return;
+                if (self.loop_edge) |held| {
+                    if (held.slot == slot) {
+                        self.resizeLoop(slot);
+                        return;
+                    }
+                }
                 const delta = self.hit_map.waveformDragBeats(slot, pull.dx, self.visibleBeats()) orelse return;
                 if (self.transport.isPlaying(slot)) self.transport.jogPause(slot, .now);
                 self.transport.dragBeats(slot, delta);
@@ -3445,6 +3503,33 @@ fn paintPhrases(allocator: std.mem.Allocator, analysis: *const pl.analysis.Analy
 
 /// Where one phrase sits on the overview, as fractions of the track. A phrase
 /// holds until the next boundary; the last one runs to the end of the grid.
+/// Which loop edge the pointer is on, in the waveform's own window. Edges are
+/// thin, so the tolerance is a few pixels rather than a bar.
+fn loopEdgeAt(x: f32, rect_x: f32, rect_w: f32, view: f32, visible: f32, begin: f32, end: f32, tolerance: f32) ?LoopEdge {
+    if (rect_w <= 0 or visible <= 0) return null;
+    const begin_x = rect_x + (begin - view) / visible * rect_w;
+    const end_x = rect_x + (end - view) / visible * rect_w;
+    const to_begin = @abs(x - begin_x);
+    const to_end = @abs(x - end_x);
+    if (@min(to_begin, to_end) > tolerance) return null;
+    return if (to_begin <= to_end) LoopEdge.begin else LoopEdge.end;
+}
+
+/// The loop after one edge lands on `bar`. The edges never cross and never sit
+/// closer than a bar, so a drag cannot collapse the loop to nothing.
+fn resizedLoop(loop: pl.transport.Transport.Loop, bar: f32, edge: LoopEdge, total_beats: f32) pl.transport.Transport.Loop {
+    return switch (edge) {
+        .begin => .{
+            .begin = std.math.clamp(bar, 0, loop.end - 4),
+            .end = loop.end,
+        },
+        .end => .{
+            .begin = loop.begin,
+            .end = std.math.clamp(bar + 4, loop.begin + 4, @max(total_beats, loop.begin + 4)),
+        },
+    };
+}
+
 const PhraseSpan = struct { from: f32, to: f32 };
 
 fn phraseSpan(analysis: *const pl.analysis.Analysis, index: usize) ?PhraseSpan {
@@ -3993,6 +4078,43 @@ test "a phrase band runs from its beat to the next boundary" {
     // The final boundary runs to the end of the grid, not to its own beat.
     try std.testing.expectEqual(@as(f32, 1), last.to);
     try std.testing.expect(phraseSpan(&analysis, 3) == null);
+}
+
+test "the nearest loop edge within reach is the one grabbed" {
+    // A ten-beat window across 400 points: forty points a beat.
+    const tolerance = 10;
+    try std.testing.expectEqual(LoopEdge.begin, loopEdgeAt(100, 0, 400, 0, 10, 2.5, 6, tolerance).?);
+    try std.testing.expectEqual(LoopEdge.end, loopEdgeAt(240, 0, 400, 0, 10, 2.5, 6, tolerance).?);
+    // Far from both edges, nothing is grabbed.
+    try std.testing.expectEqual(@as(?LoopEdge, null), loopEdgeAt(160, 0, 400, 0, 10, 2.5, 6, tolerance));
+    // The window scrolls: edges are found where they are drawn.
+    try std.testing.expectEqual(LoopEdge.end, loopEdgeAt(40, 0, 400, 5, 10, 5, 6, tolerance).?);
+}
+
+test "dragging one edge leaves the other where it was" {
+    const loop = pl.transport.Transport.Loop{ .begin = 8, .end = 16 };
+
+    const start_pulled = resizedLoop(loop, 4, .begin, 64);
+    try std.testing.expectEqual(@as(f32, 4), start_pulled.begin);
+    try std.testing.expectEqual(@as(f32, 16), start_pulled.end);
+
+    const end_pulled = resizedLoop(loop, 24, .end, 64);
+    try std.testing.expectEqual(@as(f32, 8), end_pulled.begin);
+    try std.testing.expectEqual(@as(f32, 28), end_pulled.end);
+
+    // Neither edge can cross the other, and a loop never shrinks under a bar.
+    const squashed_begin = resizedLoop(loop, 20, .begin, 64);
+    try std.testing.expectEqual(@as(f32, 12), squashed_begin.begin);
+    try std.testing.expectEqual(@as(f32, 16), squashed_begin.end);
+
+    const squashed_end = resizedLoop(loop, 0, .end, 64);
+    try std.testing.expectEqual(@as(f32, 8), squashed_end.begin);
+    try std.testing.expectEqual(@as(f32, 12), squashed_end.end);
+
+    // The end stops at the last bar of a short track.
+    const past_end = resizedLoop(loop, 60, .end, 20);
+    try std.testing.expectEqual(@as(f32, 8), past_end.begin);
+    try std.testing.expectEqual(@as(f32, 20), past_end.end);
 }
 
 test "the sort chip walks off, highest first, lowest first, off" {
