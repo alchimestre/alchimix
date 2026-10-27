@@ -7,6 +7,7 @@ test {
     _ = @import("ui/hit.zig");
     _ = @import("ui/lsd.zig");
     _ = @import("ui/mushroom.zig");
+    _ = @import("ui/playlists.zig");
     _ = @import("ui/wave.zig");
     _ = @import("ui/wave_colour.zig");
 }

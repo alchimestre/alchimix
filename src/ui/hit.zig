@@ -304,6 +304,8 @@ pub const Drag = struct {
         rename_playlist: usize,
         toggle_playlist: usize,
         save_playlist,
+        /// A shift press on the save chip: ask for a name first.
+        save_named_playlist,
         toggle_master_lock,
         toggle_pitch,
         toggle_lane_play: usize,
@@ -325,7 +327,8 @@ pub const Drag = struct {
     };
 
     /// `shift` adds the block to the selection instead of making it the seed,
-    /// renames a playlist row instead of loading it, and never starts a drag.
+    /// renames a playlist row instead of loading it, asks the save chip for a
+    /// name, and never starts a drag.
     pub fn press(self: *Drag, target: Target, p: Point, shift: bool) Action {
         self.* = .{ .press_at = p };
         return switch (target) {
@@ -343,7 +346,7 @@ pub const Drag = struct {
             .pause => .toggle_pause,
             .playlist => |index| if (shift) .{ .rename_playlist = index } else .{ .select_playlist = index },
             .playlist_toggle => |index| .{ .toggle_playlist = index },
-            .save_playlist => .save_playlist,
+            .save_playlist => if (shift) .save_named_playlist else .save_playlist,
             .master_lock => .toggle_master_lock,
             .pitch_lock => .toggle_pitch,
             .lane_play => |index| .{ .toggle_lane_play = index },
@@ -486,6 +489,14 @@ test "a chip over a lane takes the press" {
         .lane => |index| try std.testing.expectEqual(@as(usize, 0), index),
         else => return error.TestUnexpectedResult,
     }
+}
+
+test "shift on the save chip asks for a name" {
+    var plain = Drag{};
+    try std.testing.expectEqual(Drag.Action.save_playlist, plain.press(.save_playlist, .{ .x = 10, .y = 10 }, false));
+
+    var shifted = Drag{};
+    try std.testing.expectEqual(Drag.Action.save_named_playlist, shifted.press(.save_playlist, .{ .x = 10, .y = 10 }, true));
 }
 
 test "a target that stops being drawn stops taking presses" {

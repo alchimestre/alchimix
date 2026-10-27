@@ -84,6 +84,16 @@ pub const Source = struct {
         return error.PlaylistNotFound;
     }
 
+    fn deletePlaylistFn(ctx: *anyopaque, playlist_id: []const u8) anyerror!void {
+        const self = ctxOf(ctx);
+        for (self.playlists.items, 0..) |playlist, index| {
+            if (!std.mem.eql(u8, playlist.id, playlist_id)) continue;
+            _ = self.playlists.orderedRemove(index);
+            return;
+        }
+        return error.PlaylistNotFound;
+    }
+
     fn nameFn(_: *anyopaque) []const u8 {
         return "memory";
     }
@@ -104,6 +114,7 @@ pub const Source = struct {
         .createPlaylist = createPlaylistFn,
         .replacePlaylistTracks = replacePlaylistTracksFn,
         .renamePlaylist = renamePlaylistFn,
+        .deletePlaylist = deletePlaylistFn,
         .name = nameFn,
         .deinit = deinitFn,
     };
@@ -171,4 +182,17 @@ test "rename keeps the playlist id and replaces its name" {
     try std.testing.expectEqualStrings("Warm up", lists[0].name);
 
     try std.testing.expectError(error.PlaylistNotFound, lib.renamePlaylist("99", "Nope"));
+}
+
+test "deleting a playlist drops it from the port" {
+    var src = Source.init(std.testing.allocator);
+    const lib = src.port();
+    defer lib.deinit();
+
+    try src.playlists.append(src.arena.allocator(), .{ .id = "7", .name = "Temp", .parent = "root", .kind = .list });
+    try std.testing.expectEqual(@as(usize, 1), (try lib.playlists()).len);
+
+    try lib.deletePlaylist("7");
+    try std.testing.expectEqual(@as(usize, 0), (try lib.playlists()).len);
+    try std.testing.expectError(error.PlaylistNotFound, lib.deletePlaylist("7"));
 }

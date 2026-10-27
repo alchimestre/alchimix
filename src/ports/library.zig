@@ -40,6 +40,8 @@ pub const Library = struct {
         replacePlaylistTracks: *const fn (ctx: *anyopaque, playlist_id: []const u8, track_ids: []const u64) anyerror!void,
         /// Renames a playlist in place, leaving its tracks untouched.
         renamePlaylist: *const fn (ctx: *anyopaque, playlist_id: []const u8, playlist_name: []const u8) anyerror!void,
+        /// Removes a playlist and its track rows. The tracks themselves stay.
+        deletePlaylist: *const fn (ctx: *anyopaque, playlist_id: []const u8) anyerror!void,
         /// Shown in the UI so the active source is never a guess.
         name: *const fn (ctx: *anyopaque) []const u8,
         deinit: *const fn (ctx: *anyopaque) void,
@@ -75,6 +77,10 @@ pub const Library = struct {
 
     pub fn renamePlaylist(self: Library, playlist_id: []const u8, playlist_name: []const u8) !void {
         return self.vtable.renamePlaylist(self.ctx, playlist_id, playlist_name);
+    }
+
+    pub fn deletePlaylist(self: Library, playlist_id: []const u8) !void {
+        return self.vtable.deletePlaylist(self.ctx, playlist_id);
     }
 
     pub fn name(self: Library) []const u8 {
