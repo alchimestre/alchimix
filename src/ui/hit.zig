@@ -191,6 +191,11 @@ pub const HitMap = struct {
         return null;
     }
 
+    /// The lane's waveform, so a loop edge can be found where it is drawn.
+    pub fn laneRect(self: *const HitMap, index: usize) ?Rect {
+        return self.surfaceRect(.wave, index);
+    }
+
     /// How far a waveform drag moves the window, in beats. Dragging left shows
     /// later audio.
     pub fn waveformDragBeats(self: *const HitMap, index: usize, dx: f32, visible_beats: f32) ?f32 {
