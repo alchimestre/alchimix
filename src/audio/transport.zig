@@ -86,12 +86,21 @@ const Slot = struct {
     /// Set for a retune, so the mixer restarts this decoder even when the
     /// folded position and tempo round to the same values.
     restart: bool = false,
+    /// A bar range the lane wraps inside. Equal values mean no loop.
+    loop_begin: f32 = 0,
+    loop_end: f32 = 0,
+    /// The wrap for this pass is already scheduled, waiting on its instant.
+    loop_armed: bool = false,
     /// Set while the grid sync walks the crate.
     seen: bool = false,
 };
 
 /// How late a lane may start before it is moved to the next bar.
 const start_grace_ns: i128 = 100_000_000;
+
+/// How far ahead of the loop point the wrap is handed to the mixer. A restart
+/// needs its decoder filled before the swap, or the seam is a hole.
+const loop_preroll_s: f32 = 0.25;
 
 pub const Transport = struct {
     allocator: std.mem.Allocator,
@@ -260,6 +269,7 @@ pub const Transport = struct {
                 },
                 .started => |started| {
                     if (!slot.start_latched) {
+                        slot.loop_armed = false;
                         if (!self.running) {
                             self.running = true;
                             self.clock_base_ns = started;
@@ -269,6 +279,10 @@ pub const Transport = struct {
                         slot.started_master = self.masterBeatAt(started);
                     }
                 },
+            }
+            if (slot.start_latched and slot.loop_end > slot.loop_begin) {
+                if (self.wrapLoop(slot, now)) changed = true;
+                continue;
             }
             if (slot.start_latched and slot.total_beats > 0) {
                 if (self.beatAt(slot, now) >= slot.total_beats) {
@@ -626,6 +640,36 @@ pub const Transport = struct {
         return count;
     }
 
+    /// Loops the lane back to `begin` when it reaches `end`, in beats from the
+    /// start of the grid. Boundaries snap to bars: a loop that lands mid-bar
+    /// cannot wrap without dragging the lane off the other lanes' grid.
+    pub fn setLoop(self: *Transport, index: usize, begin: f32, end: f32) void {
+        const slot = self.slotAt(index) orelse return;
+        const from = @round(begin / 4) * 4;
+        const to = @round(end / 4) * 4;
+        if (to <= from or from < 0) return;
+        slot.loop_begin = from;
+        slot.loop_end = @min(to, slot.total_beats);
+        slot.loop_armed = false;
+    }
+
+    pub fn clearLoop(self: *Transport, index: usize) void {
+        const slot = self.slotAt(index) orelse return;
+        slot.loop_begin = 0;
+        slot.loop_end = 0;
+        slot.loop_armed = false;
+    }
+
+    pub const Loop = struct { begin: f32, end: f32 };
+
+    pub fn loopOf(self: *const Transport, index: usize) ?Loop {
+        for (self.slots.items) |*slot| {
+            if (slot.index != index or slot.loop_end <= slot.loop_begin) continue;
+            return .{ .begin = slot.loop_begin, .end = slot.loop_end };
+        }
+        return null;
+    }
+
     pub fn nowNs(self: *const Transport) i128 {
         return self.clock.nowNs(self.clock.context);
     }
@@ -719,6 +763,40 @@ pub const Transport = struct {
 
     /// The next master bar after `now`, never the current one: a lane rejoining
     /// mid-song must not land a fraction of a beat after the other lanes.
+    /// Hands the next pass to the mixer before the loop point, so the decoder
+    /// for the loop start is filled when the old one is cut. The pass that
+    /// reaches an armed loop keeps its own schedule; one that arrives early
+    /// folds back on the spot.
+    fn wrapLoop(self: *Transport, slot: *Slot, now: i128) bool {
+        const pose = self.beatAt(slot, now);
+        const length = slot.loop_end - slot.loop_begin;
+        const remaining = slot.loop_end - pose;
+        if (remaining <= 0) {
+            const wrapped = slot.loop_begin + @mod(pose - slot.loop_begin, length);
+            slot.beat = wrapped;
+            slot.beat_raw = wrapped;
+            slot.start_latched = false;
+            slot.start_at_ns = now;
+            slot.rejoin = false;
+            slot.restart = true;
+            slot.loop_armed = false;
+            return true;
+        }
+        if (slot.loop_armed) return false;
+        if (remaining * 60 / self.bpm > loop_preroll_s) return false;
+
+        // The instant the beat reaches the loop end, in this lane's own beats.
+        const wrap_at = now + @as(i128, @intFromFloat(@as(f64, remaining) * 60 / self.bpm * 1_000_000_000));
+        slot.beat = slot.loop_begin;
+        slot.beat_raw = slot.loop_begin;
+        slot.start_at_ns = wrap_at;
+        slot.start_latched = false;
+        slot.rejoin = true;
+        slot.restart = true;
+        slot.loop_armed = true;
+        return true;
+    }
+
     fn nextBarAt(self: *Transport, now: i128) i128 {
         if (!self.running) return 0;
         const phase = @mod(self.masterBeatAt(now), 4);
@@ -1991,6 +2069,96 @@ test "a lane re-resolved at a new grid takes the new rate at once" {
     // The mixer was restarted at the new rate, not merely told about it.
     const entry = fake.findByTrack(1) orelse return error.NoLane;
     try expectApprox(120.0 / 128.0, entry.tempo);
+}
+
+test "a loop wraps on its bar with the decoder pre-rolled" {
+    var fake = FakeOutput{};
+    var clock = TestClock{};
+    var t = setup(&fake, &clock);
+    defer t.deinit();
+
+    t.beginSync();
+    t.resolve(0, laneInfo(1));
+    t.endSync();
+    t.startAll();
+
+    fake.markStarted(1, 0);
+    clock.now = 1_000_000;
+    t.sync();
+    // 120 BPM: two seconds a bar, so beat 8 arrives at four seconds.
+    t.setLoop(0, 4, 8);
+    const loop = t.loopOf(0) orelse return error.NoLoop;
+    try expectApprox(4, loop.begin);
+    try expectApprox(8, loop.end);
+
+    // Far from the loop point nothing is scheduled.
+    clock.now = 3_000_000_000;
+    t.sync();
+    const running = fake.playingLane(1) orelse return error.NoLane;
+    try testing.expect(!running.restart);
+
+    // Inside the pre-roll the next pass is handed over with a start time on
+    // the loop point, and the beat shows where the new pass begins.
+    clock.now = 3_900_000_000;
+    t.sync();
+    const armed = fake.playingLane(1) orelse return error.NoLane;
+    try testing.expect(armed.restart);
+    try testing.expect(armed.start_at_ns > clock.now);
+    try expectApprox(4, t.beat(0));
+    // Beat 7.8 of 8 leaves a fifth of a beat, a tenth of a second at 120.
+    const wait: f64 = @as(f64, @floatFromInt(armed.start_at_ns - clock.now)) * 1e-9;
+    try testing.expect(@abs(wait - 0.1) < 0.02);
+}
+
+test "a loop that is missed folds back instead of running on" {
+    var fake = FakeOutput{};
+    var clock = TestClock{};
+    var t = setup(&fake, &clock);
+    defer t.deinit();
+
+    t.beginSync();
+    t.resolve(0, laneInfo(1));
+    t.endSync();
+    t.startAll();
+
+    fake.markStarted(1, 0);
+    clock.now = 1_000_000;
+    t.sync();
+    t.setLoop(0, 4, 8);
+
+    // The clock jumps past the loop end: no pass was scheduled, so it folds.
+    clock.now = 5_000_000_000;
+    t.sync();
+    const folded = fake.playingLane(1) orelse return error.NoLane;
+    try testing.expect(folded.restart);
+    try testing.expectEqual(clock.now, folded.start_at_ns);
+    // Six beats in: two beats past the loop end of eight, folded back.
+    try expectApprox(6, t.beat(0));
+    try testing.expect(t.isPlaying(0));
+}
+
+test "clearing a loop lets the lane run to the end" {
+    var fake = FakeOutput{};
+    var clock = TestClock{};
+    var t = setup(&fake, &clock);
+    defer t.deinit();
+
+    t.beginSync();
+    t.resolve(0, laneInfo(1));
+    t.endSync();
+    t.startAll();
+
+    fake.markStarted(1, 0);
+    clock.now = 1_000_000;
+    t.sync();
+    t.setLoop(0, 4, 8);
+    t.clearLoop(0);
+    try testing.expect(t.loopOf(0) == null);
+
+    // Past the old loop end and past the last beat of a sixteen-beat track.
+    clock.now = 9_000_000_000;
+    t.sync();
+    try testing.expect(!t.isPlaying(0));
 }
 
 test "a lone lane takes a tempo change at once" {

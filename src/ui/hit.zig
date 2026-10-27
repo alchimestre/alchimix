@@ -310,6 +310,8 @@ pub const Drag = struct {
         heartbeat,
         toggle_pause,
         select_playlist: usize,
+        /// A shift press on the overview: loop the bars under the pointer.
+        loop_nav: usize,
         /// A shift press on a playlist row: rename it in place.
         rename_playlist: usize,
         toggle_playlist: usize,
@@ -379,7 +381,7 @@ pub const Drag = struct {
             },
             .nav => |index| blk: {
                 self.pressed = target;
-                break :blk .{ .seek_nav = index };
+                break :blk if (shift) .{ .loop_nav = index } else .{ .seek_nav = index };
             },
             .eq_node => |at| blk: {
                 self.pressed = target;
@@ -509,6 +511,12 @@ test "a chip over a lane takes the press" {
         .lane => |index| try std.testing.expectEqual(@as(usize, 0), index),
         else => return error.TestUnexpectedResult,
     }
+}
+
+test "shift on the overview loops instead of seeking" {
+    var drag = Drag{};
+    try std.testing.expectEqual(Drag.Action{ .loop_nav = 2 }, drag.press(.{ .nav = 2 }, .{ .x = 10, .y = 10 }, true));
+    try std.testing.expectEqual(Drag.Action{ .seek_nav = 2 }, drag.press(.{ .nav = 2 }, .{ .x = 10, .y = 10 }, false));
 }
 
 test "shift on the save chip asks for a name" {
