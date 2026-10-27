@@ -290,7 +290,7 @@ pub const App = struct {
     still_count: usize = 0,
 
     /// Tempo window for suggestions, as a percentage of the seed's BPM.
-    bpm_pct: f32 = 5,
+    bpm_pct: f32 = 1,
     bpm_text: std.ArrayList(u8) = .empty,
     /// Suggestions ordered by BPM, highest first.
     sort_by_bpm: bool = false,
@@ -1154,7 +1154,9 @@ pub const App = struct {
     /// seed's BPM.
     pub fn frameBpmWindow(self: *App) void {
         if (self.bpm_text.items.len == 0) {
-            self.bpm_text.append(self.allocator, '5') catch {};
+            var shown: [8]u8 = undefined;
+            const text = std.fmt.bufPrint(&shown, "{d}", .{self.bpm_pct}) catch "1";
+            self.bpm_text.appendSlice(self.allocator, text) catch {};
         }
 
         labelStyled(@src(), "bpm ±", .{
@@ -2119,7 +2121,8 @@ pub const App = struct {
         self.master_text.clearRetainingCapacity();
         self.master_bpm = 128;
         self.master_locked = true;
-        self.bpm_pct = 5;
+        self.bpm_pct = 1;
+        self.bpm_text.clearRetainingCapacity();
         self.refresh() catch {};
         dvui.refresh(null, @src(), null);
     }
