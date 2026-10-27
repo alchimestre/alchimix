@@ -64,6 +64,45 @@ fn byBpmDesc(_: void, a: Candidate, b: Candidate) bool {
     return a.total < b.total;
 }
 
+fn byBpmAsc(_: void, a: Candidate, b: Candidate) bool {
+    if (a.track.bpm_centi != b.track.bpm_centi) return a.track.bpm_centi < b.track.bpm_centi;
+    if (a.rank != b.rank) return a.rank < b.rank;
+    return a.total < b.total;
+}
+
+/// Puts the suggestions in the order the chip asks for.
+fn sortRanked(sort: Sort, list: []Candidate) void {
+    switch (sort) {
+        .none => {},
+        .high_first => std.mem.sort(Candidate, list, {}, byBpmDesc),
+        .low_first => std.mem.sort(Candidate, list, {}, byBpmAsc),
+    }
+}
+
+/// The sort chip's three states, in the order presses walk them. Off leaves
+/// the source's own ranking, which is closest match first.
+const Sort = enum {
+    none,
+    high_first,
+    low_first,
+
+    fn next(self: Sort) Sort {
+        return switch (self) {
+            .none => .high_first,
+            .high_first => .low_first,
+            .low_first => .none,
+        };
+    }
+
+    fn label(self: Sort) []const u8 {
+        return switch (self) {
+            .none => "bpm",
+            .high_first => "bpm \u{2191}",
+            .low_first => "bpm \u{2193}",
+        };
+    }
+};
+
 pub fn shortName(name: []const u8, buffer: *[32]u8) []const u8 {
     const limit: usize = 24;
     if (name.len <= limit) return name;
@@ -293,7 +332,7 @@ pub const App = struct {
     bpm_pct: f32 = 1,
     bpm_text: std.ArrayList(u8) = .empty,
     /// Suggestions ordered by BPM, highest first.
-    sort_by_bpm: bool = false,
+    sort: Sort = .none,
 
     /// What the pointer is over, and what it is carrying. Filled while drawing,
     /// read on the next frame's pointer pass.
@@ -398,7 +437,7 @@ pub const App = struct {
             .tolerance_percent = tolerance_percent,
         });
         self.in_range = self.ranked.len;
-        if (self.sort_by_bpm) std.mem.sort(Candidate, self.ranked, {}, byBpmDesc);
+        sortRanked(self.sort, self.ranked);
 
         // A track already in the crate is not a suggestion.
         if (self.ranked.len > 0 and self.crate.len() > 0) {
@@ -957,7 +996,7 @@ pub const App = struct {
     /// Orders the suggestions by BPM. Dim and inert until there are any.
     fn sortButton(self: *App) void {
         const enabled = self.ranked.len > 0;
-        const active = enabled and self.sort_by_bpm;
+        const active = enabled and self.sort != .none;
         var chip = dvui.box(@src(), .{ .dir = .horizontal }, .{
             .min_size_content = .{ .w = 56, .h = 24 },
             .gravity_y = 0.5,
@@ -969,7 +1008,7 @@ pub const App = struct {
         });
         defer chip.deinit();
 
-        labelStyled(@src(), "bpm ↓", .{
+        labelStyled(@src(), self.sort.label(), .{
             .gravity_x = 0.5,
             .gravity_y = 0.5,
             .color_text = .{ .color = if (active) Palette.background else if (enabled) Palette.secondary else Palette.muted },
@@ -1610,7 +1649,7 @@ pub const App = struct {
                 self.clearAll();
             },
             .toggle_sort_bpm => {
-                self.sort_by_bpm = !self.sort_by_bpm;
+                self.sort = self.sort.next();
                 self.refresh() catch {};
                 dvui.refresh(null, @src(), null);
             },
@@ -3728,4 +3767,30 @@ test "a step moves the master one whole BPM and stops at the ends" {
     try std.testing.expectEqual(@as(f32, min_master_bpm), steppedBpm(min_master_bpm, -1));
     // A stepped tempo reads the same as a typed one: whole numbers only.
     try std.testing.expectEqual(@as(f32, 129), steppedBpm(128.37, 1));
+}
+
+test "the sort chip walks off, highest first, lowest first, off" {
+    try std.testing.expectEqual(Sort.high_first, Sort.none.next());
+    try std.testing.expectEqual(Sort.low_first, Sort.high_first.next());
+    try std.testing.expectEqual(Sort.none, Sort.low_first.next());
+}
+
+test "each sort state puts the tempo it names at the head" {
+    const slow = Candidate{ .track = Track.init(1, "slow", ""), .transition = undefined, .rank = 0, .total = 0 };
+    const fast = Candidate{ .track = Track.init(2, "fast", ""), .transition = undefined, .rank = 0, .total = 0 };
+    var slow_candidate = slow;
+    var fast_candidate = fast;
+    slow_candidate.track.bpm_centi = 12000;
+    fast_candidate.track.bpm_centi = 13000;
+
+    var list = [_]Candidate{ slow_candidate, fast_candidate };
+    sortRanked(.high_first, &list);
+    try std.testing.expectEqual(@as(u64, 2), list[0].track.id);
+
+    sortRanked(.low_first, &list);
+    try std.testing.expectEqual(@as(u64, 1), list[0].track.id);
+
+    // Off leaves the ranking the source produced alone.
+    sortRanked(.none, &list);
+    try std.testing.expectEqual(@as(u64, 1), list[0].track.id);
 }
