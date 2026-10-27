@@ -189,6 +189,11 @@ fn pressed(current: Dmt, choice: Dmt) Dmt {
 
 pub const EffectMode = enum { lsd, mushroom, dmt };
 
+pub const LoopGesture = struct {
+    slot: usize,
+    anchor_bar: f32,
+};
+
 pub const App = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -344,6 +349,9 @@ pub const App = struct {
     /// The interface scale the reader asked for; `fitScale` may lower it to
     /// what the window can hold.
     ui_scale: f32 = 1,
+    /// A shift drag on an overview: the bar it started on, so the loop grows
+    /// with the pointer.
+    loop_gesture: ?LoopGesture = null,
     scale_hint: f32 = 1,
 
     /// Every visible row is a real widget, so the list is capped.
@@ -1528,6 +1536,8 @@ pub const App = struct {
 
                 const target = self.hit_map.hit(p) orelse return;
                 self.last_point = p;
+                // A loop press picks its bar from the pointer, not last frame's.
+                self.pointer = p;
                 self.apply(self.drag.press(target, p, mouse.mod.shift()));
                 switch (target) {
                     .lane => |index| {
@@ -1545,6 +1555,7 @@ pub const App = struct {
             .release => {
                 if (!mouse.button.pointer()) return;
                 self.apply(self.drag.release());
+                self.loop_gesture = null;
                 self.transport.jogResume();
             },
             else => {},
@@ -1556,6 +1567,7 @@ pub const App = struct {
     fn apply(self: *App, action: hit.Drag.Action) void {
         switch (action) {
             .none => {},
+            .loop_nav => |index| self.beginLoop(index),
             .toggle => |toggle| {
                 const value = switch (toggle) {
                     .hold => &self.filter_hold,
@@ -2291,6 +2303,43 @@ pub const App = struct {
         dvui.refresh(null, @src(), null);
     }
 
+    /// The bar under the pointer on a lane's overview, as a whole bar.
+    fn barAt(self: *const App, slot: usize, total_beats: f32) ?f32 {
+        const beat = self.hit_map.navBeatAt(slot, self.pointer.x, total_beats) orelse return null;
+        return @floor(beat / 4);
+    }
+
+    fn beginLoop(self: *App, slot: usize) void {
+        if (slot >= self.grid.items.len) return;
+        self.loop_gesture = null;
+        const total: f32 = @floatFromInt(totalBeats(&self.grid.items[slot]));
+        const bar = self.barAt(slot, total) orelse return;
+
+        // A shift press on a live loop clears it; anywhere else starts a
+        // four-bar loop from the bar under the pointer.
+        if (self.transport.loopOf(slot)) |loop| {
+            if (bar >= loop.begin / 4 and bar < loop.end / 4) {
+                self.transport.clearLoop(slot);
+                dvui.refresh(null, @src(), null);
+                return;
+            }
+        }
+        self.transport.setLoop(slot, bar * 4, (bar + 4) * 4);
+        self.loop_gesture = .{ .slot = slot, .anchor_bar = bar };
+        dvui.refresh(null, @src(), null);
+    }
+
+    /// Grows the loop to cover every bar between the anchor and the pointer.
+    fn dragLoop(self: *App, slot: usize, anchor_bar: f32) void {
+        const total: f32 = @floatFromInt(totalBeats(&self.grid.items[slot]));
+        const bar = self.barAt(slot, total) orelse return;
+        const from = @min(anchor_bar, bar);
+        const to = @max(anchor_bar, bar) + 1;
+        if (to - from < 1) return;
+        self.transport.setLoop(slot, from * 4, to * 4);
+        dvui.refresh(null, @src(), null);
+    }
+
     fn isSelected(self: *const App, index: usize) bool {
         for (self.selected.items) |value| {
             if (value == index) return true;
@@ -2309,6 +2358,12 @@ pub const App = struct {
             },
             .nav => |slot| {
                 if (slot >= self.grid.items.len) return;
+                if (self.loop_gesture) |gesture| {
+                    if (gesture.slot == slot) {
+                        self.dragLoop(slot, gesture.anchor_bar);
+                        return;
+                    }
+                }
                 const total: f32 = @floatFromInt(totalBeats(&self.grid.items[slot]));
                 const delta = self.hit_map.navDragBeats(slot, pull.dx, total) orelse return;
                 if (self.transport.isPlaying(slot)) self.transport.jogPause(slot, .bar);
@@ -2475,6 +2530,7 @@ pub const App = struct {
             if (lane.analysis) |*analysis| {
                 self.paintOverview(analysis, bar_rect);
             }
+            if (total > 0) self.paintLoop(index, bar_rect, @floatFromInt(total));
 
             const window_x = bar_rect.x + bar_rect.w * start;
             const window_w = @max(18, bar_rect.w * span);
@@ -2808,6 +2864,18 @@ pub const App = struct {
             const color = if (has_bands) waveColor(wave_colour.tintBands(smoothed, analysis.bands[from..to])) else bandColor(smoothed);
             self.waveFill(&builder, rect.x + x, rect.bottom() - height, 6, height, color);
         }
+    }
+
+    /// The loop's reach over the whole track, with an edge on each bar it
+    /// wraps on.
+    fn paintLoop(self: *App, index: usize, rect: hit.Rect, total_beats: f32) void {
+        const loop = self.transport.loopOf(index) orelse return;
+        const from = rect.x + std.math.clamp(loop.begin / total_beats, 0, 1) * rect.w;
+        const to = rect.x + std.math.clamp(loop.end / total_beats, 0, 1) * rect.w;
+        if (to <= from) return;
+        fillRect(self.allocator, from, rect.y, to - from, rect.h, fade(Palette.green, 34));
+        fillRect(self.allocator, from, rect.y, 1.5, rect.h, Palette.green);
+        fillRect(self.allocator, to - 1.5, rect.y, 1.5, rect.h, Palette.green);
     }
 
     /// A line across the gap the drop would land in.
