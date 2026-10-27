@@ -105,6 +105,10 @@ pub const Target = union(enum) {
     pause,
     /// Freezes the master tempo to the seed's BPM, or frees it.
     master_lock,
+    /// Raises the master tempo by one BPM.
+    master_up,
+    /// Lowers the master tempo by one BPM.
+    master_down,
     /// Keeps the pitch while the master tempo changes.
     pitch_lock,
     /// Starts or stops one grid lane.
@@ -307,6 +311,8 @@ pub const Drag = struct {
         /// A shift press on the save chip: ask for a name first.
         save_named_playlist,
         toggle_master_lock,
+        step_master_up,
+        step_master_down,
         toggle_pitch,
         toggle_lane_play: usize,
         toggle_lane_mute: usize,
@@ -348,6 +354,8 @@ pub const Drag = struct {
             .playlist_toggle => |index| .{ .toggle_playlist = index },
             .save_playlist => if (shift) .save_named_playlist else .save_playlist,
             .master_lock => .toggle_master_lock,
+            .master_up => .step_master_up,
+            .master_down => .step_master_down,
             .pitch_lock => .toggle_pitch,
             .lane_play => |index| .{ .toggle_lane_play = index },
             .lane_mute => |index| .{ .toggle_lane_mute = index },
@@ -426,7 +434,7 @@ pub const Drag = struct {
         return switch (target) {
             .block => |from| .{ .move_block = .{ .from = from, .gap = to } },
             .row => |track| .{ .drop_track = .{ .gap = to, .track = track } },
-            .toggle, .notation, .lane, .nav, .eq_node, .eq_plot, .eq_preset, .trim, .transport, .autoplay, .clear, .playlist, .playlist_toggle, .save_playlist, .sort_bpm, .lsd, .mushroom, .dmt, .heartbeat, .pause, .master_lock, .pitch_lock, .lane_play, .lane_mute, .width, .grow_plant => .none,
+            .toggle, .notation, .lane, .nav, .eq_node, .eq_plot, .eq_preset, .trim, .transport, .autoplay, .clear, .playlist, .playlist_toggle, .save_playlist, .sort_bpm, .lsd, .mushroom, .dmt, .heartbeat, .pause, .master_lock, .master_up, .master_down, .pitch_lock, .lane_play, .lane_mute, .width, .grow_plant => .none,
         };
     }
 
