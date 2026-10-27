@@ -1879,9 +1879,9 @@ pub const App = struct {
     }
 
     /// One of the two one-BPM chips beside the master field.
-    fn masterStepButton(self: *App, slot: usize, label: []const u8, target: hit.Target) void {
+    fn masterStepButton(self: *App, slot: usize, label: []const u8, target: hit.Target, height: f32) void {
         var chip = dvui.box(@src(), .{ .dir = .horizontal }, .{
-            .min_size_content = .{ .w = 14, .h = 12 },
+            .min_size_content = .{ .w = 14, .h = height },
             .padding = .{ .x = 2, .y = 0 },
             .background = true,
             .color_fill = .{ .color = Palette.field },
@@ -1945,6 +1945,7 @@ pub const App = struct {
         self.noteTyping(entry.data().id);
         const enter = entry.enter_pressed;
         const focused = dvui.focusedWidgetId() == entry.data().id;
+        const field_height = entry.data().borderRectScale().r.h;
         entry.deinit();
 
         const left_box = self.master_focus and !focused;
@@ -1961,22 +1962,26 @@ pub const App = struct {
                 .id_extra = 71,
             });
             defer stepper.deinit();
-            self.masterStepButton(0, "+", .master_up);
-            self.masterStepButton(1, "\u{2212}", .master_down);
+            const half = @max(6, field_height / 2);
+            self.masterStepButton(0, "+", .master_up, half);
+            self.masterStepButton(1, "\u{2212}", .master_down, half);
         }
 
         {
+            // One word and one width: freeing the master must not move the
+            // row, so the colour is what changes.
             var chip = dvui.box(@src(), .{ .dir = .horizontal }, .{
                 .margin = .{ .x = 3, .y = 0 },
                 .padding = .{ .x = 5, .y = 0 },
-                .min_size_content = .{ .h = 24 },
+                .min_size_content = .{ .w = 46, .h = 24 },
                 .gravity_y = 0.5,
                 .background = true,
                 .color_fill = .{ .color = Palette.field },
                 .id_extra = 72,
             });
             defer chip.deinit();
-            labelStyled(@src(), if (self.master_locked) "locked" else "free", .{
+            labelStyled(@src(), "locked", .{
+                .gravity_x = 0.5,
                 .gravity_y = 0.5,
                 .color_text = .{ .color = if (self.master_locked) Palette.green else Palette.secondary },
                 .font = metaFont(),
