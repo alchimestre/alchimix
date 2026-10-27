@@ -1581,6 +1581,7 @@ pub const App = struct {
                 }
             },
             .motion => {
+                self.pointer = pointFrom(mouse.p);
                 self.showLoopCursor(mouse.mod.shift());
                 if (self.drag.motion(p, 6 * self.scale_hint, self.canvas, self.block_rects[0..self.block_count])) {
                     dvui.refresh(null, @src(), null);
@@ -2329,7 +2330,7 @@ pub const App = struct {
         // A shift press on a live loop clears it; anywhere else starts a
         // four-bar loop from the bar under the pointer.
         if (self.transport.loopOf(slot)) |loop| {
-            if (bar >= loop.begin / 4 and bar < loop.end / 4) {
+            if (bar * 4 >= loop.begin and bar * 4 < loop.end) {
                 self.transport.clearLoop(slot);
                 dvui.refresh(null, @src(), null);
                 return;
@@ -2402,9 +2403,9 @@ pub const App = struct {
         if (visible <= 0) return;
 
         const beat = self.laneStart(slot) + (self.pointer.x - rect.x) / rect.w * visible;
-        const bar = @floor(beat / 4) * 4;
+        const whole = @floor(beat);
         const total: f32 = @floatFromInt(totalBeats(&self.grid.items[slot]));
-        const bounded = resizedLoop(loop, bar, held.edge, total);
+        const bounded = resizedLoop(loop, whole, held.edge, total);
         self.transport.setLoop(slot, bounded.begin, bounded.end);
         dvui.refresh(null, @src(), null);
     }
@@ -3568,17 +3569,17 @@ fn bandCovers(x: f32, y: f32, rect: hit.Rect, view: f32, visible: f32, loop: pl.
     return x >= from and x <= to;
 }
 
-/// The loop after one edge lands on `bar`. The edges never cross and never sit
-/// closer than a bar, so a drag cannot collapse the loop to nothing.
-fn resizedLoop(loop: pl.transport.Transport.Loop, bar: f32, edge: LoopEdge, total_beats: f32) pl.transport.Transport.Loop {
+/// The loop after one edge lands on `beat`. The edges never cross and never sit
+/// closer than a beat, so a drag cannot collapse the loop to nothing.
+fn resizedLoop(loop: pl.transport.Transport.Loop, beat: f32, edge: LoopEdge, total_beats: f32) pl.transport.Transport.Loop {
     return switch (edge) {
         .begin => .{
-            .begin = std.math.clamp(bar, 0, loop.end - 4),
+            .begin = std.math.clamp(beat, 0, loop.end - 1),
             .end = loop.end,
         },
         .end => .{
             .begin = loop.begin,
-            .end = std.math.clamp(bar, loop.begin + 4, @max(total_beats, loop.begin + 4)),
+            .end = std.math.clamp(beat, loop.begin + 1, @max(total_beats, loop.begin + 1)),
         },
     };
 }
@@ -4155,21 +4156,25 @@ test "dragging one edge leaves the other where it was" {
     try std.testing.expectEqual(@as(f32, 8), end_pulled.begin);
     try std.testing.expectEqual(@as(f32, 24), end_pulled.end);
 
-    // The end edge follows the pointer, so a loop can be shortened too.
+    // The end edge follows the pointer, so a loop can be shortened too, and a
+    // drag moves a beat at a time.
     const shortened = resizedLoop(loop, 12, .end, 64);
     try std.testing.expectEqual(@as(f32, 8), shortened.begin);
     try std.testing.expectEqual(@as(f32, 12), shortened.end);
 
-    // Neither edge can cross the other, and a loop never shrinks under a bar.
+    const one_beat = resizedLoop(loop, 9, .end, 64);
+    try std.testing.expectEqual(@as(f32, 9), one_beat.end);
+
+    // Neither edge can cross the other, and a loop never shrinks under a beat.
     const squashed_begin = resizedLoop(loop, 20, .begin, 64);
-    try std.testing.expectEqual(@as(f32, 12), squashed_begin.begin);
+    try std.testing.expectEqual(@as(f32, 15), squashed_begin.begin);
     try std.testing.expectEqual(@as(f32, 16), squashed_begin.end);
 
     const squashed_end = resizedLoop(loop, 0, .end, 64);
     try std.testing.expectEqual(@as(f32, 8), squashed_end.begin);
-    try std.testing.expectEqual(@as(f32, 12), squashed_end.end);
+    try std.testing.expectEqual(@as(f32, 9), squashed_end.end);
 
-    // The end stops at the last bar of a short track.
+    // The end stops at the end of the grid.
     const past_end = resizedLoop(loop, 60, .end, 20);
     try std.testing.expectEqual(@as(f32, 8), past_end.begin);
     try std.testing.expectEqual(@as(f32, 20), past_end.end);
