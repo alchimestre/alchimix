@@ -72,9 +72,15 @@ tracks to start, so a lane begun from its own `▶` joins it too. With nothing
 remembered yet, play starts every lane and remembers what started.
 
 The right column lists rekordbox playlists and folders. Picking a playlist
-loads its tracks into the crate in playlist order, ready to rearrange; `save
-crate` writes the current crate as a new playlist. Intelligent playlists are
-not shown. Changes apply without restarting the decoder.
+loads its tracks into the crate in playlist order, ready to rearrange; `save`
+writes the crate back into that playlist, or into a new one named after the seed
+when the crate came from nowhere. Shift-press `save` to type the name instead; a
+name the library already holds is refused and nothing is written. Shift-click a
+row to rename it. Shift-right-click a row to delete it: the chip turns into
+`Delete ?`, and one more press removes the playlist and its track rows. The
+tracks stay in the collection. A folder that still holds playlists is not offered
+for deletion. Intelligent playlists and rekordbox's own `CUE Analysis Playlist`
+entries are not shown.
 
 ## Editing a crate
 
@@ -127,7 +133,11 @@ spirals and lattices are Klüver's form constants.
 
 ## Where the tracks come from
 
-`~/Library/Pioneer/rekordbox/master.db`, opened read-only. Nothing is written back.
+`~/Library/Pioneer/rekordbox/master.db`, opened with SQLCipher. Writes stay
+inside playlists: creating one, replacing its tracks, renaming it, deleting it.
+Tracks, cue points and analysis are never written. Each write holds the
+database's write lock for one transaction and waits up to five seconds for
+rekordbox to let go of it.
 
 The database key comes from `ALCHIMIX_REKORDBOX_KEY` when set, otherwise from the
 cache pyrekordbox keeps at `~/Library/Application Support/pyrekordbox/rb.cache`.
@@ -144,9 +154,10 @@ To read the collection from another source, implement the port in `src/ports/lib
 | `src/domain/crate.zig` | the crate: ordered tracks, seed, transitions |
 | `src/domain/suggest.zig` | ranking of what can follow a seed |
 | `src/ports/library.zig` | the track-source port |
-| `src/adapters/rekordbox.zig` | SQLCipher reader for rekordbox 6 |
+| `src/adapters/rekordbox.zig` | SQLCipher reader and playlist writer for rekordbox 6 |
 | `src/adapters/memory.zig` | in-memory source for tests and the demo |
 | `src/ui/app.zig` | block canvas, picker, toolbar |
+| `src/ui/playlists.zig` | the playlist column: rows, rename, delete, save |
 | `src/ui/hit.zig` | hit rectangles, pointer-to-beat conversion and drag rules |
 | `src/ui/lsd.zig` | the drift field, the colour passes and the flare |
 | `src/ui/dmt.zig` | the fold, the tunnel haze and the beings |
