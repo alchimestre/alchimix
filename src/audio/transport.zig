@@ -652,13 +652,14 @@ pub const Transport = struct {
     }
 
     /// Loops the lane back to `begin` when it reaches `end`, in beats from the
-    /// start of the grid. Boundaries snap to bars: a loop that lands mid-bar
-    /// cannot wrap without dragging the lane off the other lanes' grid.
+    /// start of the grid. Boundaries land on whole beats, so a loop can hold a
+    /// single beat; a wrap mid-bar is fine, it only moves this lane.
     pub fn setLoop(self: *Transport, index: usize, begin: f32, end: f32) void {
         const slot = self.slotAt(index) orelse return;
-        const from = @round(begin / 4) * 4;
-        const to = @round(end / 4) * 4;
-        if (to <= from or from < 0) return;
+        const from = @round(begin);
+        const to = @round(end);
+        if (to - from < 1 or from < 0) return;
+        if (from >= slot.total_beats) return;
         slot.loop_begin = from;
         slot.loop_end = @min(to, slot.total_beats);
         slot.loop_armed = false;
@@ -2137,6 +2138,36 @@ test "a loop wraps on its bar with the decoder pre-rolled" {
     clock.now = armed.start_at_ns + 1_000_000_000;
     t.sync();
     try expectApprox(6, t.beat(0));
+}
+
+test "a loop lands on whole beats and never collapses" {
+    var fake = FakeOutput{};
+    var clock = TestClock{};
+    var t = setup(&fake, &clock);
+    defer t.deinit();
+
+    t.beginSync();
+    t.resolve(0, laneInfo(1));
+    t.endSync();
+    t.startAll();
+
+    t.setLoop(0, 4.4, 8.6);
+    const loop = t.loopOf(0) orelse return error.NoLoop;
+    try expectApprox(4, loop.begin);
+    try expectApprox(9, loop.end);
+
+    // A thinner ask than a beat would leave nothing to play, so it is refused
+    // and the loop stays as it was.
+    t.setLoop(0, 8, 8.2);
+    const kept = t.loopOf(0) orelse return error.NoLoop;
+    try expectApprox(4, kept.begin);
+    try expectApprox(9, kept.end);
+
+    // A single beat is a loop.
+    t.setLoop(0, 5, 6);
+    const beat_loop = t.loopOf(0) orelse return error.NoLoop;
+    try expectApprox(5, beat_loop.begin);
+    try expectApprox(6, beat_loop.end);
 }
 
 test "a loop that is missed folds back instead of running on" {
