@@ -16,6 +16,7 @@ const lsd = @import("lsd.zig");
 const mushroom = @import("mushroom.zig");
 const playlists = @import("playlists.zig");
 const keys = @import("keys.zig");
+const midi_map = @import("midi_map.zig");
 const undo_mod = @import("undo.zig");
 const wave_colour = @import("wave_colour.zig");
 
@@ -356,6 +357,16 @@ pub const App = struct {
     loop_gesture: ?LoopGesture = null,
     /// The edits U walks back through.
     undo_history: undo_mod.Undo,
+    /// Controller input, and what each control moves.
+    midi: pl.midi.Source = .{},
+    midi_assignments: [64]midi_map.Assignment = undefined,
+    midi_count: usize = 0,
+    /// The parameter waiting for the next control to move, set by a shift press
+    /// on an EQ node or a trim slider.
+    midi_learn: ?midi_map.Target = null,
+    /// Where the config files live, borrowed from the process environment.
+    config_home: ?[]const u8 = null,
+    home: ?[]const u8 = null,
     /// Key bindings, from the config file over the defaults.
     bindings: keys.Bindings = .{},
     scale_hint: f32 = 1,
@@ -411,6 +422,7 @@ pub const App = struct {
         self.allocator.free(self.ranked);
         self.query.deinit(self.allocator);
         self.bpm_text.deinit(self.allocator);
+        self.midi.stop();
         self.playlist_column.deinit(self.allocator);
         self.undo_history.deinit();
         self.crate.deinit();
@@ -472,6 +484,7 @@ pub const App = struct {
         // The whole frame has to exist before it can be warped, so while the
         // mode runs it is drawn into an offscreen copy and blitted back.
         self.colours.clearRetainingCapacity();
+        self.pollMidi();
         if (!self.paused) {
             self.driftLanes();
             self.driftWindow();
@@ -1548,6 +1561,25 @@ pub const App = struct {
                 }
 
                 const target = self.hit_map.hit(p) orelse return;
+                // A shift press on an EQ node or a trim slider arms that
+                // parameter for the next control that moves.
+                if (mouse.mod.shift()) {
+                    switch (target) {
+                        .eq_node => |at| {
+                            self.beginMidiLearn(.{ .lane = at.lane, .param = switch (at.band) {
+                                0 => .eq_low,
+                                1 => .eq_mid,
+                                else => .eq_high,
+                            } });
+                            return;
+                        },
+                        .trim => |lane| {
+                            self.beginMidiLearn(.{ .lane = lane, .param = .trim });
+                            return;
+                        },
+                        else => {},
+                    }
+                }
                 self.last_point = p;
                 // A loop press picks its bar from the pointer, not last frame's.
                 self.pointer = p;
@@ -2299,6 +2331,103 @@ pub const App = struct {
 
     /// Reads the bindings file over the defaults; a missing or unreadable file
     /// leaves the defaults, which is how the app runs before one exists.
+    /// Opens the controller port and reads the assignment table beside the key
+    /// bindings.
+    pub fn startMidi(self: *App, home: ?[]const u8, config_home: ?[]const u8) void {
+        self.home = home;
+        self.config_home = config_home;
+        self.midi.start("alchimix");
+        const path = self.midiPath(home, config_home) catch return;
+        defer self.allocator.free(path);
+        const bytes = std.Io.Dir.cwd().readFileAlloc(self.io, path, self.allocator, .limited(64 * 1024)) catch return;
+        defer self.allocator.free(bytes);
+        self.midi_count = (midi_map.parse(bytes, &self.midi_assignments) catch self.midi_assignments[0..self.midi_count]).len;
+    }
+
+    fn midiPath(self: *App, home: ?[]const u8, config_home: ?[]const u8) ![]u8 {
+        const allocator = self.allocator;
+        const directory = if (config_home) |base|
+            try std.fmt.allocPrint(allocator, "{s}/alchimix", .{base})
+        else
+            try std.fmt.allocPrint(allocator, "{s}/.config/alchimix", .{home orelse return error.NoHome});
+        defer allocator.free(directory);
+        try std.Io.Dir.cwd().createDirPath(self.io, directory);
+        return std.fmt.allocPrint(allocator, "{s}/midi", .{directory});
+    }
+
+    /// Writes the table back, so a learn survives a restart.
+    fn saveMidi(self: *App) void {
+        const path = self.midiPath(self.home, self.config_home) catch return;
+        defer self.allocator.free(path);
+        var file = std.Io.Dir.cwd().createFile(self.io, path, .{}) catch return;
+        defer file.close(self.io);
+        var buffer: [4096]u8 = undefined;
+        var file_writer = file.writerStreaming(self.io, &buffer);
+        midi_map.format(self.midi_assignments[0..self.midi_count], &file_writer.interface) catch return;
+        file_writer.interface.flush() catch {};
+    }
+
+    fn beginMidiLearn(self: *App, target: midi_map.Target) void {
+        self.midi_learn = target;
+        dvui.refresh(null, @src(), null);
+    }
+
+    /// The next control that moves takes the parameter; otherwise an assigned
+    /// control moves its parameter and everything else is ignored.
+    pub fn pollMidi(self: *App) void {
+        var messages: [32]pl.midi.Message = undefined;
+        const waiting = self.midi.drain(&messages);
+        for (waiting) |message| {
+            if (self.midi_learn) |target| {
+                self.assignMidi(message, target);
+                continue;
+            }
+            for (self.midi_assignments[0..self.midi_count]) |assignment| {
+                if (!assignment.matches(message)) continue;
+                self.moveMidi(assignment.target, midi_map.value(assignment.target.param, message.value));
+                break;
+            }
+        }
+    }
+
+    fn assignMidi(self: *App, message: pl.midi.Message, target: midi_map.Target) void {
+        // One control, one parameter: a re-learn replaces the older binding.
+        var write: usize = 0;
+        for (self.midi_assignments[0..self.midi_count]) |assignment| {
+            if (assignment.channel == message.channel and assignment.control == message.control) continue;
+            self.midi_assignments[write] = assignment;
+            write += 1;
+        }
+        self.midi_count = write;
+        if (self.midi_count < self.midi_assignments.len) {
+            self.midi_assignments[self.midi_count] = .{
+                .channel = message.channel,
+                .control = message.control,
+                .target = target,
+            };
+            self.midi_count += 1;
+        }
+        self.midi_learn = null;
+        self.saveMidi();
+        dvui.refresh(null, @src(), null);
+    }
+
+    fn moveMidi(self: *App, target: midi_map.Target, value: f32) void {
+        if (target.lane >= self.grid.items.len) return;
+        if (target.param.band()) |band| {
+            const current = self.transport.eqOf(target.lane) orelse return;
+            self.transport.setEqNode(target.lane, band, value, current.freq_hz[band]);
+        } else switch (target.param) {
+            .trim => self.transport.setTrim(target.lane, value),
+            .master_bpm => {
+                self.master_bpm = value;
+                self.transport.setTempo(value);
+            },
+            else => {},
+        }
+        dvui.refresh(null, @src(), null);
+    }
+
     pub fn loadKeys(self: *App, home: ?[]const u8, config_home: ?[]const u8) void {
         const path = keys.defaultPath(self.allocator, home, config_home) catch return;
         defer self.allocator.free(path);
