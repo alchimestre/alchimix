@@ -15,6 +15,8 @@ const hit = @import("hit.zig");
 const lsd = @import("lsd.zig");
 const mushroom = @import("mushroom.zig");
 const playlists = @import("playlists.zig");
+const keys = @import("keys.zig");
+const undo_mod = @import("undo.zig");
 const wave_colour = @import("wave_colour.zig");
 
 const Track = pl.track.Track;
@@ -352,6 +354,10 @@ pub const App = struct {
     /// A shift drag on an overview: the bar it started on, so the loop grows
     /// with the pointer.
     loop_gesture: ?LoopGesture = null,
+    /// The edits U walks back through.
+    undo_history: undo_mod.Undo,
+    /// Key bindings, from the config file over the defaults.
+    bindings: keys.Bindings = .{},
     scale_hint: f32 = 1,
 
     /// Every visible row is a real widget, so the list is capped.
@@ -384,6 +390,7 @@ pub const App = struct {
             ),
             .crate = pl.crate.Crate.init(allocator),
             .hit_map = hit.HitMap.init(allocator),
+            .undo_history = .{ .allocator = allocator },
         };
         app.playlist_column.rows = library.playlists() catch &.{};
         return app;
@@ -405,6 +412,7 @@ pub const App = struct {
         self.query.deinit(self.allocator);
         self.bpm_text.deinit(self.allocator);
         self.playlist_column.deinit(self.allocator);
+        self.undo_history.deinit();
         self.crate.deinit();
     }
 
@@ -1379,6 +1387,7 @@ pub const App = struct {
         switch (next_action) {
             .remove => |index| {
                 if (self.crate.at(index)) |track| self.player.stopPreview(track.id);
+                self.noteCrate();
                 self.crate.remove(index) catch return;
                 self.transport.remove(index);
                 self.grid_dirty = true;
@@ -1458,10 +1467,14 @@ pub const App = struct {
                             continue;
                         }
                     }
-                    if (key.code != .space) continue;
-                    // A text field owns the keyboard: space types there.
+                    // A text field owns the keyboard: every key types there,
+                    // so undo never eats a character.
                     if (self.typing) continue;
-                    self.apply(.toggle_transport);
+                    const action = self.bindings.actionFor(@tagName(key.code)) orelse continue;
+                    switch (action) {
+                        .undo => self.undoLast(),
+                        .play => self.apply(.toggle_transport),
+                    }
                     event.handled = true;
                 },
                 else => {},
@@ -1712,6 +1725,7 @@ pub const App = struct {
                 dvui.refresh(null, @src(), null);
             },
             .drop_track => |drop| {
+                self.noteCrate();
                 _ = self.crate.insertAt(drop.gap, drop.track) catch return;
                 self.transport.insert(drop.gap);
                 self.grid_dirty = true;
@@ -1721,6 +1735,7 @@ pub const App = struct {
             },
             .move_block => |move| {
                 if (self.crate.at(move.from)) |track| self.player.stopPreview(track.id);
+                self.noteCrate();
                 self.crate.moveTo(move.from, move.gap) catch return;
                 self.transport.move(move.from, move.gap);
                 self.grid_dirty = true;
@@ -2282,7 +2297,63 @@ pub const App = struct {
         self.hit_map.append(rectFrom(chip.data().rectScaleFromParent().r), .clear);
     }
 
+    /// Reads the bindings file over the defaults; a missing or unreadable file
+    /// leaves the defaults, which is how the app runs before one exists.
+    pub fn loadKeys(self: *App, home: ?[]const u8, config_home: ?[]const u8) void {
+        const path = keys.defaultPath(self.allocator, home, config_home) catch return;
+        defer self.allocator.free(path);
+        const bytes = std.Io.Dir.cwd().readFileAlloc(self.io, path, self.allocator, .limited(64 * 1024)) catch return;
+        defer self.allocator.free(bytes);
+        self.bindings = keys.parse(bytes);
+    }
+
+    /// Remembers the crate as it is, so the edit that follows can be walked
+    /// back. Called before every crate change.
+    fn noteCrate(self: *App) void {
+        var tracks: [256]Track = undefined;
+        const count = @min(self.crate.len(), tracks.len);
+        for (0..count) |index| {
+            if (self.crate.at(index)) |track| tracks[index] = track.*;
+        }
+        self.undo_history.pushCrate(tracks[0..count], self.crate.seed orelse 0);
+    }
+
+    fn undoLast(self: *App) void {
+        const change = self.undo_history.pop() orelse return;
+        defer change.deinit(self.allocator);
+        switch (change) {
+            .crate => |restore| self.restoreCrate(restore.tracks, restore.seed),
+            .renamed => |rename| {
+                self.library.renamePlaylist(rename.id, rename.name) catch return;
+                self.playlist_column.rows = self.library.playlists() catch self.playlist_column.rows;
+            },
+            .deleted => |playlist| {
+                self.library.createPlaylist(playlist.name, playlist.track_ids) catch return;
+                self.playlist_column.rows = self.library.playlists() catch self.playlist_column.rows;
+            },
+        }
+        dvui.refresh(null, @src(), null);
+    }
+
+    /// Puts the crate back the way it was, with the transport rebuilt from it
+    /// so the lanes match the rows.
+    fn restoreCrate(self: *App, tracks: []const Track, seed: usize) void {
+        self.player.stopAll();
+        self.preview_pending = null;
+        self.transport.stopAll();
+        self.transport.beginSync();
+        self.crate.clear();
+        for (tracks) |track| _ = self.crate.insertAt(self.crate.len(), track) catch break;
+        if (tracks.len > 0) self.crate.setSeed(@min(seed, tracks.len - 1));
+        self.transport.endSync();
+        self.grid_dirty = true;
+        self.selected.clearRetainingCapacity();
+        self.played = .{};
+        self.refresh() catch {};
+    }
+
     fn clearAll(self: *App) void {
+        self.noteCrate();
         self.player.stopAll();
         self.preview_pending = null;
         self.transport.stopAll();

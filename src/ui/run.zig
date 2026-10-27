@@ -39,6 +39,7 @@ pub fn run(init: std.process.Init, app: *App) !void {
 
     // dvui only accepts a font while a frame is open, so the first frame does it.
     var fonts_ready = false;
+    app.loadKeys(init.environ_map.get("HOME"), init.environ_map.get("XDG_CONFIG_HOME"));
 
     var interrupted = false;
     while (window_open) {
