@@ -486,15 +486,6 @@ pub const Transport = struct {
     }
 
     /// Moves one node: frequency and gain together, as the ball drags.
-    /// The lane's EQ as it stands, so a control can move one value and leave
-    /// the rest of the curve alone.
-    pub fn eqOf(self: *const Transport, index: usize) ?mixer.EqParams {
-        for (self.slots.items) |*slot| {
-            if (slot.index == index) return slot.eq;
-        }
-        return null;
-    }
-
     pub fn setEqNode(self: *Transport, index: usize, band: usize, gain_db: f32, freq_hz: f32) void {
         const slot = self.slotAt(index) orelse return;
         if (band >= mixer.band_count) return;

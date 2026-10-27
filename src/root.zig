@@ -14,7 +14,6 @@ pub const player = @import("audio/player.zig");
 
 pub const memory = @import("adapters/memory.zig");
 pub const rekordbox = @import("adapters/rekordbox.zig");
-pub const midi = @import("adapters/midi.zig");
 
 test {
     @import("std").testing.refAllDecls(@This());
