@@ -1682,7 +1682,15 @@ pub const App = struct {
                 } else {
                     self.transport.start(index, .next_bar);
                     self.played.remember(self.grid.items[index].track_id);
-
+                    // With nothing chosen, the track you press play on is the
+                    // tempo: the grid and the effects should follow it, not
+                    // whatever the last seed left behind.
+                    if (self.crate.seed == null and !self.master_locked) {
+                        if (self.bpmOf(index)) |bpm| {
+                            self.master_bpm = bpm;
+                            self.transport.setTempo(self.masterBpm());
+                        }
+                    }
                 }
                 dvui.refresh(null, @src(), null);
             },
@@ -1717,30 +1725,30 @@ pub const App = struct {
         }
     }
 
+    /// The tempo a lane runs at: the analysed grid first, then the tag.
+    fn bpmOf(self: *const App, index: usize) ?f32 {
+        if (index >= self.grid.items.len) return null;
+        if (self.grid.items[index].analysis) |*analysis| {
+            if (analysis.bpm() > 0) return analysis.bpm();
+        }
+        if (self.crate.at(index)) |track| {
+            if (track.bpm > 0) return @floatCast(track.bpm);
+        }
+        return null;
+    }
 
     fn masterBpm(self: *const App) f32 {
         // Autoplay hands the tempo to the track it is playing.
         if (self.autoplay_on) {
             if (self.autoplayLane()) |index| {
-                if (index < self.grid.items.len) {
-                    if (self.grid.items[index].analysis) |*analysis| {
-                        if (analysis.bpm() > 0) return analysis.bpm();
-                    }
-                }
-                if (self.crate.at(index)) |track| {
-                    if (track.bpm > 0) return @floatCast(track.bpm);
-                }
+                if (self.bpmOf(index)) |bpm| return bpm;
             }
         }
         if (!self.master_locked) return self.master_bpm;
         // The grid is the tempo the audio actually follows, so the clock must
         // use it: a tag that disagrees would make every bar drift.
         if (self.crate.seed) |seed| {
-            if (seed < self.grid.items.len) {
-                if (self.grid.items[seed].analysis) |*analysis| {
-                    if (analysis.bpm() > 0) return analysis.bpm();
-                }
-            }
+            if (self.bpmOf(seed)) |bpm| return bpm;
         }
         if (self.crate.seedTrack()) |track| {
             if (track.bpm > 0) return @floatCast(track.bpm);
