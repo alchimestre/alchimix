@@ -305,9 +305,6 @@ pub const App = struct {
     /// How far the window may wander from the scale the slider set: the same
     /// role `lane_wander_limit` plays for the ring count, but adjustable.
     window_wander_limit: f32 = 0.45,
-    /// Where the gate slider sits between the kick floor and the full band, so
-    /// a quiet mix stays dark. 0 keeps the old behaviour.
-    heartbeat_gate: f32 = 0,
     /// How far the fold leans on colour rather than the frame: the shade it
     /// dims to, the wash under the lanes, the share of the fills painted back
     /// and the chroma they are pushed to all follow it.
@@ -837,10 +834,6 @@ pub const App = struct {
         });
         defer row.deinit();
 
-        if (self.sliderRow("gate", self.heartbeat_gate, 7249)) |fraction| {
-            self.heartbeat_gate = fraction;
-            dvui.refresh(null, @src(), null);
-        }
         self.heartbeatChip();
         self.pauseChip();
     }
@@ -938,7 +931,7 @@ pub const App = struct {
             self.transport.spectrum(index, &spectrum);
             for (spectrum[0..kick_bins]) |band| bass = @max(bass, band);
         }
-        self.beat_power = beatFollow(self.beat_power, bass, gateFromFraction(self.heartbeat_gate), delta);
+        self.beat_power = beatFollow(self.beat_power, bass, delta);
     }
 
     /// A label with a slider hard against the right edge. Returns the new
@@ -3290,20 +3283,14 @@ const lane_wander_ease: f32 = 3.4;
 /// The kick: the loudest of the lowest bands, once past the floor.
 const kick_bins: usize = 3;
 const kick_floor: f32 = 0.34;
-
-/// The gate slider reaches from the kick floor, where nothing is held back, to
-/// the full band, where only the loudest kick opens the pulse.
-fn gateFromFraction(fraction: f32) f32 {
-    return kick_floor + std.math.clamp(fraction, 0, 1) * (1 - kick_floor);
-}
 const kick_fall: f32 = 0.18;
 const kick_rise: f32 = 0.05;
 
 /// One step of the kick follower: a rise of a few tens of milliseconds so the
 /// jump is not a step, and a tail short enough that the next kick lands on a
 /// settled frame.
-fn beatFollow(previous: f32, bass: f32, gate: f32, delta: f32) f32 {
-    const target = if (bass < gate) 0 else std.math.clamp((bass - kick_floor) / (1 - kick_floor), 0, 1);
+fn beatFollow(previous: f32, bass: f32, delta: f32) f32 {
+    const target = std.math.clamp((bass - kick_floor) / (1 - kick_floor), 0, 1);
     const span = @max(delta, 0);
     const rate = if (target > previous) kick_rise else kick_fall;
     return previous + (target - previous) * (1 - @exp(-span / rate));
@@ -3673,16 +3660,16 @@ test "a kick opens the colour and thickens the wash" {
 
 test "a kick swells over a few frames and is gone within a beat" {
     var level: f32 = 0;
-    for (0..8) |_| level = beatFollow(level, 0.9, kick_floor, @as(f32, 1) / 120);
+    for (0..8) |_| level = beatFollow(level, 0.9, @as(f32, 1) / 120);
     try std.testing.expect(level > 0.55);
     try std.testing.expect(level < 0.95);
 
-    const within_a_beat = beatFollow(level, 0, kick_floor, 0.2);
+    const within_a_beat = beatFollow(level, 0, 0.2);
     try std.testing.expect(within_a_beat < level * 0.4);
-    try std.testing.expect(beatFollow(within_a_beat, 0, kick_floor, kick_fall) < within_a_beat);
+    try std.testing.expect(beatFollow(within_a_beat, 0, kick_fall) < within_a_beat);
 
     // Rumble below the floor never starts a pulse.
-    try std.testing.expectEqual(@as(f32, 0), beatFollow(0, 0.3, kick_floor, 0.016));
+    try std.testing.expectEqual(@as(f32, 0), beatFollow(0, 0.3, 0.016));
 }
 
 test "the wash takes the hue opposite the lane" {
@@ -3806,23 +3793,4 @@ test "each sort state puts the tempo it names at the head" {
     // Off leaves the ranking the source produced alone.
     sortRanked(.none, &list);
     try std.testing.expectEqual(@as(u64, 1), list[0].track.id);
-}
-
-test "a raised gate keeps a quiet kick dark" {
-    // The same bass opens the pulse with the slider at rest and not above it.
-    try std.testing.expect(beatFollow(0, 0.5, kick_floor, 0.016) > 0);
-    try std.testing.expectEqual(@as(f32, 0), beatFollow(0, 0.5, 0.6, 0.016));
-
-    // A pulse that is already lit falls back once the bass drops under the
-    // gate, even though it is above the floor.
-    var level: f32 = 0;
-    for (0..8) |_| level = beatFollow(level, 0.9, kick_floor, @as(f32, 1) / 120);
-    try std.testing.expect(level > 0.55);
-    try std.testing.expect(beatFollow(level, 0.4, 0.6, 0.2) < level * 0.5);
-}
-
-test "the gate slider spans the floor to the whole band" {
-    try std.testing.expectEqual(kick_floor, gateFromFraction(0));
-    try std.testing.expectEqual(@as(f32, 1), gateFromFraction(1));
-    try std.testing.expect(gateFromFraction(0.5) > kick_floor);
 }
