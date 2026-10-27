@@ -86,6 +86,18 @@ tracks stay in the collection. A folder that still holds playlists is not offere
 for deletion. Intelligent playlists and rekordbox's own `CUE Analysis Playlist`
 entries are not shown.
 
+`U` walks back through the crate and playlist edits one at a time, newest first;
+it types a `u` instead while a text field holds focus. Keys come from
+`$XDG_CONFIG_HOME/alchimix/keys`, or `~/.config/alchimix/keys`, one `name = key`
+per line over the built-in defaults:
+
+```
+# keys
+undo = u
+play = space
+```
+
+
 ## Editing a crate
 
 Drag a row from the left column into the canvas to insert it; a click alone adds

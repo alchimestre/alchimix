@@ -136,6 +136,13 @@ pub const Panel = struct {
             self.cancelRename(app);
             return;
         }
+        // Keep the name it had, so U can put it back.
+        for (self.rows) |row| {
+            if (std.mem.eql(u8, row.id, id)) {
+                app.undo_history.pushRenamed(row.id, row.name);
+                break;
+            }
+        }
         app.library.renamePlaylist(id, name) catch {
             self.cancelRename(app);
             return;
@@ -318,6 +325,16 @@ pub const Panel = struct {
     /// opened from it keeps its rows and simply stops writing back.
     pub fn commitDelete(self: *Panel, app: *App) void {
         const id = self.delete_playlist orelse return;
+        // Keep what the playlist held: a delete takes its rows with it, and
+        // only the tracks can bring them back.
+        for (self.rows) |row| {
+            if (!std.mem.eql(u8, row.id, id)) continue;
+            if (app.library.playlistTracks(app.allocator, id)) |ids| {
+                app.undo_history.pushDeleted(row.name, ids);
+                app.allocator.free(ids);
+            } else |_| {}
+            break;
+        }
         app.library.deletePlaylist(id) catch {
             self.outcome = .failed;
             self.outcome_until = secondsNow() + flash_seconds;
