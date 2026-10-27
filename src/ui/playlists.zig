@@ -426,7 +426,8 @@ pub const Panel = struct {
         });
         if (self.rename_focus) {
             dvui.focusWidget(entry.data().id, null, null);
-            entry.textLayout.selection.moveCursor(self.rename_text.items.len, false);
+            // A rename usually replaces the name, so typing overwrites it.
+            entry.textLayout.selection.selectAll();
             self.rename_focus = false;
         }
         app.noteTyping(entry.data().id);
