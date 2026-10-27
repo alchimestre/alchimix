@@ -2992,15 +2992,27 @@ fn drawTriangle(allocator: std.mem.Allocator, x: f32, y: f32, size: f32, points_
     dvui.Path.fillConvex(builder.build(), .{ .color = .{ .color = color } });
 }
 
+/// The same rect with every edge on a whole pixel. An edge between two pixels
+/// leaves one half-covered column, which reads as a stair step at 1x.
+pub fn snappedRect(x: f32, y: f32, w: f32, h: f32) dvui.Rect.Physical {
+    const left: f32 = @round(x);
+    const top: f32 = @round(y);
+    const right: f32 = @round(x + w);
+    const bottom: f32 = @round(y + h);
+    return .{
+        .x = left,
+        .y = top,
+        .w = @max(1, right - left),
+        .h = @max(1, bottom - top),
+    };
+}
+
 pub fn fillRect(allocator: std.mem.Allocator, x: f32, y: f32, w: f32, h: f32, color: dvui.Color) void {
     var builder = dvui.Path.Builder.init(allocator);
     defer builder.deinit();
 
-    builder.addPoint(.{ .x = x, .y = y });
-    builder.addPoint(.{ .x = x + w, .y = y });
-    builder.addPoint(.{ .x = x + w, .y = y + h });
-    builder.addPoint(.{ .x = x, .y = y + h });
-
+    builder.points.clearRetainingCapacity();
+    addQuad(&builder, snappedRect(x, y, w, h));
     dvui.Path.fillConvex(builder.build(), .{ .color = .{ .color = color } });
 }
 
@@ -3120,11 +3132,15 @@ pub fn mixColor(a: dvui.Color, b: dvui.Color, t: f32) dvui.Color {
 /// columns per frame and allocating a path for each one stalls the UI.
 pub fn fillRectInto(builder: *dvui.Path.Builder, x: f32, y: f32, w: f32, h: f32, color: dvui.Color) void {
     builder.points.clearRetainingCapacity();
-    builder.addPoint(.{ .x = x, .y = y });
-    builder.addPoint(.{ .x = x + w, .y = y });
-    builder.addPoint(.{ .x = x + w, .y = y + h });
-    builder.addPoint(.{ .x = x, .y = y + h });
+    addQuad(builder, snappedRect(x, y, w, h));
     dvui.Path.fillConvex(builder.build(), .{ .color = .{ .color = color } });
+}
+
+fn addQuad(builder: *dvui.Path.Builder, rect: dvui.Rect.Physical) void {
+    builder.addPoint(.{ .x = rect.x, .y = rect.y });
+    builder.addPoint(.{ .x = rect.x + rect.w, .y = rect.y });
+    builder.addPoint(.{ .x = rect.x + rect.w, .y = rect.y + rect.h });
+    builder.addPoint(.{ .x = rect.x, .y = rect.y + rect.h });
 }
 
 /// A window-sized texture for an effect layer, reused until the window resizes.
@@ -3628,4 +3644,19 @@ test "a time under a minute still reads as m:ss" {
     try std.testing.expectEqualStrings("0:59", clockText(59_900, &buffer));
     try std.testing.expectEqualStrings("2:03", clockText(123_000, &buffer));
     try std.testing.expectEqualStrings("1:02:03", clockText(3_723_000, &buffer));
+}
+
+test "a rect at a fractional edge snaps to whole pixels" {
+    const whole = snappedRect(10.4, 20.6, 3.3, 2.2);
+    try std.testing.expectEqual(@as(f32, 10), whole.x);
+    try std.testing.expectEqual(@as(f32, 21), whole.y);
+    // The right and bottom edges are rounded, not the sizes, so both land on
+    // a pixel.
+    try std.testing.expectEqual(@as(f32, 14), whole.x + whole.w);
+    try std.testing.expectEqual(@as(f32, 23), whole.y + whole.h);
+
+    // A hairline keeps a pixel to draw in.
+    const hairline = snappedRect(5, 5, 0.1, 0.1);
+    try std.testing.expectEqual(@as(f32, 1), hairline.w);
+    try std.testing.expectEqual(@as(f32, 1), hairline.h);
 }
