@@ -97,6 +97,21 @@ undo = u
 play = space
 ```
 
+A controller works the same way. Shift-click an EQ node or a trim slider to arm
+it, then move any knob: that control now drives the parameter, and the range of
+the knob is the full range of the parameter. The table of assignments sits beside
+the key bindings in `$XDG_CONFIG_HOME/alchimix/midi` as `channel control
+parameter lane`:
+
+```
+# channel control parameter lane
+0 7 trim 2
+1 21 eq_low 0
+```
+
+Controls that are not in the table do nothing. Controllers plugged in after the
+app starts need a restart.
+
 
 ## Editing a crate
 
