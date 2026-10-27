@@ -30,14 +30,6 @@ pub fn build(b: *std.Build) void {
     sdl_translate.addIncludePath(.{ .cwd_relative = b.pathJoin(&.{ sdl_prefix, "include" }) });
     const sdlc = sdl_translate.createModule();
 
-    // Controller input comes from CoreMIDI, which only exists on macOS.
-    const midi_translate = b.addTranslateC(.{
-        .root_source_file = b.path("src/midi.h"),
-        .target = target,
-        .optimize = optimize,
-    });
-    const midic = midi_translate.createModule();
-
     const core = b.addModule("alchimix", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
@@ -45,7 +37,6 @@ pub fn build(b: *std.Build) void {
         .imports = &.{
             .{ .name = "c", .module = sqlcipher },
             .{ .name = "sdl3-c", .module = sdlc },
-            .{ .name = "midi-c", .module = midic },
         },
     });
     core.addLibraryPath(.{ .cwd_relative = b.pathJoin(&.{ prefix, "lib" }) });
@@ -54,10 +45,6 @@ pub fn build(b: *std.Build) void {
     // the stream pointer comes back from a mismatched dynapi table.
     core.addLibraryPath(.{ .cwd_relative = b.pathJoin(&.{ sdl_prefix, "lib" }) });
     core.linkSystemLibrary("SDL3", .{});
-    if (target.result.os.tag == .macos) {
-        core.linkFramework("CoreMIDI", .{});
-        core.linkFramework("CoreFoundation", .{});
-    }
     core.link_libc = true;
 
     const exe = b.addExecutable(.{
