@@ -1512,6 +1512,17 @@ pub const App = struct {
         switch (mouse.action) {
             .press => {
                 if (mouse.button == .right) {
+                    self.pointer = p;
+                    // Shift on a loop drops it, on either surface that draws it.
+                    if (mouse.mod.shift()) {
+                        if (self.loopUnderPointer()) |slot| {
+                            self.transport.clearLoop(slot);
+                            self.loop_edge = null;
+                            self.loop_gesture = null;
+                            dvui.refresh(null, @src(), null);
+                            return;
+                        }
+                    }
                     // Shift on a playlist row arms the chip to delete that row.
                     const target = self.hit_map.hit(p);
                     if (mouse.mod.shift() and target != null and target.? == .playlist) {
@@ -1570,6 +1581,7 @@ pub const App = struct {
                 }
             },
             .motion => {
+                self.showLoopCursor(mouse.mod.shift());
                 if (self.drag.motion(p, 6 * self.scale_hint, self.canvas, self.block_rects[0..self.block_count])) {
                     dvui.refresh(null, @src(), null);
                 }
@@ -2328,12 +2340,22 @@ pub const App = struct {
         dvui.refresh(null, @src(), null);
     }
 
-    /// Grabs the loop edge nearest the pointer on this lane's waveform. A lane
-    /// without a loop has no edge to grab, and the press stays a jog.
-    fn grabLoopEdge(self: *App, slot: usize) bool {
-        const loop = self.transport.loopOf(slot) orelse return false;
-        const rect = self.hit_map.laneRect(slot) orelse return false;
-        const edge = loopEdgeAt(
+    /// A resize cursor over an edge that a shift press would grab, so the
+    /// gesture is visible before it is used.
+    fn showLoopCursor(self: *App, shift: bool) void {
+        if (!shift) return;
+        for (0..self.grid.items.len) |slot| {
+            if (self.loopEdgeUnderPointer(slot) != null) {
+                dvui.cursorSet(.arrow_w_e);
+                return;
+            }
+        }
+    }
+
+    fn loopEdgeUnderPointer(self: *App, slot: usize) ?LoopEdge {
+        const loop = self.transport.loopOf(slot) orelse return null;
+        const rect = self.hit_map.laneRect(slot) orelse return null;
+        return loopEdgeAt(
             self.pointer.x,
             rect.x,
             rect.w,
@@ -2342,9 +2364,31 @@ pub const App = struct {
             loop.begin,
             loop.end,
             10 * self.scale_hint,
-        ) orelse return false;
+        );
+    }
+
+    /// Grabs the loop edge nearest the pointer on this lane's waveform. A lane
+    /// without a loop has no edge to grab, and the press stays a jog.
+    fn grabLoopEdge(self: *App, slot: usize) bool {
+        const edge = self.loopEdgeUnderPointer(slot) orelse return false;
         self.loop_edge = .{ .slot = slot, .edge = edge };
         return true;
+    }
+
+    /// The lane whose loop covers the pointer, on either the waveform or the
+    /// overview: a shift right-click there drops the loop.
+    fn loopUnderPointer(self: *App) ?usize {
+        for (0..self.grid.items.len) |slot| {
+            const loop = self.transport.loopOf(slot) orelse continue;
+            if (self.hit_map.laneRect(slot)) |rect| {
+                if (bandCovers(self.pointer.x, self.pointer.y, rect, self.laneStart(slot), self.visibleBeats(), loop)) return slot;
+            }
+            if (self.hit_map.navRect(slot)) |rect| {
+                const total: f32 = @floatFromInt(@max(1, totalBeats(&self.grid.items[slot])));
+                if (bandCovers(self.pointer.x, self.pointer.y, rect, 0, total, loop)) return slot;
+            }
+        }
+        return null;
     }
 
     /// Moves the held edge to the bar under the pointer, leaving the other one
@@ -3515,6 +3559,15 @@ fn loopEdgeAt(x: f32, rect_x: f32, rect_w: f32, view: f32, visible: f32, begin: 
     return if (to_begin <= to_end) LoopEdge.begin else LoopEdge.end;
 }
 
+/// Whether a point sits inside a loop band drawn for a window of the track.
+fn bandCovers(x: f32, y: f32, rect: hit.Rect, view: f32, visible: f32, loop: pl.transport.Transport.Loop) bool {
+    if (rect.w <= 0 or visible <= 0) return false;
+    if (y < rect.y or y > rect.y + rect.h) return false;
+    const from = rect.x + (loop.begin - view) / visible * rect.w;
+    const to = rect.x + (loop.end - view) / visible * rect.w;
+    return x >= from and x <= to;
+}
+
 /// The loop after one edge lands on `bar`. The edges never cross and never sit
 /// closer than a bar, so a drag cannot collapse the loop to nothing.
 fn resizedLoop(loop: pl.transport.Transport.Loop, bar: f32, edge: LoopEdge, total_beats: f32) pl.transport.Transport.Loop {
@@ -3525,7 +3578,7 @@ fn resizedLoop(loop: pl.transport.Transport.Loop, bar: f32, edge: LoopEdge, tota
         },
         .end => .{
             .begin = loop.begin,
-            .end = std.math.clamp(bar + 4, loop.begin + 4, @max(total_beats, loop.begin + 4)),
+            .end = std.math.clamp(bar, loop.begin + 4, @max(total_beats, loop.begin + 4)),
         },
     };
 }
@@ -4100,7 +4153,12 @@ test "dragging one edge leaves the other where it was" {
 
     const end_pulled = resizedLoop(loop, 24, .end, 64);
     try std.testing.expectEqual(@as(f32, 8), end_pulled.begin);
-    try std.testing.expectEqual(@as(f32, 28), end_pulled.end);
+    try std.testing.expectEqual(@as(f32, 24), end_pulled.end);
+
+    // The end edge follows the pointer, so a loop can be shortened too.
+    const shortened = resizedLoop(loop, 12, .end, 64);
+    try std.testing.expectEqual(@as(f32, 8), shortened.begin);
+    try std.testing.expectEqual(@as(f32, 12), shortened.end);
 
     // Neither edge can cross the other, and a loop never shrinks under a bar.
     const squashed_begin = resizedLoop(loop, 20, .begin, 64);
@@ -4115,6 +4173,20 @@ test "dragging one edge leaves the other where it was" {
     const past_end = resizedLoop(loop, 60, .end, 20);
     try std.testing.expectEqual(@as(f32, 8), past_end.begin);
     try std.testing.expectEqual(@as(f32, 20), past_end.end);
+}
+
+test "the band covers the points inside the loop and nothing else" {
+    const rect = hit.Rect{ .x = 0, .y = 100, .w = 400, .h = 20 };
+    const loop = pl.transport.Transport.Loop{ .begin = 4, .end = 8 };
+    // Ten beats across 400 points: the band runs from 160 to 320.
+    try std.testing.expect(bandCovers(200, 110, rect, 0, 10, loop));
+    try std.testing.expect(bandCovers(160, 100, rect, 0, 10, loop));
+    try std.testing.expect(!bandCovers(150, 110, rect, 0, 10, loop));
+    try std.testing.expect(!bandCovers(330, 110, rect, 0, 10, loop));
+    // Outside the band's height, the pointer is on something else.
+    try std.testing.expect(!bandCovers(200, 90, rect, 0, 10, loop));
+    // A scrolled window moves the band with the audio.
+    try std.testing.expect(bandCovers(40, 110, rect, 3, 10, loop));
 }
 
 test "the sort chip walks off, highest first, lowest first, off" {
