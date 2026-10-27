@@ -553,10 +553,28 @@ pub const Transport = struct {
             self.clock_base_ns = now;
         }
         self.bpm = bpm;
+
+        // A new rate only reaches a decoder through a restart, so every
+        // playing lane restarts. With more than one lane they restart together
+        // on the next bar: an immediate restart lets each decoder enter when
+        // its own buffer is ready, which is how two synced lanes end up a
+        // block apart. A lone lane has no phase to keep, so it restarts now.
+        const together = self.playingCount() > 1;
+        const at = if (together) self.nextBarAt(now) else 0;
         for (self.slots.items) |*slot| {
             if (!slot.playing) continue;
+            if (at != 0) {
+                // Carry the beat forward to the bar, so the audio that comes
+                // back is the audio that would have played there.
+                const ahead: f32 = @floatFromInt(at - now);
+                slot.beat = @min(slot.total_beats, slot.beat + ahead * 1e-9 * (bpm / 60));
+                slot.start_at_ns = at;
+                slot.rejoin = true;
+            } else {
+                slot.start_at_ns = 0;
+                slot.rejoin = false;
+            }
             slot.start_latched = false;
-            slot.start_at_ns = 0;
             slot.restart = true;
         }
         self.pushMix();
@@ -1605,6 +1623,7 @@ test "tempo change folds the position before restarting" {
     t.sync();
     try expectApprox(2, t.beat(0));
 
+    // The only lane restarts at once; its position is carried, not reset.
     t.setTempo(240);
     try expectApprox(2, t.beat(0));
     const retuned = fake.playingLane(1) orelse return error.NoLane;
@@ -1972,4 +1991,63 @@ test "a lane re-resolved at a new grid takes the new rate at once" {
     // The mixer was restarted at the new rate, not merely told about it.
     const entry = fake.findByTrack(1) orelse return error.NoLane;
     try expectApprox(120.0 / 128.0, entry.tempo);
+}
+
+test "a lone lane takes a tempo change at once" {
+    var fake = FakeOutput{};
+    var clock = TestClock{};
+    var t = setup(&fake, &clock);
+    defer t.deinit();
+
+    t.beginSync();
+    t.resolve(0, laneInfo(1));
+    t.endSync();
+    t.start(0, .now);
+    fake.markStarted(1, 0);
+    clock.now = 1_000_000_000;
+    t.sync();
+
+    t.setTempo(126);
+    const lane = fake.playingLane(1) orelse return error.NoLane;
+    // Nothing to stay in phase with, so no wait for a bar.
+    try testing.expectEqual(@as(i128, 0), lane.start_at_ns);
+    try testing.expect(lane.restart);
+}
+
+test "a tempo change restarts every lane together on the next bar" {
+    var fake = FakeOutput{};
+    var clock = TestClock{};
+    var t = setup(&fake, &clock);
+    defer t.deinit();
+
+    t.beginSync();
+    t.resolve(0, laneInfo(1));
+    t.resolve(1, laneInfo(2));
+    t.endSync();
+    t.startAll();
+
+    fake.markStarted(1, 0);
+    fake.markStarted(2, 0);
+    clock.now = 1_000_000;
+    t.sync();
+    clock.now = 2_100_000_000;
+    t.sync();
+    const before = t.beat(0);
+    try expectApprox(4.2, before);
+
+    t.setTempo(126);
+    const first = fake.playingLane(1) orelse return error.NoLane;
+    const second = fake.playingLane(2) orelse return error.NoLane;
+
+    // One shared instant, on a bar, for both lanes.
+    try testing.expect(first.restart and second.restart);
+    try testing.expectEqual(first.start_at_ns, second.start_at_ns);
+    try testing.expect(first.start_at_ns > clock.now);
+    // Beat 4.2 is 3.8 beats short of the bar, at 126 BPM.
+    const until_bar: f64 = 3.8 * 60.0 / 126.0;
+    try testing.expect(@abs(@as(f64, @floatFromInt(first.start_at_ns - clock.now)) * 1e-9 - until_bar) < 0.01);
+
+    // The lanes keep their places: each beat moved forward to that bar.
+    try expectApprox(8, t.beat(0));
+    try expectApprox(8, t.beat(1));
 }
