@@ -34,6 +34,9 @@ zig build test        # domain, transport and pointer tests
 `ffplay`. While the grid is playing, a preview waits for the next master bar and
 matches the master tempo. Pause stops the process and remembers the offset, so play resumes from
 there; a stopped process would keep the audio device open. Starting another track stops the first.
+The master tempo is the analysed tempo of the seeded track, or of the lane you
+start when the crate has no seed, so the bars and the effect clock follow the
+audio rather than the tag.
 
 Each block carries a bar along its bottom that fills as the snippet runs.
 
