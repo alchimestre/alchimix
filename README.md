@@ -47,8 +47,10 @@ loops four bars from the bar under the pointer, a shift drag loops however many
 bars it covers, and a shift press on a live loop clears it; the loop draws as a
 green band and wraps on its bar while other lanes keep running. Shift-drag
 either edge of the band on the lane waveform to move that edge; the other stays
-put and both land on bars. Every other start lands on a
-bar, so two lanes never sit half a bar apart. Each lane ends in a live spectrum
+put and both land on bars; the pointer turns into a resize arrow inside the grab
+zone while shift is held. Shift-right-click the band, on either surface, drops
+the loop. Every other start lands on a bar, so two lanes never sit half a bar
+apart. Each lane ends in a live spectrum
 with three draggable EQ nodes (low shelf, bell, high shelf); HPF, BPF and LPF
 presets load a shape, and clicking the active preset clears the EQ. A trim slider
 at the far right doubles as a level meter;
