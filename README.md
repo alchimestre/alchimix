@@ -50,7 +50,9 @@ at the far right doubles as a level meter;
 `M` under a lane's play button mutes it while the clock keeps running. The footer
 sets the waveform span (16, 32 or 64 beats) and the interface scale (`- 100% +`,
 75 to 150 %, clamped to what the window can hold), next to the master BPM. The
-waveform is tinted by rekordbox's three bands: kick red, mid green, high blue.
+waveform is tinted by rekordbox's three bands: kick red, mid green, high blue. Tracks
+whose analysis carries rekordbox's phrase marks show them under the overview as
+faint bands, one colour per phrase kind.
 
 `🍄` runs the same drift field at 0.45 strength with the same colour fringe and
 no flare, over an ASCII undergrowth: small mushrooms pop and grow, tall ones arrive in
