@@ -257,7 +257,19 @@ pub const App = struct {
     lane_goal: f32 = 0,
     lane_wait: f32 = 0,
     lane_rng: std.Random.DefaultPrng = .init(0x1a4e_5eed),
-
+    /// The same wander for the virtual window: it breathes in and out on its
+    /// own, as a fraction of the scale the slider set.
+    window_wander: f32 = 0,
+    window_goal: f32 = 0,
+    window_wait: f32 = 0,
+    window_rng: std.Random.DefaultPrng = .init(0x7a11_0eed),
+    /// Gaussian-ish blur on the window, 0 to 1. The bottom of the slider is no
+    /// blur at all.
+    blur: f32 = 0,
+    blur_target: ?dvui.Texture.Target = null,
+    /// How far the window may wander from the scale the slider set: the same
+    /// role `lane_wander_limit` plays for the ring count, but adjustable.
+    window_wander_limit: f32 = 0.45,
     /// How far the fold leans on colour rather than the frame: the shade it
     /// dims to, the wash under the lanes, the share of the fills painted back
     /// and the chroma they are pushed to all follow it.
@@ -312,7 +324,7 @@ pub const App = struct {
     const lane_panel_width: f32 = 380;
     /// Toolbar, the speed row under the chips, and the footer. Measured once and
     /// fixed: reading them back made a resize lag a frame and flicker.
-    const chrome_height: f32 = 184;
+    const chrome_height: f32 = 236;
 
     pub fn init(allocator: std.mem.Allocator, library: pl.library.Library, io: std.Io) !App {
         const mixer = try allocator.create(pl.mixer.Mixer);
@@ -419,7 +431,7 @@ pub const App = struct {
         self.colours.clearRetainingCapacity();
         if (!self.paused) {
             self.driftLanes();
-
+            self.driftWindow();
             self.pulseKick();
         }
         const previous = self.capture();
@@ -522,6 +534,31 @@ pub const App = struct {
         };
     }
 
+    /// Copies the frame into a smaller target. Reading that copy back over the
+    /// whole window is what softens it: one bilinear step for each pixel of the
+    /// downsample, so the slider's bottom is untouched and the top is a smear.
+    fn blurred(self: *App, arena: std.mem.Allocator, texture: dvui.Texture, size: dvui.Size.Physical, screen: dvui.RenderTarget) !dvui.Texture {
+        const factor = 1 + self.blur * (blur_max - 1);
+        const small = dvui.Size.Physical{
+            .w = @max(1, @round(size.w / factor)),
+            .h = @max(1, @round(size.h / factor)),
+        };
+        const target = try sizedTarget(&self.blur_target, small);
+        _ = dvui.RenderTarget.setAsCurrent(.{ .texture = target, .offset = .{} });
+        // The clip is still the window's, and the target is smaller; drawing
+        // with the larger scissor trips SDL's assertion.
+        dvui.clipSet(.{ .x = 0, .y = 0, .w = small.w, .h = small.h });
+        errdefer _ = dvui.RenderTarget.setAsCurrent(screen);
+        const mesh = try geom.quadMesh(arena, .{ .x = 0, .y = 0, .w = small.w, .h = small.h }, small);
+        try dvui.renderTriangles(.{
+            .vertexes = mesh.vertexes,
+            .indices = mesh.indices,
+            .bounds = .{ .x = 0, .y = 0, .w = small.w, .h = small.h },
+        }, texture);
+        _ = dvui.RenderTarget.setAsCurrent(screen);
+        dvui.clipSet(dvui.currentWindow().rect_pixels);
+        return dvui.textureFromTarget(target);
+    }
 
     fn blit(self: *App, target: dvui.Texture.Target, screen: dvui.RenderTarget) !void {
         const texture = try dvui.textureFromTarget(target);
@@ -547,9 +584,10 @@ pub const App = struct {
             try self.drawLook(texture, arena, size, stills);
         }
 
+        if (self.blur > 0) source = try self.blurred(arena, source, size, screen);
 
         if (self.effect.dmt != .off) {
-            try dmt.draw(source, arena, self.effect_clock, size, self.foldCanvas(), stills, self.foldShade(), 0, self.drawnRings(), self.beat_power, self.lane_mirrors);
+            try dmt.draw(source, arena, self.effect_clock, size, self.foldCanvas(), stills, self.foldShade(), 0, self.foldShape());
             try self.paintColours(arena, screen, size);
             // The colour pass folds the whole layer, so the controls come back
             // over it rather than being painted with lane colour.
@@ -587,7 +625,7 @@ pub const App = struct {
 
         _ = dvui.RenderTarget.setAsCurrent(screen);
         const layer_texture = try dvui.textureFromTarget(layer);
-        try dmt.draw(layer_texture, arena, self.effect_clock, size, self.foldCanvas(), &.{}, 1, 0, self.drawnRings(), self.beat_power, self.lane_mirrors);
+        try dmt.draw(layer_texture, arena, self.effect_clock, size, self.foldCanvas(), &.{}, 1, 0, self.foldShape());
     }
 
     /// LSD's output copy, kept for as long as both modes run.
@@ -595,10 +633,19 @@ pub const App = struct {
         return sizedTarget(&self.lsd_target, size);
     }
 
+    /// What the DMT sliders and shape chips set.
+    fn foldShape(self: *const App) dmt.FoldShape {
+        return .{
+            .ring_count = self.drawnRings(),
+            .heart = self.beat_power,
+            .mirrors = self.lane_mirrors,
+        };
+    }
 
     /// The virtual window the tunnel's geometry is laid out on.
     fn foldCanvas(self: *const App) dvui.Size.Physical {
-        return dmt.virtualSize(self.virtual_base, self.virtual_scale);
+        const swell = @max(0.2, 1 + self.window_wander + self.beat_power * dmt.window_pump);
+        return dmt.virtualSize(self.virtual_base, self.virtual_scale * swell);
     }
 
     /// The window's size in physical pixels, for the effects.
@@ -616,7 +663,8 @@ pub const App = struct {
         self.colour_target = null;
         if (self.lsd_target) |target| target.destroyLater();
         self.lsd_target = null;
-
+        if (self.blur_target) |target| target.destroyLater();
+        self.blur_target = null;
         dvui.refresh(null, @src(), null);
     }
 
@@ -638,6 +686,13 @@ pub const App = struct {
         dvui.refresh(null, @src(), null);
     }
 
+    /// Escape in LSD, mushroom or DMT: back to the plain view, transport
+    /// untouched.
+    fn clearEffects(self: *App) void {
+        self.effect.look = .none;
+        self.effect.dmt = .off;
+        self.dropEffects();
+    }
 
     /// The patches the effects leave alone: the mode chips, in physical pixels,
     /// with a pixel of margin so their borders are not pulled either.
@@ -725,12 +780,18 @@ pub const App = struct {
         });
         defer column.deinit();
 
-        if (self.sliderRow("speed", dmt.speedFraction(self.effect_speed), 7240)) |fraction| {
-            self.effect_speed = dmt.speedAt(fraction);
-            dvui.refresh(null, @src(), null);
+        if (self.effect.any()) {
+            if (self.sliderRow("speed", dmt.speedFraction(self.effect_speed), 7240)) |fraction| {
+                self.effect_speed = dmt.speedAt(fraction);
+                dvui.refresh(null, @src(), null);
+            }
         }
 
         if (self.effect.dmt != .off) {
+            if (self.sliderRow("wander", dmt.wanderFraction(self.window_wander_limit), 7247)) |fraction| {
+                self.window_wander_limit = dmt.wanderAt(fraction);
+                dvui.refresh(null, @src(), null);
+            }
 
             if (self.sliderRow("window", dmt.virtualFraction(self.virtual_scale), 7270)) |fraction| {
                 self.virtual_scale = dmt.virtualAt(fraction);
@@ -747,6 +808,10 @@ pub const App = struct {
                 dvui.refresh(null, @src(), null);
             }
 
+            if (self.sliderRow("blur", self.blur, 7248)) |fraction| {
+                self.blur = fraction;
+                dvui.refresh(null, @src(), null);
+            }
 
             if (self.sliderRow("mirror", dmt.mirrorsFraction(self.lane_mirrors), 7280)) |fraction| {
                 self.lane_mirrors = dmt.mirrorsAt(fraction);
@@ -833,6 +898,18 @@ pub const App = struct {
         self.lane_wander += (self.lane_goal - self.lane_wander) * ease;
     }
 
+    /// The same wander as the lane count, applied to the virtual window: a
+    /// goal every few seconds, eased towards, so the tunnel breathes.
+    fn driftWindow(self: *App) void {
+        const delta = std.math.clamp(dvui.currentWindow().secs_since_last_frame, 0, 0.25);
+        self.window_wait -= delta;
+        if (self.window_wait <= 0) {
+            self.window_goal = (self.window_rng.random().float(f32) - 0.5) * 2 * self.window_wander_limit;
+            self.window_wait = 5 + self.window_rng.random().float(f32) * 6;
+        }
+        const ease = 1 - @exp(-delta / lane_wander_ease);
+        self.window_wander += (self.window_goal - self.window_wander) * ease;
+    }
 
     /// The lane count the fold is actually drawn at.
     fn drawnRings(self: *const App) f32 {
@@ -1338,7 +1415,7 @@ pub const App = struct {
         // DMT runs on top of LSD, so a press follows the tunnel first and the
         // drift underneath it second.
         var shown = dvui.Point.Physical{ .x = p.x, .y = p.y };
-        if (self.effect.dmt != .off) shown = dmt.fold(shown, self.effect_clock, size, self.foldCanvas(), stills, 0, self.drawnRings(), self.beat_power, self.lane_mirrors);
+        if (self.effect.dmt != .off) shown = dmt.fold(shown, self.effect_clock, size, self.foldCanvas(), stills, 0, self.foldShape());
         switch (self.effect.look) {
             .drift => shown = lsd.sample(shown, self.effect_time, size, stills, 1),
             .mushroom => shown = lsd.sample(shown, self.effect_time, size, stills, mushroom.reach),
@@ -1369,6 +1446,11 @@ pub const App = struct {
                         }
                         if (self.playlist_column.delete_playlist != null) {
                             self.playlist_column.cancelDelete(self);
+                            event.handled = true;
+                            continue;
+                        }
+                        if (self.effect.any()) {
+                            self.clearEffects();
                             event.handled = true;
                             continue;
                         }
@@ -3087,7 +3169,7 @@ pub fn rectFrom(rect: dvui.Rect.Physical) hit.Rect {
 }
 
 /// How much one kick opens the colour up, on top of the colour slider.
-const kick_saturation: f32 = 0.5;
+const kick_saturation: f32 = 1.2;
 
 fn drawnRingsFor(base: f32, wander: f32) f32 {
     return std.math.clamp(base + wander, dmt.min_rings, dmt.max_rings);
@@ -3107,11 +3189,13 @@ const lane_wander_limit: f32 = 1.1;
 const lane_wander_ease: f32 = 3.4;
 
 /// The kick: the loudest of the lowest bands, once past the floor.
+/// Downsample factor the blur slider reaches at full travel.
+const blur_max: f32 = 6;
 
 const kick_bins: usize = 3;
-const kick_floor: f32 = 0.18;
-const kick_fall: f32 = 0.09;
-const kick_rise: f32 = 0.025;
+const kick_floor: f32 = 0.34;
+const kick_fall: f32 = 0.18;
+const kick_rise: f32 = 0.05;
 
 /// One step of the kick follower: a rise of a few tens of milliseconds so the
 /// jump is not a step, and a tail short enough that the next kick lands on a
@@ -3485,18 +3569,18 @@ test "a kick opens the colour and thickens the wash" {
     try std.testing.expectApproxEqAbs(washFor(0.6, 0) * 1.45, washFor(0.6, 1), 0.001);
 }
 
-test "a kick rises over a frame or two and is gone in a tenth of a second" {
+test "a kick swells over a few frames and is gone within a beat" {
     var level: f32 = 0;
-    for (0..4) |_| level = beatFollow(level, 0.9, @as(f32, 1) / 120);
-    try std.testing.expect(level > 0.45);
+    for (0..8) |_| level = beatFollow(level, 0.9, @as(f32, 1) / 120);
+    try std.testing.expect(level > 0.55);
     try std.testing.expect(level < 0.95);
 
-    const settled = beatFollow(level, 0, kick_fall);
-    try std.testing.expect(settled < level * 0.4);
-    try std.testing.expect(beatFollow(settled, 0, kick_fall) < settled);
+    const within_a_beat = beatFollow(level, 0, 0.2);
+    try std.testing.expect(within_a_beat < level * 0.4);
+    try std.testing.expect(beatFollow(within_a_beat, 0, kick_fall) < within_a_beat);
 
-    // The floor keeps silence and rumble at zero.
-    try std.testing.expectEqual(@as(f32, 0), beatFollow(0, 0.15, 0.016));
+    // Rumble below the floor never starts a pulse.
+    try std.testing.expectEqual(@as(f32, 0), beatFollow(0, 0.3, 0.016));
 }
 
 test "the wash takes the hue opposite the lane" {
