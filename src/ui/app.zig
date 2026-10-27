@@ -341,6 +341,9 @@ pub const App = struct {
     pending_select: ?usize = null,
     /// Height of the window's content, so the list can fill what is left.
     viewport_h: f32 = 600,
+    /// The interface scale the reader asked for; `fitScale` may lower it to
+    /// what the window can hold.
+    ui_scale: f32 = 1,
     scale_hint: f32 = 1,
 
     /// Every visible row is a real widget, so the list is capped.
@@ -470,6 +473,7 @@ pub const App = struct {
         const root_scale = root.data().contentRectScale();
         self.viewport_h = root_scale.r.h / root_scale.s;
         self.scale_hint = root_scale.s;
+        self.applyScale();
 
         self.player.poll();
         self.transport.setTempo(self.masterBpm());
@@ -1593,6 +1597,9 @@ pub const App = struct {
             },
             .step_master_up => self.stepMaster(1),
             .step_master_down => self.stepMaster(-1),
+            .step_scale_up => self.stepScale(scale_step),
+            .step_scale_down => self.stepScale(-scale_step),
+            .reset_scale => self.setScale(1),
             .toggle_master_lock => {
                 self.master_locked = !self.master_locked;
                 if (!self.master_locked) self.master_bpm = self.masterBpm();
@@ -1859,6 +1866,86 @@ pub const App = struct {
         self.master_text.appendSlice(self.allocator, text) catch {};
         self.transport.setTempo(self.masterBpm());
         dvui.refresh(null, @src(), null);
+    }
+
+    fn setScale(self: *App, scale: f32) void {
+        self.ui_scale = std.math.clamp(scale, scale_min, scale_max);
+        self.applyScale();
+        dvui.refresh(null, @src(), null);
+    }
+
+    fn stepScale(self: *App, delta: f32) void {
+        self.setScale(@round((self.ui_scale + delta) * 100) / 100);
+    }
+
+    /// dvui multiplies every point in the layout by the window's content scale,
+    /// so one write reaches fonts, chips, lanes and chrome together.
+    fn applyScale(self: *App) void {
+        const window = dvui.currentWindow();
+        const scaled = fitScale(self.ui_scale, self.viewport_h * self.scale_hint);
+        if (@abs(window.content_scale - scaled) > 0.001) window.content_scale = scaled;
+    }
+
+    /// `- 100 % +`, the only control the interface scale has.
+    fn frameScaleControl(self: *App) void {
+        var group = dvui.box(@src(), .{ .dir = .horizontal }, .{
+            .margin = .{ .x = 12, .y = 0 },
+            .padding = .{ .x = 2, .y = 0 },
+            .gravity_y = 0.5,
+            .background = true,
+            .color_fill = .{ .color = Palette.field },
+            .id_extra = 118,
+        });
+        defer group.deinit();
+
+        self.scaleChip(0, "\u{2212}", .scale_down);
+        {
+            const percent: f32 = @round(fitScale(self.ui_scale, self.viewport_h * self.scale_hint) * 100);
+            var buffer: [4]u8 = undefined;
+            const text = std.fmt.bufPrint(&buffer, "{d:.0}%", .{percent}) catch "";
+            var cell = dvui.box(@src(), .{ .dir = .horizontal }, .{
+                .min_size_content = .{ .w = 42, .h = 24 },
+                .margin = .{ .x = 1, .y = 0 },
+                .background = true,
+                .color_fill = .{ .color = Palette.field },
+                .id_extra = 121,
+            });
+            defer cell.deinit();
+            labelStyled(@src(), text, .{
+                .expand = .both,
+                .color_text = .{ .color = Palette.secondary },
+                .font = metaFont(),
+                .gravity_x = 0.5,
+                .gravity_y = 0.5,
+                .id_extra = 122,
+            });
+            const rect = rectFrom(cell.data().rectScaleFromParent().r);
+            self.still(rect);
+            self.hit_map.append(rect, .scale_reset);
+        }
+        self.scaleChip(1, "+", .scale_up);
+    }
+
+    fn scaleChip(self: *App, slot: usize, label: []const u8, target: hit.Target) void {
+        var cell = dvui.box(@src(), .{ .dir = .horizontal }, .{
+            .min_size_content = .{ .w = 20, .h = 24 },
+            .margin = .{ .x = 1, .y = 0 },
+            .background = true,
+            .color_fill = .{ .color = Palette.field },
+            .id_extra = 123 + slot,
+        });
+        defer cell.deinit();
+        labelStyled(@src(), label, .{
+            .expand = .both,
+            .color_text = .{ .color = Palette.secondary },
+            .font = metaFont(),
+            .gravity_x = 0.5,
+            .gravity_y = 0.5,
+            .id_extra = 125 + slot,
+        });
+        const rect = rectFrom(cell.data().rectScaleFromParent().r);
+        self.still(rect);
+        self.hit_map.append(rect, target);
     }
 
     /// One of the two one-BPM chips beside the master field.
@@ -3079,6 +3166,25 @@ fn steppedBpm(value: f32, delta: f32) f32 {
 const min_master_bpm: f32 = 40;
 const max_master_bpm: f32 = 220;
 
+/// The interface scale is one number: every size in the layout is a point, so
+/// the window's content scale multiplies the lot. Below 75 % the mono grid
+/// stops resolving; above 150 % nothing fits a laptop screen.
+pub const scale_min: f32 = 0.75;
+pub const scale_max: f32 = 1.5;
+pub const scale_step: f32 = 0.05;
+/// Chrome plus the shortest canvas the layout allows, in points. A scale that
+/// leaves less room than this would clip the footer off the window.
+const min_layout_height: f32 = 356;
+
+/// The largest scale that still leaves room for the chrome and the canvas in a
+/// window this tall, in points. Everything is multiplied by the scale, so the
+/// room in points shrinks as the scale grows.
+pub fn fitScale(requested: f32, window_height_pixels: f32) f32 {
+    const room = window_height_pixels / min_layout_height;
+    const capped = @min(scale_max, @max(scale_min, room));
+    return @round(std.math.clamp(@min(requested, capped), scale_min, scale_max) * 100) / 100;
+}
+
 /// The same rect with every edge on a whole pixel. An edge between two pixels
 /// leaves one half-covered column, which reads as a stair step at 1x.
 pub fn snappedRect(x: f32, y: f32, w: f32, h: f32) dvui.Rect.Physical {
@@ -3432,6 +3538,7 @@ fn frameFooter(app: *App) void {
     spacer2.deinit();
 
     app.frameWidthSelector();
+    app.frameScaleControl();
     app.frameMaster();
 }
 
@@ -3756,6 +3863,20 @@ test "a step moves the master one whole BPM and stops at the ends" {
     try std.testing.expectEqual(@as(f32, min_master_bpm), steppedBpm(min_master_bpm, -1));
     // A stepped tempo reads the same as a typed one: whole numbers only.
     try std.testing.expectEqual(@as(f32, 129), steppedBpm(128.37, 1));
+}
+
+test "the interface scale stops at its ends and yields to a short window" {
+    try std.testing.expectEqual(@as(f32, 1.5), fitScale(1.5, 720));
+    try std.testing.expectEqual(@as(f32, 0.75), fitScale(0.5, 720));
+    // A taller ask than the ceiling is the ceiling.
+    try std.testing.expectEqual(@as(f32, 1.5), fitScale(2, 4000));
+    // At 75 % the same window could hold more, but the floor holds.
+    try std.testing.expectEqual(@as(f32, 0.8), fitScale(0.8, 320));
+
+    // Chrome plus the shortest canvas is 356 points; a 460 pixel window holds
+    // 460 / 356 = 1.29 at most, so 150 % would clip the footer.
+    try std.testing.expectEqual(@as(f32, 1.29), fitScale(1.5, 460));
+    try std.testing.expectEqual(@as(f32, 1), fitScale(1, 460));
 }
 
 test "the sort chip walks off, highest first, lowest first, off" {
