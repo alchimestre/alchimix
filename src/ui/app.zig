@@ -2776,9 +2776,11 @@ pub const App = struct {
     }
 
     /// The whole track at the lane's width, so the navigator reads as a
-    /// waveform rather than a slider.
+    /// waveform rather than a slider. Phrase boundaries sit under it as faint
+    /// bands, so the shape of the track is readable before the waveform loads.
     fn paintOverview(self: *App, analysis: *const pl.analysis.Analysis, rect: hit.Rect) void {
         if (rect.w <= 0 or rect.h <= 0 or analysis.waveform.len == 0) return;
+        paintPhrases(self.allocator, analysis, rect);
         const len: f32 = @floatFromInt(analysis.waveform.len);
         const scale: f32 = 255 / @as(f32, @floatFromInt(@max(1, analysis.peak)));
 
@@ -3374,6 +3376,57 @@ fn washFor(colour: f32, beat: f32) f32 {
 const lane_wander_limit: f32 = 1.1;
 const lane_wander_ease: f32 = 3.4;
 
+/// One band per phrase, in the colour of its kind. The last phrase runs to the
+/// end of the grid: rekordbox writes a boundary only where a section starts.
+fn paintPhrases(allocator: std.mem.Allocator, analysis: *const pl.analysis.Analysis, rect: hit.Rect) void {
+    for (analysis.phrases, 0..) |phrase, index| {
+        const span = phraseSpan(analysis, index) orelse continue;
+        fillRect(
+            allocator,
+            rect.x + span.from * rect.w,
+            rect.y,
+            (span.to - span.from) * rect.w,
+            rect.h,
+            phraseColor(phrase.kind),
+        );
+    }
+}
+
+/// Where one phrase sits on the overview, as fractions of the track. A phrase
+/// holds until the next boundary; the last one runs to the end of the grid.
+const PhraseSpan = struct { from: f32, to: f32 };
+
+fn phraseSpan(analysis: *const pl.analysis.Analysis, index: usize) ?PhraseSpan {
+    if (index >= analysis.phrases.len) return null;
+    const total = @as(f32, @floatFromInt(@max(1, analysis.beats.len)));
+    const beat = analysis.phrases[index].beat;
+    const start: f32 = @floatFromInt(if (beat == 0) 0 else beat - 1);
+    const end: f32 = if (index + 1 < analysis.phrases.len) blk: {
+        const next = analysis.phrases[index + 1].beat;
+        break :blk @as(f32, @floatFromInt(if (next == 0) 0 else next - 1));
+    } else total;
+    const from = std.math.clamp(start / total, 0, 1);
+    const to = std.math.clamp(end / total, 0, 1);
+    if (to <= from) return null;
+    return .{ .from = from, .to = to };
+}
+
+/// rekordbox numbers ten kinds; the colours only have to separate them.
+fn phraseColor(kind: u8) dvui.Color {
+    return switch (kind) {
+        1 => fade(Palette.muted, 26),
+        2 => fade(Palette.green, 26),
+        3 => fade(Palette.heat1, 30),
+        4 => fade(Palette.purple, 34),
+        5 => fade(Palette.orange, 26),
+        6 => fade(Palette.yellow, 22),
+        7 => fade(Palette.secondary, 20),
+        8 => fade(Palette.heat2, 30),
+        9 => fade(Palette.heat0, 44),
+        else => fade(Palette.red, 24),
+    };
+}
+
 /// The kick: the loudest of the lowest bands, once past the floor.
 const kick_bins: usize = 3;
 const kick_floor: f32 = 0.34;
@@ -3863,6 +3916,33 @@ test "a step moves the master one whole BPM and stops at the ends" {
     try std.testing.expectEqual(@as(f32, min_master_bpm), steppedBpm(min_master_bpm, -1));
     // A stepped tempo reads the same as a typed one: whole numbers only.
     try std.testing.expectEqual(@as(f32, 129), steppedBpm(128.37, 1));
+}
+
+test "a phrase band runs from its beat to the next boundary" {
+    var beats: [96]pl.analysis.Beat = undefined;
+    for (&beats, 0..) |*beat, i| beat.* = .{ .time_ms = @intCast(i * 500), .bpm = 120, .position = @intCast(i % 4 + 1) };
+    var phrases = [_]pl.analysis.Phrase{
+        .{ .beat = 1, .kind = 1 },
+        .{ .beat = 25, .kind = 5 },
+        .{ .beat = 49, .kind = 3 },
+    };
+    const analysis = pl.analysis.Analysis{
+        .beats = &beats,
+        .waveform = &.{},
+        .bands = &.{},
+        .peak = 0,
+        .phrases = &phrases,
+    };
+
+    const first = phraseSpan(&analysis, 0) orelse return error.NoSpan;
+    try std.testing.expectEqual(@as(f32, 0), first.from);
+    try std.testing.expectApproxEqAbs(@as(f32, 24.0 / 96.0), first.to, 0.0001);
+
+    const last = phraseSpan(&analysis, 2) orelse return error.NoSpan;
+    try std.testing.expectApproxEqAbs(@as(f32, 48.0 / 96.0), last.from, 0.0001);
+    // The final boundary runs to the end of the grid, not to its own beat.
+    try std.testing.expectEqual(@as(f32, 1), last.to);
+    try std.testing.expect(phraseSpan(&analysis, 3) == null);
 }
 
 test "the interface scale stops at its ends and yields to a short window" {

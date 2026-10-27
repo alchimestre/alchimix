@@ -23,6 +23,13 @@ pub const Beat = struct {
 };
 
 
+/// A phrase boundary rekordbox marked: the beat the section opens on, 1-based,
+/// and the kind of section it is. Kinds are rekordbox's own numbering.
+pub const Phrase = struct {
+    beat: u16,
+    kind: u8,
+};
+
 pub const Analysis = struct {
     beats: []Beat,
     /// One sample per 1/150 s of the track.
@@ -33,6 +40,8 @@ pub const Analysis = struct {
     /// Loudest sample in the waveform, so a track can be coloured against its
     /// own range rather than an absolute one.
     peak: u8,
+    /// Phrase boundaries, oldest first. Empty when the file carries no PSSI.
+    phrases: []Phrase = &.{},
 
     pub const samples_per_second = 150;
 
@@ -102,6 +111,7 @@ pub const Analysis = struct {
         allocator.free(self.beats);
         allocator.free(self.waveform);
         if (self.bands.len > 0) allocator.free(self.bands);
+        if (self.phrases.len > 0) allocator.free(self.phrases);
         self.* = undefined;
     }
 };
@@ -163,7 +173,35 @@ pub fn parse(allocator: std.mem.Allocator, dat: []const u8, ext: []const u8) !An
         .waveform = waveform,
         .bands = bands,
         .peak = peak,
+        .phrases = try readPhrases(allocator, ext),
     };
+}
+
+/// The phrase section is laid out differently from the waveform ones: a
+/// twenty-byte header holding the entry size and the count, then the entries.
+/// A missing section is not an error, most tracks carry none.
+fn readPhrases(allocator: std.mem.Allocator, ext: []const u8) ![]Phrase {
+    const body = section(ext, "PSSI") orelse return &.{};
+    if (body.len < 20) return &.{};
+
+    const stride = std.mem.readInt(u32, body[0..4], .big);
+    const count = std.mem.readInt(u16, body[4..6], .big);
+    if (stride < 6) return &.{};
+
+    const room = (body.len - 20) / stride;
+    const entries_count = @min(@as(usize, count), room);
+    if (entries_count == 0) return &.{};
+
+    const phrases = try allocator.alloc(Phrase, entries_count);
+    errdefer allocator.free(phrases);
+    for (phrases, 0..) |*phrase, i| {
+        const entry = body[20 + i * stride ..][0..stride];
+        phrase.* = .{
+            .beat = std.mem.readInt(u16, entry[2..4], .big),
+            .kind = @truncate(std.mem.readInt(u16, entry[4..6], .big)),
+        };
+    }
+    return phrases;
 }
 
 /// The entry bytes of a waveform section, past its twelve-byte header.
@@ -301,6 +339,66 @@ test "a file without a beat grid is rejected" {
     const ext_end = writeSection(&ext_buffer, 28, "PWV3", &.{ 1, 2 });
 
     try testing.expectError(error.NoBeatGrid, parse(testing.allocator, dat_buffer[0..50], ext_buffer[0..ext_end]));
+}
+
+test "reads the phrase boundaries and kinds" {
+    var dat_buffer: [128]u8 = undefined;
+    header(&dat_buffer);
+    var body: [4 + 8]u8 = undefined;
+    @memset(body[0..4], 0);
+    std.mem.writeInt(u16, body[4..6], 1, .big);
+    std.mem.writeInt(u16, body[6..8], 12800, .big);
+    std.mem.writeInt(u32, body[8..12], 1000, .big);
+    const dat_end = writeSection(&dat_buffer, 28, "PQTZ", &body);
+
+    var ext_buffer: [256]u8 = undefined;
+    header(&ext_buffer);
+    const after_wave = writeWaveSection(&ext_buffer, 28, "PWV3", 1, 2, &.{ 100, 50 });
+
+    // Twenty-byte header: entry size 24, two entries, the track's beat count.
+    var phrases: [20 + 2 * 24]u8 = undefined;
+    @memset(&phrases, 0);
+    std.mem.writeInt(u32, phrases[0..4], 24, .big);
+    std.mem.writeInt(u16, phrases[4..6], 2, .big);
+    std.mem.writeInt(u32, phrases[12..16], 96, .big);
+    // First entry: index 1, beat 1, kind 1.
+    std.mem.writeInt(u16, phrases[20..22], 1, .big);
+    std.mem.writeInt(u16, phrases[22..24], 1, .big);
+    std.mem.writeInt(u16, phrases[24..26], 1, .big);
+    // Second: index 2, beat 33, kind 5.
+    std.mem.writeInt(u16, phrases[44..46], 2, .big);
+    std.mem.writeInt(u16, phrases[46..48], 33, .big);
+    std.mem.writeInt(u16, phrases[48..50], 5, .big);
+    const ext_end = writeSection(&ext_buffer, after_wave, "PSSI", &phrases);
+
+    var analysis = try parse(testing.allocator, dat_buffer[0..dat_end], ext_buffer[0..ext_end]);
+    defer analysis.deinit(testing.allocator);
+
+    try testing.expectEqual(@as(usize, 2), analysis.phrases.len);
+    try testing.expectEqual(@as(u16, 1), analysis.phrases[0].beat);
+    try testing.expectEqual(@as(u8, 1), analysis.phrases[0].kind);
+    try testing.expectEqual(@as(u16, 33), analysis.phrases[1].beat);
+    try testing.expectEqual(@as(u8, 5), analysis.phrases[1].kind);
+}
+
+test "a track without a phrase section carries none" {
+    var dat_buffer: [128]u8 = undefined;
+    header(&dat_buffer);
+    var body: [4 + 8]u8 = undefined;
+    @memset(body[0..4], 0);
+    std.mem.writeInt(u16, body[4..6], 1, .big);
+    std.mem.writeInt(u16, body[6..8], 12800, .big);
+    std.mem.writeInt(u32, body[8..12], 1000, .big);
+    const dat_end = writeSection(&dat_buffer, 28, "PQTZ", &body);
+
+    var ext_buffer: [128]u8 = undefined;
+    header(&ext_buffer);
+    const ext_end = writeWaveSection(&ext_buffer, 28, "PWV3", 1, 2, &.{ 100, 50 });
+
+    var analysis = try parse(testing.allocator, dat_buffer[0..dat_end], ext_buffer[0..ext_end]);
+    defer analysis.deinit(testing.allocator);
+
+    try testing.expectEqual(@as(usize, 0), analysis.phrases.len);
 }
 
 test "the first downbeat follows the grid's bar phase" {
