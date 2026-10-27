@@ -61,13 +61,8 @@ floats hearts up to pop.
 The `garden` column lists eight switches. Clicking a row turns that behaviour on
 or off; the arrow in front of each title drops its description.
 
-The undergrowth is drawn in Courier New (falling back to Andale Mono, then the
-theme mono): the art is a character grid, and a proportional or round face pulls
-the rows apart.
-
-The emoji glyphs come from `assets/NotoEmoji.ttf` (SIL OFL, licence beside it).
-The system emoji font is a colour bitmap, which the text rasteriser cannot read,
-so the app loads this one at startup and falls back to ASCII art without it.
+The undergrowth is drawn in the bundled Caskaydia Mono: the art is a character
+grid, and a proportional or round face pulls the rows apart.
 
 `space`, or the footer's `play`, starts the last four tracks that played,
 together; `stop` stops every lane. The history holds the four most recent
@@ -192,5 +187,6 @@ for ±2, three for ±5.
 | orange | ±5 | 3 |
 | red | ±3, ±4, ±6 | none, not harmonic |
 
-The arrow needs a font with `→`, so the app loads CaskaydiaCove Nerd Font from
-`~/Library/Fonts` at startup and falls back to `»` without it.
+The arrow needs a font with `→`. Both faces are compiled into the binary from
+`src/assets`: Caskaydia Cove for body text and Caskaydia Mono for the art. The
+OFL 1.1 licence sits beside them. Neither is read from the system.

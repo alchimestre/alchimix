@@ -7,15 +7,9 @@ const App = @import("app.zig").App;
 const Demo = @import("demo.zig").Demo;
 
 const font_family = "caskaydia";
+const mono_family = "caskaydia mono";
 const font_file = "CaskaydiaCoveNerdFont-Regular.ttf";
-/// Bundled monochrome emoji: the system emoji font is a colour bitmap, which the
-/// rasteriser cannot read.
-const emoji_family = @import("app.zig").emoji_family;
-const garden_family = @import("app.zig").garden_family;
-const garden_files = [_][]const u8{
-    "/System/Library/Fonts/Supplemental/Courier New.ttf",
-    "/System/Library/Fonts/Supplemental/Andale Mono.ttf",
-};
+const mono_file = "CaskaydiaMonoNerdFontMono-Regular.ttf";
 
 pub fn run(init: std.process.Init, app: *App) !void {
     var backend = try SDLBackend.initWindow(.{
@@ -54,12 +48,7 @@ pub fn run(init: std.process.Init, app: *App) !void {
 
         if (!fonts_ready) {
             fonts_ready = true;
-            if (loadNerdFont(init)) {
-                applyNerdFont();
-                app.arrow_font = true;
-            }
-            app.emoji_font = loadEmojiFont();
-            app.garden_font = loadGardenFont(init);
+            try loadFonts();
         }
 
         if (!app.frame()) break;
@@ -111,59 +100,19 @@ pub fn runWaveformDemo(init: std.process.Init) !void {
     }
 }
 
-fn applyNerdFont() void {
+/// Both faces are compiled in: a machine without the font installed would
+/// otherwise render in the theme default, and the arrows and block glyphs the
+/// layout is drawn around only exist in a Nerd Font.
+fn loadFonts() !void {
+    try dvui.addFont(font_family, @embedFile("../assets/" ++ font_file), null);
+    try dvui.addFont(mono_family, @embedFile("../assets/" ++ mono_file), null);
+
     var theme = dvui.themeGet();
     theme.font_body = theme.font_body.withFamily(font_family);
     theme.font_heading = theme.font_heading.withFamily(font_family);
     theme.font_title = theme.font_title.withFamily(font_family);
+    theme.font_mono = theme.font_mono.withFamily(mono_family);
     dvui.themeSet(theme);
-}
-
-/// The bundled font has no arrow glyph, and a Nerd Font is already installed on
-/// most machines that would run this. It is read at runtime rather than
-/// embedded, so the repository stays small.
-/// Courier first: the face this kind of ASCII art was drawn for.
-fn loadGardenFont(init: std.process.Init) bool {
-    for (garden_files) |path| {
-        const bytes = std.Io.Dir.cwd().readFileAlloc(init.io, path, init.gpa, .limited(4 * 1024 * 1024)) catch continue;
-        dvui.addFont(garden_family, bytes, init.gpa) catch {
-            init.gpa.free(bytes);
-            continue;
-        };
-        return true;
-    }
-    std.debug.print("no garden font found; ASCII uses the theme mono\n", .{});
-    return false;
-}
-
-fn loadEmojiFont() bool {
-    // Compiled in: the shell's emoji font is a colour bitmap the rasteriser
-    // cannot read, so a monochrome face has to ship with the binary.
-    dvui.addFont(emoji_family, @embedFile("../assets/NotoEmoji.ttf"), null) catch |err| {
-        std.debug.print("emoji font rejected ({s}); the chip falls back to ASCII\n", .{@errorName(err)});
-        return false;
-    };
-    return true;
-}
-
-fn loadNerdFont(init: std.process.Init) bool {
-    const home = init.environ_map.get("HOME") orelse return false;
-
-    const path = std.fmt.allocPrint(init.gpa, "{s}/Library/Fonts/{s}", .{ home, font_file }) catch return false;
-    defer init.gpa.free(path);
-
-    const bytes = std.Io.Dir.cwd().readFileAlloc(
-        init.io,
-        path,
-        init.gpa,
-        .limited(8 * 1024 * 1024),
-    ) catch return false;
-
-    dvui.addFont(font_family, bytes, init.gpa) catch {
-        init.gpa.free(bytes);
-        return false;
-    };
-    return true;
 }
 
 /// Focus rings are noise on a surface driven by the mouse: the ring drew a red
