@@ -30,6 +30,9 @@ pub const LaneInfo = struct {
 pub const Clock = struct {
     context: *anyopaque,
     nowNs: *const fn (*anyopaque) i128,
+    /// What is leaving the output now, when that trails `nowNs` by an output
+    /// queue. Null runs the picture on `nowNs`.
+    audibleNs: ?*const fn (*anyopaque) i128 = null,
 };
 
 pub const Output = struct {
@@ -628,7 +631,15 @@ pub const Transport = struct {
     pub fn beat(self: *Transport, index: usize) f32 {
         const slot = self.slotAt(index) orelse return 0;
         if (!slot.playing) return slot.beat;
-        return self.beatAt(slot, self.nowNs());
+        return self.beatAt(slot, self.audibleNs());
+    }
+
+    /// The time the picture follows: the sample leaving the output, which a
+    /// queued runway puts behind what was just handed over. Scheduling stays
+    /// on `nowNs`, so bars, lane joins and loops keep their written times.
+    pub fn audibleNs(self: *const Transport) i128 {
+        const audible = self.clock.audibleNs orelse return self.nowNs();
+        return audible(self.clock.context);
     }
 
     pub fn isPlaying(self: *Transport, index: usize) bool {
@@ -1001,14 +1012,25 @@ fn laneInfo(id: u64) LaneInfo {
 
 const TestClock = struct {
     now: i128 = 0,
+    /// What the output is playing, when it trails what was written.
+    audible: ?i128 = null,
 
     fn nowNs(context: *anyopaque) i128 {
         const self: *TestClock = @ptrCast(@alignCast(context));
         return self.now;
     }
 
+    fn audibleNs(context: *anyopaque) i128 {
+        const self: *TestClock = @ptrCast(@alignCast(context));
+        return self.audible orelse self.now;
+    }
+
     fn clock(self: *TestClock) Clock {
-        return .{ .context = self, .nowNs = nowNs };
+        return .{
+            .context = self,
+            .nowNs = nowNs,
+            .audibleNs = if (self.audible != null) audibleNs else null,
+        };
     }
 };
 
@@ -1180,6 +1202,30 @@ test "cold start waits for audio and advances from its own clock" {
     // 1.5 s at 120 BPM.
     try expectApprox(3, t.beat(0));
     try expectApprox(3, t.beat(1));
+}
+
+test "the playhead follows the output queue, scheduling does not" {
+    var fake = FakeOutput{};
+    var clock = TestClock{ .audible = 0 };
+    var t = setup(&fake, &clock);
+    defer t.deinit();
+
+    t.beginSync();
+    t.resolve(0, laneInfo(1));
+    t.endSync();
+    t.startAll();
+    fake.markStarted(1, 0);
+    t.sync();
+
+    clock.now = 2_000_000_000;
+    clock.audible = clock.now;
+    t.sync();
+    try expectApprox(4, t.beat(0));
+
+    // A 100 ms runway still queued: the picture lags a fifth of a beat at 120.
+    clock.audible = clock.now - 100_000_000;
+    try expectApprox(3.8, t.beat(0));
+    try testing.expectEqual(@as(i128, 2_000_000_000), t.nowNs());
 }
 
 test "mute reaches the mixer lane and the beat keeps advancing" {

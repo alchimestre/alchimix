@@ -89,6 +89,10 @@ const ring_frames = sample_rate * 2;
 pub const max_lanes = 8;
 /// Audio buffered before a lane starts playing, 100 ms.
 const prefill_frames = sample_rate / 10;
+/// The most the pump can have queued: its 100 ms runway plus one 10 ms write.
+/// A query reporting more than this cannot be describing our stream, and
+/// following it would freeze the playhead.
+const max_runway_frames = tick_frames * 11;
 
 /// What the audio side knows about a lane, for a transport that must not guess.
 pub const LaneState = union(enum) {
@@ -455,6 +459,11 @@ pub const Mixer = struct {
         for (finished[0..finished_count]) |slot| self.endRelease(slot);
     }
 
+    fn framesToNs(frames: u64) i128 {
+        const ns = @as(u128, frames) * 1_000_000_000 / sample_rate;
+        return @intCast(ns);
+    }
+
     pub fn stop(self: *Mixer) void {
         var finished: [max_lanes]*Slot = @splat(undefined);
         var finished_count: usize = 0;
@@ -479,12 +488,19 @@ pub const Mixer = struct {
     }
 
     /// Audio-clock time: how much audio has actually been handed to the
-    /// device. The transport derives its playhead from this, not from a wall
-    /// clock or a guessed decoder delay.
+    /// device. Scheduling runs on this, not on a wall clock or a guessed
+    /// decoder delay.
     pub fn nowNs(self: *const Mixer) i128 {
-        const frames = self.clock_frames.load(.monotonic);
-        const ns = @as(u128, frames) * 1_000_000_000 / sample_rate;
-        return @intCast(ns);
+        return framesToNs(self.clock_frames.load(.monotonic));
+    }
+
+    /// Position of the sample leaving the device now. The pump keeps a runway
+    /// queued so a late wake-up cannot click, so this trails `nowNs` by the
+    /// queue: the picture follows this or it runs ahead of the speakers.
+    pub fn audibleNs(self: *Mixer) i128 {
+        const written = self.clock_frames.load(.monotonic);
+        const queued_bytes = self.device.queued();
+        return framesToNs(heardFrames(written, queued_bytes));
     }
 
     /// Reports what a lane's decoder is doing. Lock-free callers get `pending`
@@ -580,7 +596,7 @@ pub const Mixer = struct {
     fn promoteStaged(self: *Mixer, now: i128, block_ns: i128) void {
         for (&self.slots, &self.incoming) |*slot, *incoming| {
             if (!incoming.active) continue;
-            if (incoming.start_at_ns > now + block_ns) continue;
+            if (incoming.start_at_ns > horizon(now, block_ns)) continue;
             const ring = slot.ring;
             self.beginRelease(slot);
             self.endRelease(slot);
@@ -773,7 +789,7 @@ fn freeFrames(slot: *const Slot) usize {
         }
 
         for (&self.slots) |*slot| {
-            if (!slot.active or slot.start_at_ns > now + block_ns) continue;
+            if (!slot.active or slot.start_at_ns > horizon(now, block_ns)) continue;
 
             // Wait for a real buffer before the first sample: otherwise the
             // lane begins wherever the decoder happened to be by the time the
@@ -875,7 +891,9 @@ fn freeFrames(slot: *const Slot) usize {
             }
 
             const frames: usize = if (total - written < tick_frames) total - written else tick_frames;
-            self.mixFrames(frames, std.math.maxInt(i128));
+            // No clock and no scheduled starts: the render begins at the seek
+            // and runs. A clock of maxInt overflowed `now + block_ns`.
+            self.mixFrames(frames, 0);
             try out.writeStreamingAll(self.io, std.mem.sliceAsBytes(self.out[0 .. frames * channels]));
             written += frames;
 
@@ -954,6 +972,43 @@ fn sineGainDb(bands: []Biquad, hz: f32) f32 {
         if (i >= settle) peak = @max(peak, @abs(out));
     }
     return 20 * @log10(peak / amplitude);
+}
+
+/// The last start time this block can honour. Saturates: an offline caller may
+/// pass a clock near the integer limit, and `now + block_ns` would wrap to a
+/// negative horizon and skip every lane, which is how the render went silent.
+fn horizon(now: i128, block_ns: i128) i128 {
+    if (now > std.math.maxInt(i128) - block_ns) return std.math.maxInt(i128);
+    return now + block_ns;
+}
+
+/// Frames the device has played: what the pump wrote, less what is still
+/// waiting in the output queue. Read `written` before the queue: the pump may
+/// write in between, and that ordering can only put the picture up to one tick
+/// behind the sound, never ahead of it.
+fn heardFrames(written: u64, queued_bytes: usize) u64 {
+    const queued_frames = @min(queued_bytes / (channels * @sizeOf(f32)), max_runway_frames);
+    return written -| queued_frames;
+}
+
+test "the heard position trails the written one by the queue" {
+    // One second written, a 100 ms runway still queued.
+    const queued = 48_000 * channels * @sizeOf(f32) / 10;
+    try testing.expectEqual(@as(u64, 43_200), heardFrames(48_000, queued));
+    // A queue longer than what was written cannot report negative progress.
+    try testing.expectEqual(@as(u64, 0), heardFrames(100, queued));
+}
+
+test "the start horizon saturates instead of overflowing" {
+    try testing.expectEqual(@as(i128, 10), horizon(0, 10));
+    try testing.expectEqual(std.math.maxInt(i128), horizon(std.math.maxInt(i128), 10));
+    try testing.expectEqual(std.math.maxInt(i128), horizon(std.math.maxInt(i128) - 5, 10));
+}
+
+test "a queue report past the runway holds the playhead, it does not freeze it" {
+    // A driver claiming a second queued: only the 110 ms runway is believed.
+    const absurd = 48_000 * channels * @sizeOf(f32);
+    try testing.expectEqual(@as(u64, 48_000 - 5_280), heardFrames(48_000, absurd));
 }
 
 test "a low shelf lifts the bass and leaves the treble alone" {

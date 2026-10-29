@@ -50,6 +50,11 @@ fn mixerClockNs(context: *anyopaque) i128 {
     return mixer.nowNs();
 }
 
+fn mixerAudibleNs(context: *anyopaque) i128 {
+    const mixer: *pl.mixer.Mixer = @ptrCast(@alignCast(context));
+    return mixer.audibleNs();
+}
+
 fn mixerSpectrum(context: *anyopaque, uid: u64, out: []f32) void {
     const mixer: *pl.mixer.Mixer = @ptrCast(@alignCast(context));
     mixer.spectrum(uid, out);
@@ -183,6 +188,32 @@ pub const Played = struct {
     }
 };
 
+/// A snippet waiting for the next master bar, so it lands in sync. The row that
+/// asked for it owns it: dropping that row ends the wait.
+pub const Scheduled = struct {
+    track: ?Track = null,
+    at_ns: i128 = 0,
+
+    pub fn clear(self: *Scheduled) void {
+        self.track = null;
+        self.at_ns = 0;
+    }
+
+    /// Ends the wait if it belongs to `track_id`; another track's keeps it.
+    pub fn cancel(self: *Scheduled, track_id: u64) void {
+        const waiting = self.track orelse return;
+        if (waiting.id == track_id) self.clear();
+    }
+
+    /// The track whose bar has come, consumed once. Null before the bar.
+    pub fn due(self: *Scheduled, now_ns: i128) ?Track {
+        const waiting = self.track orelse return null;
+        if (now_ns < self.at_ns) return null;
+        self.clear();
+        return waiting;
+    }
+};
+
 /// Pressing a mode's chip runs it; pressing the one already running stops it,
 /// and pressing the other swaps instead of stopping.
 fn pressed(current: Dmt, choice: Dmt) Dmt {
@@ -235,9 +266,8 @@ pub const App = struct {
     mushroom: mushroom.State = .{},
     /// A text field held the keyboard last frame, so space is a space.
     typing: bool = false,
-    /// A preview waiting for the next master bar so it lands in sync.
-    preview_pending: ?Track = null,
-    preview_at_ns: i128 = 0,
+    /// The snippet waiting for the next master bar, if any.
+    scheduled: Scheduled = .{},
 
     query: std.ArrayList(u8) = .empty,
     found: []const Track = &.{},
@@ -392,7 +422,7 @@ pub const App = struct {
                     .spectrum = mixerSpectrum,
                     .level = mixerLevel,
                 },
-                .{ .context = mixer, .nowNs = mixerClockNs },
+                .{ .context = mixer, .nowNs = mixerClockNs, .audibleNs = mixerAudibleNs },
             ),
             .crate = pl.crate.Crate.init(allocator),
             .hit_map = hit.HitMap.init(allocator),
@@ -502,12 +532,9 @@ pub const App = struct {
         self.advanceAutoplay();
         self.advanceEffects();
 
-        if (self.preview_pending) |track| {
-            if (self.transport.nowNs() >= self.preview_at_ns) {
-                self.preview_pending = null;
-                const tempo: f32 = if (track.bpm > 0) self.masterBpm() / @as(f32, @floatCast(track.bpm)) else 1;
-                self.player.play(track, tempo);
-            }
+        if (self.scheduled.due(self.transport.nowNs())) |track| {
+            const tempo: f32 = if (track.bpm > 0) self.masterBpm() / @as(f32, @floatCast(track.bpm)) else 1;
+            self.player.play(track, tempo);
         }
 
         // The pointer pass reads the map the previous frame drew, then the map
@@ -1391,7 +1418,7 @@ pub const App = struct {
 
         switch (next_action) {
             .remove => |index| {
-                if (self.crate.at(index)) |track| self.player.stopPreview(track.id);
+                if (self.crate.at(index)) |track| self.endPreview(track.id);
                 self.noteCrate();
                 self.crate.remove(index) catch return;
                 self.transport.remove(index);
@@ -1755,7 +1782,7 @@ pub const App = struct {
                 dvui.refresh(null, @src(), null);
             },
             .move_block => |move| {
-                if (self.crate.at(move.from)) |track| self.player.stopPreview(track.id);
+                if (self.crate.at(move.from)) |track| self.endPreview(track.id);
                 self.noteCrate();
                 self.crate.moveTo(move.from, move.gap) catch return;
                 self.transport.move(move.from, move.gap);
@@ -2280,7 +2307,7 @@ pub const App = struct {
     /// so the lanes match the rows.
     fn restoreCrate(self: *App, tracks: []const Track, seed: usize) void {
         self.player.stopAll();
-        self.preview_pending = null;
+        self.scheduled.clear();
         self.transport.stopAll();
         self.transport.beginSync();
         self.crate.clear();
@@ -2296,7 +2323,7 @@ pub const App = struct {
     fn clearAll(self: *App) void {
         self.noteCrate();
         self.player.stopAll();
-        self.preview_pending = null;
+        self.scheduled.clear();
         self.transport.stopAll();
         self.transport.beginSync();
         self.transport.endSync();
@@ -2652,12 +2679,18 @@ pub const App = struct {
             const now = self.transport.nowNs();
             var bar = self.transport.nextBarTime();
             if (bar != 0 and bar - lead <= now) bar = self.transport.nextBarAfter(bar);
-            self.preview_pending = track;
-            self.preview_at_ns = if (bar == 0) now else bar - lead;
+            self.scheduled = .{ .track = track, .at_ns = if (bar == 0) now else bar - lead };
             return;
         }
-        self.preview_pending = null;
+        self.scheduled.clear();
         self.player.toggle(track, tempo);
+    }
+
+    /// Ends everything that would still sound this track: the snippet playing
+    /// now, and one still waiting for the bar.
+    fn endPreview(self: *App, track_id: u64) void {
+        self.player.stopPreview(track_id);
+        self.scheduled.cancel(track_id);
     }
 
     /// The pinned look runs on tempo alone, at its own constant turn; the other
@@ -4060,6 +4093,27 @@ test "the play history keeps four tracks, newest last" {
     // Replaying a remembered track moves it to the newest slot.
     played.remember(3);
     try std.testing.expectEqualSlices(u64, &.{ 2, 4, 5, 3 }, played.items());
+}
+
+test "a scheduled snippet ends with the row that asked for it" {
+    const waiting = Track.init(7, "Café", "Nobody");
+    var scheduled = Scheduled{ .track = waiting, .at_ns = 100 };
+
+    scheduled.cancel(8);
+    try std.testing.expectEqual(@as(u64, 7), scheduled.track.?.id);
+
+    scheduled.cancel(7);
+    try std.testing.expect(scheduled.track == null);
+    try std.testing.expect(scheduled.due(200) == null);
+}
+
+test "a scheduled snippet starts once, when its bar comes" {
+    const waiting = Track.init(7, "Café", "Nobody");
+    var scheduled = Scheduled{ .track = waiting, .at_ns = 100 };
+
+    try std.testing.expect(scheduled.due(99) == null);
+    try std.testing.expectEqual(@as(u64, 7), scheduled.due(100).?.id);
+    try std.testing.expect(scheduled.due(101) == null);
 }
 
 test "replay skips tracks the crate no longer holds" {
