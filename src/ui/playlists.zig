@@ -175,7 +175,7 @@ pub const Panel = struct {
         defer if (ids.len > 0) app.allocator.free(ids);
 
         app.player.stopAll();
-        app.preview_pending = null;
+        app.scheduled.clear();
         app.transport.stopAll();
         app.transport.beginSync();
         app.transport.endSync();
