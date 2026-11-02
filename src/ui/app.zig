@@ -142,7 +142,6 @@ pub const Effect = struct {
     pub fn any(self: Effect) bool {
         return self.look != .none or self.dmt != .off;
     }
-
 };
 
 pub const Dmt = enum { off, plain };
@@ -527,8 +526,9 @@ pub const App = struct {
         self.scale_hint = root_scale.s;
 
         self.player.poll();
-        self.transport.setTempo(self.masterBpm());
+        self.syncGrid();
         self.transport.sync();
+        self.transport.setTempo(self.masterBpm());
         self.advanceAutoplay();
         self.advanceEffects();
 
@@ -541,7 +541,7 @@ pub const App = struct {
         // is rebuilt from this frame's layout.
         self.handleEvents();
         self.typing = false;
-        self.syncGrid();
+        self.syncGridAndTempo();
 
         self.hit_map.reset();
 
@@ -553,6 +553,7 @@ pub const App = struct {
         if (self.pending_select) |index| {
             self.pending_select = null;
             self.crate.setSeed(index);
+            self.transport.setTempo(self.masterBpm());
             self.selected.clearRetainingCapacity();
             self.query.clearRetainingCapacity();
             self.refresh() catch {};
@@ -640,7 +641,6 @@ pub const App = struct {
             // The colour pass folds the whole layer, so the controls come back
             // over it rather than being painted with lane colour.
             try geom.repaint(arena, stills, size, texture);
-
         }
     }
 
@@ -1423,6 +1423,7 @@ pub const App = struct {
                 self.crate.remove(index) catch return;
                 self.transport.remove(index);
                 self.grid_dirty = true;
+                self.syncGridAndTempo();
                 self.selected.clearRetainingCapacity();
                 self.refresh() catch {};
                 dvui.refresh(null, @src(), null);
@@ -1674,9 +1675,7 @@ pub const App = struct {
             .step_master_up => self.stepMaster(1),
             .step_master_down => self.stepMaster(-1),
             .toggle_master_lock => {
-                self.master_locked = !self.master_locked;
-                if (!self.master_locked) self.master_bpm = self.masterBpm();
-                self.transport.setTempo(self.masterBpm());
+                self.toggleMasterLock();
                 dvui.refresh(null, @src(), null);
             },
             .toggle_pitch => {
@@ -1830,6 +1829,17 @@ pub const App = struct {
         return 128;
     }
 
+    fn syncGridAndTempo(self: *App) void {
+        self.syncGrid();
+        self.transport.setTempo(self.masterBpm());
+    }
+
+    fn toggleMasterLock(self: *App) void {
+        if (self.master_locked) self.master_bpm = self.masterBpm();
+        self.master_locked = !self.master_locked;
+        self.transport.setTempo(self.masterBpm());
+    }
+
     /// Beat at the left edge of a lane's window. Negative at the start of a
     /// track, before the first bar.
     fn laneStart(self: *App, index: usize) f32 {
@@ -1865,6 +1875,7 @@ pub const App = struct {
         @memset(consumed, false);
 
         var next: std.ArrayListUnmanaged(Lane) = .empty;
+        next.ensureTotalCapacity(self.allocator, self.crate.len()) catch return;
         for (0..self.crate.len()) |index| {
             const track = self.crate.at(index).?.*;
             var lane = Lane{ .track_id = track.id };
@@ -1883,7 +1894,7 @@ pub const App = struct {
                 lane.missing = lane.analysis == null;
             }
 
-            next.append(self.allocator, lane) catch {};
+            next.appendAssumeCapacity(lane);
         }
 
         self.transport.beginSync();
@@ -2695,8 +2706,6 @@ pub const App = struct {
 
     /// The pinned look runs on tempo alone, at its own constant turn; the other
     /// variants use the mood-driven clock.
-
-
     /// Play: start the remembered tracks together. With nothing playable
     /// remembered, start every lane and remember what started.
     fn replayPlayed(self: *App) void {
@@ -3470,7 +3479,6 @@ fn drawPauseBars(allocator: std.mem.Allocator, cx: f32, cy: f32, size: f32) void
 /// Same colour at a given opacity, for the block being carried.
 /// Waveform colour held against the fold's dampening: the grey chrome dims,
 /// the heat map keeps its weight.
-
 pub fn fade(color: dvui.Color, alpha: u8) dvui.Color {
     var dimmed = color;
     dimmed.a = alpha;
@@ -4078,7 +4086,6 @@ test "the fold keeps its colours and leaves grey grey" {
 test "a mode chip runs itself and stops only itself" {
     try std.testing.expectEqual(Dmt.plain, pressed(.off, .plain));
     try std.testing.expectEqual(Dmt.off, pressed(.plain, .plain));
-
 }
 
 test "the play history keeps four tracks, newest last" {
@@ -4272,4 +4279,192 @@ test "each sort state puts the tempo it names at the head" {
     // Off leaves the ranking the source produced alone.
     sortRanked(.none, &list);
     try std.testing.expectEqual(@as(u64, 1), list[0].track.id);
+}
+
+const GridTestSource = struct {
+    last_track_id: u64 = 0,
+    last_start_s: f64 = 0,
+
+    fn port(self: *GridTestSource) pl.library.Library {
+        return .{ .ctx = self, .vtable = &vtable };
+    }
+
+    fn context(ctx: *anyopaque) *GridTestSource {
+        return @ptrCast(@alignCast(ctx));
+    }
+
+    fn all(_: *anyopaque) anyerror![]const Track {
+        return &.{};
+    }
+
+    fn search(_: *anyopaque, _: []const u8) anyerror![]const Track {
+        return &.{};
+    }
+
+    fn analysis(_: *anyopaque, allocator: std.mem.Allocator, track_id: u64) anyerror!pl.analysis.Analysis {
+        const beats = try allocator.alloc(pl.analysis.Beat, 8);
+        const bpm = 90 + @as(f32, @floatFromInt(track_id));
+        for (beats, 0..) |*beat, index| {
+            beat.* = .{
+                .time_ms = @intCast(index * 500),
+                .bpm = bpm,
+                .position = @intCast(index % 4 + 1),
+            };
+        }
+        return .{ .beats = beats, .waveform = &.{}, .bands = &.{}, .peak = 0 };
+    }
+
+    fn listPlaylists(_: *anyopaque) anyerror![]const pl.library.Playlist {
+        return &.{};
+    }
+
+    fn playlistTracks(_: *anyopaque, _: std.mem.Allocator, _: []const u8) anyerror![]const u64 {
+        return &.{};
+    }
+
+    fn createPlaylist(_: *anyopaque, _: []const u8, _: []const u64) anyerror!void {}
+    fn replacePlaylistTracks(_: *anyopaque, _: []const u8, _: []const u64) anyerror!void {}
+    fn renamePlaylist(_: *anyopaque, _: []const u8, _: []const u8) anyerror!void {}
+    fn deletePlaylist(_: *anyopaque, _: []const u8) anyerror!void {}
+    fn name(_: *anyopaque) []const u8 {
+        return "grid test";
+    }
+    fn deinit(_: *anyopaque) void {}
+
+    const vtable: pl.library.Library.VTable = .{
+        .all = all,
+        .search = search,
+        .analysis = analysis,
+        .playlists = listPlaylists,
+        .playlistTracks = playlistTracks,
+        .createPlaylist = createPlaylist,
+        .replacePlaylistTracks = replacePlaylistTracks,
+        .renamePlaylist = renamePlaylist,
+        .deletePlaylist = deletePlaylist,
+        .name = name,
+        .deinit = deinit,
+    };
+};
+
+const GridTestTransport = struct {
+    fn play(ctx: *anyopaque, lanes: []const pl.mixer.Lane) void {
+        if (lanes.len == 0) return;
+        const source = GridTestSource.context(ctx);
+        source.last_track_id = lanes[0].track.id;
+        source.last_start_s = lanes[0].start_s;
+    }
+    fn stop(_: *anyopaque) void {}
+    fn laneState(_: *anyopaque, _: u64) pl.mixer.LaneState {
+        return .pending;
+    }
+    fn spectrum(_: *anyopaque, _: u64, output: []f32) void {
+        @memset(output, 0);
+    }
+    fn level(_: *anyopaque, _: u64) f32 {
+        return 0;
+    }
+    fn now(_: *anyopaque) i128 {
+        return 0;
+    }
+};
+
+fn initGridTestApp(allocator: std.mem.Allocator, library: pl.library.Library) App {
+    const context = library.ctx;
+    return .{
+        .allocator = allocator,
+        .io = undefined,
+        .library = library,
+        .player = .{ .io = undefined, .allocator = allocator },
+        .mixer = undefined,
+        .transport = pl.transport.Transport.init(
+            allocator,
+            .{
+                .context = context,
+                .play = GridTestTransport.play,
+                .stop = GridTestTransport.stop,
+                .laneState = GridTestTransport.laneState,
+                .spectrum = GridTestTransport.spectrum,
+                .level = GridTestTransport.level,
+            },
+            .{ .context = context, .nowNs = GridTestTransport.now },
+        ),
+        .crate = pl.crate.Crate.init(allocator),
+        .hit_map = hit.HitMap.init(allocator),
+        .undo_history = .{ .allocator = allocator },
+    };
+}
+
+fn deinitGridTestApp(app: *App) void {
+    app.transport.deinit();
+    app.player.deinit();
+    for (app.grid.items) |*lane| {
+        if (lane.analysis) |*analysis| analysis.deinit(app.allocator);
+    }
+    app.grid.deinit(app.allocator);
+    app.selected.deinit(app.allocator);
+    app.query.deinit(app.allocator);
+    app.master_text.deinit(app.allocator);
+    app.bpm_text.deinit(app.allocator);
+    app.hit_map.deinit();
+    app.undo_history.deinit();
+    app.crate.deinit();
+}
+
+test "grid growth keeps seeks on the active track's analysis" {
+    var source: GridTestSource = .{};
+    var app = initGridTestApp(std.testing.allocator, source.port());
+    defer deinitGridTestApp(&app);
+
+    for (0..24) |index| {
+        const id: u64 = if (index == 9) 9 else @intCast(index + 1);
+        _ = try app.crate.append(Track.init(id, "track", "artist"));
+    }
+    app.syncGrid();
+
+    app.transport.start(23, .now);
+    app.transport.seek(23, 4);
+
+    try std.testing.expectEqual(@as(u64, 24), source.last_track_id);
+    try std.testing.expectApproxEqAbs(@as(f64, 2), source.last_start_s, 0.0001);
+}
+
+test "seed tempo follows its track after crate mutations" {
+    var source: GridTestSource = .{};
+    var app = initGridTestApp(std.testing.allocator, source.port());
+    defer deinitGridTestApp(&app);
+
+    for (1..4) |id| _ = try app.crate.append(Track.init(id, "track", "artist"));
+    app.syncGrid();
+    const selected_bpm = app.grid.items[0].analysis.?.bpm();
+
+    try app.crate.moveTo(0, 3);
+    app.transport.move(0, 3);
+    app.grid_dirty = true;
+    app.syncGridAndTempo();
+    try std.testing.expectEqual(selected_bpm, app.transport.bpm);
+
+    _ = try app.crate.insertAt(0, Track.init(9, "suggestion", "artist"));
+    app.transport.insert(0);
+    app.grid_dirty = true;
+    app.syncGridAndTempo();
+    try std.testing.expectEqual(@as(u64, 1), app.grid.items[3].track_id);
+    try std.testing.expectEqual(selected_bpm, app.transport.bpm);
+}
+
+test "unlock captures the selected lane's analysed tempo" {
+    var source: GridTestSource = .{};
+    var app = initGridTestApp(std.testing.allocator, source.port());
+    defer deinitGridTestApp(&app);
+
+    _ = try app.crate.append(Track.init(1, "first", "artist"));
+    _ = try app.crate.append(Track.init(2, "selected", "artist"));
+    app.syncGrid();
+    app.crate.setSeed(1);
+    app.master_bpm = 128;
+    const selected_bpm = app.grid.items[1].analysis.?.bpm();
+
+    app.toggleMasterLock();
+
+    try std.testing.expect(!app.master_locked);
+    try std.testing.expectEqual(selected_bpm, app.master_bpm);
 }

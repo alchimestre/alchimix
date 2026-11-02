@@ -60,6 +60,15 @@ waveform is tinted by rekordbox's three bands: kick red, mid green, high blue. T
 whose analysis carries rekordbox's phrase marks show them under the overview as
 faint bands, one colour per phrase kind.
 
+An overview seek keeps the current pass sounding until its replacement starts on
+a bar. With several lanes, tempo changes land together on one bar; an unready
+decoder delays that group to the next bar. A lone lane changes tempo as soon as
+its replacement is ready. Unlocking the master BPM keeps the current value for
+manual adjustment.
+
+Moving or inserting blocks keeps each playing lane's position. Removing a block
+cancels its playing pass and any queued replacement.
+
 `.-.` runs the same drift field at 0.45 strength with the same colour fringe and
 no flare, over an ASCII undergrowth: small mushrooms pop and grow, tall ones arrive in
 tight clusters of seven to twelve, wide ones stand alone, pale rain falls and
