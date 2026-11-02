@@ -77,6 +77,13 @@ const Slot = struct {
     /// The mixer's own report of when the current stream began, so a staged
     /// pass taking over is visible as a new instant.
     started_at_ns: ?i128 = null,
+    pending_beat: ?f32 = null,
+    pending_retune: bool = false,
+    previous_pass: ?struct {
+        beat: f32,
+        started_master: f32,
+        until_ns: i128,
+    } = null,
     /// Audio-clock time the lane may become audible; zero means as soon as the
     /// decoder is ready. Absolute so a repeated mix cannot push it later.
     start_at_ns: i128 = 0,
@@ -121,6 +128,8 @@ pub const Transport = struct {
     clock_base_ns: i128 = 0,
     clock_base_beat: f32 = 0,
     bpm: f32 = 128,
+    clock_bpm: f32 = 128,
+    previous_bpm: f32 = 128,
     keylock: bool = true,
     /// Lane held by the pointer: paused for the jog, resumed on release.
     jog: ?usize = null,
@@ -268,32 +277,17 @@ pub const Transport = struct {
                     // Put it back on the next bar instead of joining mid-bar.
                     // A joint start keeps its bar: its lanes start together,
                     // so they stay in sync with each other.
-                    if (slot.rejoin and !slot.start_latched and slot.start_at_ns != 0 and now > slot.start_at_ns + start_grace_ns) {
+                    if (slot.rejoin and (!slot.start_latched or slot.pending_beat != null) and slot.start_at_ns != 0 and now > slot.start_at_ns + start_grace_ns) {
                         slot.start_at_ns = self.nextBarAt(now);
+                        if (slot.pending_retune) slot.pending_beat = self.beatAt(slot, slot.start_at_ns);
                         changed = true;
                     }
                 },
                 .started => |started| {
-                    // A staged pass begins at the loop start, not where the old
-                    // one had reached: fold the beat when it takes over.
-                    if (slot.start_latched and slot.loop_armed and slot.started_at_ns != null and started != slot.started_at_ns.?) {
-                        slot.beat = slot.loop_begin;
-                        slot.beat_raw = slot.loop_begin;
-                        slot.started_master = self.masterBeatAt(started);
-                        slot.loop_armed = false;
-                    }
-                    if (!slot.start_latched) {
-                        if (!self.running) {
-                            self.running = true;
-                            self.clock_base_ns = started;
-                            self.clock_base_beat = 0;
-                        }
-                        slot.start_latched = true;
-                        slot.started_master = self.masterBeatAt(started);
-                    }
-                    slot.started_at_ns = started;
+                    self.latchStart(slot, started);
                 },
             }
+            if (slot.pending_beat != null) continue;
             if (slot.start_latched and slot.loop_end > slot.loop_begin) {
                 if (self.wrapLoop(slot, now)) changed = true;
                 continue;
@@ -318,7 +312,7 @@ pub const Transport = struct {
     /// them begin on the same audio sample.
     pub fn startAll(self: *Transport) void {
         const now = self.nowNs();
-        const start_at = self.barStartAt(now);
+        const start_at = self.joinAt(self.barStartAt(now));
         var any = false;
         while (self.playingCount() < max_lanes) {
             var best: ?*Slot = null;
@@ -330,7 +324,7 @@ pub const Transport = struct {
             self.poseForStart(slot);
             slot.playing = true;
             slot.start_latched = false;
-            slot.rejoin = false;
+            slot.rejoin = self.running and self.clock_bpm != self.bpm;
             slot.start_at_ns = start_at;
             any = true;
         }
@@ -341,7 +335,7 @@ pub const Transport = struct {
     /// any lane could start.
     pub fn startGroup(self: *Transport, indices: []const usize) bool {
         const now = self.nowNs();
-        const start_at = self.barStartAt(now);
+        const start_at = self.joinAt(self.barStartAt(now));
         var any = false;
         for (indices) |index| {
             if (self.playingCount() >= max_lanes) break;
@@ -350,7 +344,7 @@ pub const Transport = struct {
             self.poseForStart(slot);
             slot.playing = true;
             slot.start_latched = false;
-            slot.rejoin = false;
+            slot.rejoin = self.running and self.clock_bpm != self.bpm;
             slot.start_at_ns = start_at;
             any = true;
         }
@@ -432,14 +426,23 @@ pub const Transport = struct {
 
     pub fn seek(self: *Transport, index: usize, target: f32) void {
         const slot = self.slotAt(index) orelse return;
-        const was_playing = slot.playing;
-        if (was_playing) self.foldAt(slot, self.nowNs());
-        slot.playing = false;
-        slot.held = false;
-        slot.start_latched = false;
+        const old_beat = slot.beat;
+        const old_raw = slot.beat_raw;
         slot.beat_raw = target;
         self.snapToBar(slot);
-        if (was_playing) self.beginStart(slot, .next_bar, false);
+        if (!slot.playing) {
+            slot.held = false;
+            return;
+        }
+        slot.pending_beat = slot.beat;
+        slot.pending_retune = false;
+        slot.beat = old_beat;
+        slot.beat_raw = old_raw;
+        slot.start_at_ns = self.nextBarAt(self.nowNs());
+        slot.rejoin = true;
+        slot.restart = true;
+        slot.loop_armed = false;
+        self.pushMix();
     }
 
     /// Waveform drag: move by beats and land on the nearest beat. A start
@@ -567,61 +570,88 @@ pub const Transport = struct {
         self.output.spectrum(self.output.context, slot.uid, out);
     }
 
-
-    /// Rebases the master clock before the tempo change so the playhead does
-    /// not jump, then restarts the decoders from their folded positions.
+    /// Changes every playing lane at one audio boundary.
     pub fn setTempo(self: *Transport, bpm: f32) void {
         if (@abs(bpm - self.bpm) < 0.0005) return;
-        const now = self.nowNs();
-        for (self.slots.items) |*slot| {
-            if (slot.playing) self.foldAt(slot, now);
-        }
-        if (self.running) {
-            self.clock_base_beat = self.masterBeatAt(now);
-            self.clock_base_ns = now;
-        }
         self.bpm = bpm;
-
-        // A new rate only reaches a decoder through a restart, so every
-        // playing lane restarts. With more than one lane they restart together
-        // on the next bar: an immediate restart lets each decoder enter when
-        // its own buffer is ready, which is how two synced lanes end up a
-        // block apart. A lone lane has no phase to keep, so it restarts now.
-        const together = self.playingCount() > 1;
-        const at = if (together) self.nextBarAt(now) else 0;
-        for (self.slots.items) |*slot| {
-            if (!slot.playing) continue;
-            if (at != 0) {
-                // Carry the beat forward to the bar, so the audio that comes
-                // back is the audio that would have played there.
-                const ahead: f32 = @floatFromInt(at - now);
-                slot.beat = @min(slot.total_beats, slot.beat + ahead * 1e-9 * (bpm / 60));
-                slot.start_at_ns = at;
-                slot.rejoin = true;
-            } else {
-                slot.start_at_ns = 0;
-                slot.rejoin = false;
-            }
-            slot.start_latched = false;
-            slot.restart = true;
+        if (!self.anyPlaying()) {
+            self.latchTempo(self.nowNs());
+            return;
         }
-        self.pushMix();
+        self.retune();
     }
 
     pub fn setKeylock(self: *Transport, keylock: bool) void {
         if (keylock == self.keylock) return;
-        const now = self.nowNs();
-        for (self.slots.items) |*slot| {
-            if (slot.playing) self.foldAt(slot, now);
-        }
         self.keylock = keylock;
+        self.retune();
+    }
+
+    fn retune(self: *Transport) void {
+        const now = self.nowNs();
+        const at = if (self.playingCount() > 1) self.nextBarAt(now) else 0;
         for (self.slots.items) |*slot| {
             if (!slot.playing) continue;
-            slot.start_latched = false;
-            slot.start_at_ns = 0;
+            if (slot.pending_beat == null or slot.pending_retune) {
+                slot.pending_beat = self.beatAt(slot, if (at == 0) now else at);
+                slot.pending_retune = true;
+            }
+            slot.start_at_ns = at;
+            slot.rejoin = at != 0;
             slot.restart = true;
+            slot.loop_armed = false;
         }
         self.pushMix();
+    }
+
+    fn latchStart(self: *Transport, slot: *Slot, started: i128) void {
+        if (slot.pending_beat) |target| {
+            if (slot.started_at_ns != null and started == slot.started_at_ns.?) return;
+            retainPass(slot, started);
+            slot.beat = target;
+            slot.beat_raw = target;
+            slot.pending_beat = null;
+            slot.loop_armed = false;
+            slot.pending_retune = false;
+            slot.start_latched = false;
+        }
+        if (slot.start_latched and slot.loop_armed and slot.started_at_ns != null and started != slot.started_at_ns.?) {
+            retainPass(slot, started);
+            slot.beat = slot.loop_begin;
+            slot.beat_raw = slot.loop_begin;
+            slot.start_latched = false;
+            slot.loop_armed = false;
+        }
+        if (!slot.start_latched) {
+            if (!self.running) {
+                self.running = true;
+                self.clock_base_ns = started;
+                self.clock_base_beat = 0;
+                self.clock_bpm = self.bpm;
+                self.previous_bpm = self.bpm;
+            }
+            self.latchTempo(started);
+            slot.start_latched = true;
+            slot.started_master = self.masterBeatAt(started);
+        }
+        slot.started_at_ns = started;
+    }
+
+    fn retainPass(slot: *Slot, until_ns: i128) void {
+        if (!slot.start_latched) return;
+        slot.previous_pass = .{
+            .beat = slot.beat,
+            .started_master = slot.started_master,
+            .until_ns = until_ns,
+        };
+    }
+
+    fn latchTempo(self: *Transport, at: i128) void {
+        if (self.clock_bpm == self.bpm) return;
+        self.clock_base_beat = self.masterBeatAt(at);
+        self.clock_base_ns = at;
+        self.previous_bpm = self.clock_bpm;
+        self.clock_bpm = self.bpm;
     }
 
     pub fn keylocked(self: *const Transport) bool {
@@ -749,17 +779,25 @@ pub const Transport = struct {
         // With lanes already waiting for their audio, there is no bar to join
         // yet; starting now would set this lane's grid at its own click time.
         slot.awaiting_clock = join != .now and !self.running and self.otherPlaying(slot);
-        const start_at = if (slot.awaiting_clock) 0 else switch (join) {
+        const start_at = self.joinAt(if (slot.awaiting_clock) 0 else switch (join) {
             .bar => self.barStartAt(now),
             .next_bar => self.nextBarAt(now),
             .now => 0,
-        };
+        });
         slot.playing = true;
         slot.held = false;
         slot.start_latched = false;
-        slot.rejoin = join == .next_bar;
+        slot.rejoin = join == .next_bar or (self.running and self.clock_bpm != self.bpm);
         slot.start_at_ns = start_at;
         self.pushMix();
+    }
+
+    fn joinAt(self: *const Transport, fallback: i128) i128 {
+        if (self.clock_bpm == self.bpm) return fallback;
+        for (self.slots.items) |slot| {
+            if (slot.playing and slot.pending_beat != null) return slot.start_at_ns;
+        }
+        return fallback;
     }
 
     /// Audio-clock time of the next master bar, or now when a bar is close
@@ -768,7 +806,7 @@ pub const Transport = struct {
         if (!self.running) return 0;
         const phase = @mod(self.masterBeatAt(now), 4);
         const wait: f32 = if (phase > 0.25) 4 - phase else 0;
-        return now + @as(i128, @intFromFloat(@as(f64, wait) * 60 / self.bpm * 1_000_000_000));
+        return now + @as(i128, @intFromFloat(@as(f64, wait) * 60 / self.clock_bpm * 1_000_000_000));
     }
 
     /// The next master bar in audio-clock time; zero when the clock is stopped.
@@ -781,7 +819,7 @@ pub const Transport = struct {
         if (!self.running) return 0;
         const phase = @mod(self.masterBeatAt(time_ns), 4);
         const wait = 4 - phase;
-        return time_ns + @as(i128, @intFromFloat(@as(f64, wait) * 60 / self.bpm * 1_000_000_000));
+        return time_ns + @as(i128, @intFromFloat(@as(f64, wait) * 60 / self.clock_bpm * 1_000_000_000));
     }
 
     /// The next master bar after `now`, never the current one: a lane rejoining
@@ -815,10 +853,10 @@ pub const Transport = struct {
             return true;
         }
         if (slot.loop_armed) return false;
-        if (remaining * 60 / self.bpm > loop_preroll_s) return false;
+        if (remaining * 60 / self.clock_bpm > loop_preroll_s) return false;
 
         // The instant the beat reaches the loop end, in this lane's own beats.
-        const wrap_at = now + @as(i128, @intFromFloat(@as(f64, remaining) * 60 / self.bpm * 1_000_000_000));
+        const wrap_at = now + @as(i128, @intFromFloat(@as(f64, remaining) * 60 / self.clock_bpm * 1_000_000_000));
         slot.start_at_ns = wrap_at;
         slot.rejoin = true;
         slot.restart = true;
@@ -830,7 +868,7 @@ pub const Transport = struct {
         if (!self.running) return 0;
         const phase = @mod(self.masterBeatAt(now), 4);
         const wait = 4 - phase;
-        return now + @as(i128, @intFromFloat(@as(f64, wait) * 60 / self.bpm * 1_000_000_000));
+        return now + @as(i128, @intFromFloat(@as(f64, wait) * 60 / self.clock_bpm * 1_000_000_000));
     }
 
     /// A start lands on a bar: two lanes whose bars sit at different beats are
@@ -863,20 +901,32 @@ pub const Transport = struct {
         slot.beat = self.beatAt(slot, now);
         slot.beat_raw = slot.beat;
         slot.start_latched = false;
+        slot.pending_beat = null;
+        slot.pending_retune = false;
+        slot.loop_armed = false;
+        slot.previous_pass = null;
     }
 
     fn beatAt(self: *Transport, slot: *Slot, now: i128) f32 {
         if (!slot.playing or !slot.start_latched) return slot.beat;
-        const master = self.masterBeatAt(now);
-        if (master <= slot.started_master) return slot.beat;
-        return slot.beat + (master - slot.started_master);
+        var base_beat = slot.beat;
+        var started_master = slot.started_master;
+        if (slot.previous_pass) |previous| {
+            if (now < previous.until_ns) {
+                base_beat = previous.beat;
+                started_master = previous.started_master;
+            }
+        }
+        const elapsed = @max(0, self.masterBeatAt(now) - started_master);
+        return base_beat + elapsed;
     }
 
     fn masterBeatAt(self: *Transport, time_ns: i128) f32 {
         if (!self.running) return self.clock_base_beat;
-        const elapsed = @max(0, time_ns - self.clock_base_ns);
+        const elapsed = time_ns - self.clock_base_ns;
         const seconds: f64 = @as(f64, @floatFromInt(elapsed)) / 1_000_000_000;
-        return self.clock_base_beat + @as(f32, @floatCast(seconds * self.bpm / 60));
+        const rate = if (time_ns < self.clock_base_ns) self.previous_bpm else self.clock_bpm;
+        return @max(0, self.clock_base_beat + @as(f32, @floatCast(seconds * rate / 60)));
     }
 
     fn stopClock(self: *Transport) void {
@@ -908,7 +958,7 @@ pub const Transport = struct {
         return .{
             .uid = slot.uid,
             .track = slot.track,
-            .start_s = secondsAt(slot, slot.beat),
+            .start_s = secondsAt(slot, slot.pending_beat orelse if (slot.loop_armed) slot.loop_begin else slot.beat),
             .tempo = self.bpm / slot.grid_bpm,
             .eq = slot.eq,
             .muted = slot.muted,
@@ -2167,6 +2217,7 @@ test "a loop wraps on its bar with the decoder pre-rolled" {
     t.sync();
     const armed = fake.playingLane(1) orelse return error.NoLane;
     try testing.expect(armed.restart);
+    try expectApprox(2, @floatCast(armed.start_s));
     try testing.expect(armed.start_at_ns > clock.now);
     // The old pass keeps sounding until the loop end, so the playhead keeps
     // moving towards it rather than jumping back early.
@@ -2288,40 +2339,214 @@ test "a lone lane takes a tempo change at once" {
     try testing.expect(lane.restart);
 }
 
-test "a tempo change restarts every lane together on the next bar" {
+test "a staged seek keeps the outgoing playhead until the new audio starts" {
     var fake = FakeOutput{};
     var clock = TestClock{};
     var t = setup(&fake, &clock);
     defer t.deinit();
+    t.resolve(0, laneInfo(1));
+    t.start(0, .now);
+    fake.markStarted(1, 0);
+    t.sync();
 
-    t.beginSync();
+    clock.now = 500_000_000;
+    t.seek(0, 8);
+    fake.markStarted(1, 0);
+    t.sync();
+    try expectApprox(1, t.beat(0));
+    clock.now = 1_000_000_000;
+    t.sync();
+    try expectApprox(2, t.beat(0));
+
+    clock.now = 2_000_000_000;
+    fake.markStarted(1, clock.now);
+    t.sync();
+    try expectApprox(8, t.beat(0));
+    clock.now = 2_500_000_000;
+    t.sync();
+    try expectApprox(9, t.beat(0));
+}
+
+test "seeking back to a decoder's original pose still replaces that pass" {
+    var fake = FakeOutput{};
+    var clock = TestClock{};
+    var t = setup(&fake, &clock);
+    defer t.deinit();
+    t.resolve(0, laneInfo(1));
+    t.start(0, .now);
+    fake.markStarted(1, 0);
+    t.sync();
+    clock.now = 500_000_000;
+    t.seek(0, 0);
+    try testing.expect(fake.playingLane(1).?.restart);
+}
+
+test "retuning keeps the old clock until a shared audio handoff" {
+    var fake = FakeOutput{};
+    var clock = TestClock{};
+    var t = setup(&fake, &clock);
+    defer t.deinit();
     t.resolve(0, laneInfo(1));
     t.resolve(1, laneInfo(2));
-    t.endSync();
     t.startAll();
-
     fake.markStarted(1, 0);
     fake.markStarted(2, 0);
-    clock.now = 1_000_000;
     t.sync();
     clock.now = 2_100_000_000;
-    t.sync();
-    const before = t.beat(0);
-    try expectApprox(4.2, before);
-
     t.setTempo(126);
-    const first = fake.playingLane(1) orelse return error.NoLane;
-    const second = fake.playingLane(2) orelse return error.NoLane;
-
-    // One shared instant, on a bar, for both lanes.
-    try testing.expect(first.restart and second.restart);
-    try testing.expectEqual(first.start_at_ns, second.start_at_ns);
-    try testing.expect(first.start_at_ns > clock.now);
-    // Beat 4.2 is 3.8 beats short of the bar, at 126 BPM.
-    const until_bar: f64 = 3.8 * 60.0 / 126.0;
-    try testing.expect(@abs(@as(f64, @floatFromInt(first.start_at_ns - clock.now)) * 1e-9 - until_bar) < 0.01);
-
-    // The lanes keep their places: each beat moved forward to that bar.
+    const handoff = fake.playingLane(1).?.start_at_ns;
+    try testing.expect(@abs(handoff - 4_000_000_000) < 1_000);
+    fake.markStarted(1, 0);
+    fake.markStarted(2, 0);
+    clock.now = 2_500_000_000;
+    t.sync();
+    try expectApprox(5, t.beat(0));
+    try expectApprox(5, t.beat(1));
+    clock.now = handoff;
+    fake.markStarted(1, handoff);
+    fake.markStarted(2, handoff);
+    t.sync();
     try expectApprox(8, t.beat(0));
-    try expectApprox(8, t.beat(1));
+    clock.now += 1_000_000_000;
+    t.sync();
+    try expectApprox(10.1, t.beat(0));
+    try expectApprox(10.1, t.beat(1));
+}
+
+test "a pending seek is not replaced by the outgoing loop" {
+    var fake = FakeOutput{};
+    var clock = TestClock{};
+    var t = setup(&fake, &clock);
+    defer t.deinit();
+    t.resolve(0, laneInfo(1));
+    t.start(0, .now);
+    fake.markStarted(1, 0);
+    t.sync();
+    t.setLoop(0, 0, 8);
+    clock.now = 3_800_000_000;
+    t.seek(0, 4);
+    clock.now = 3_900_000_000;
+    t.sync();
+    try expectApprox(2, @floatCast(fake.playingLane(1).?.start_s));
+}
+
+test "a missed retune bar carries both lanes to the next shared bar" {
+    var fake = FakeOutput{};
+    var clock = TestClock{};
+    var t = setup(&fake, &clock);
+    defer t.deinit();
+    t.resolve(0, laneInfo(1));
+    t.resolve(1, laneInfo(2));
+    t.startAll();
+    fake.markStarted(1, 0);
+    fake.markStarted(2, 0);
+    t.sync();
+    clock.now = 500_000_000;
+    t.setTempo(126);
+    clock.now = 2_200_000_000;
+    t.sync();
+    const first = fake.playingLane(1).?;
+    const second = fake.playingLane(2).?;
+    try testing.expectEqual(first.start_at_ns, second.start_at_ns);
+    try testing.expect(@abs(first.start_at_ns - 4_000_000_000) < 1_000);
+    try expectApprox(4, @floatCast(first.start_s));
+    try expectApprox(4.4, t.beat(0));
+    try expectApprox(4.4, t.beat(1));
+}
+
+test "changing tempo during a seek updates the clock at its handoff" {
+    var fake = FakeOutput{};
+    var clock = TestClock{};
+    var t = setup(&fake, &clock);
+    defer t.deinit();
+    t.resolve(0, laneInfo(1));
+    t.start(0, .now);
+    fake.markStarted(1, 0);
+    t.sync();
+    clock.now = 500_000_000;
+    t.seek(0, 8);
+    t.setTempo(126);
+    const pass = fake.playingLane(1).?;
+    fake.markStarted(1, 1_000_000_000);
+    clock.now = 1_000_000_000;
+    t.sync();
+    try expectApprox(8, t.beat(0));
+    clock.now = 2_000_000_000;
+    t.sync();
+    try expectApprox(10.1, t.beat(0));
+    try expectApprox(126.0 / 120.0, pass.tempo);
+}
+
+test "the audible playhead stays on the outgoing pass behind a seek handoff" {
+    var fake = FakeOutput{};
+    var clock = TestClock{ .audible = 0 };
+    var t = setup(&fake, &clock);
+    defer t.deinit();
+    t.resolve(0, laneInfo(1));
+    t.start(0, .now);
+    fake.markStarted(1, 0);
+    t.sync();
+    clock.now = 500_000_000;
+    clock.audible = 400_000_000;
+    t.seek(0, 8);
+    fake.markStarted(1, 2_000_000_000);
+    clock.now = 2_050_000_000;
+    clock.audible = 1_950_000_000;
+    t.sync();
+    try expectApprox(3.9, t.beat(0));
+    clock.now = 2_200_000_000;
+    clock.audible = 2_100_000_000;
+    t.sync();
+    try expectApprox(8.2, t.beat(0));
+}
+
+test "a lane joining a retune follows its shared missed boundary" {
+    var fake = FakeOutput{};
+    var clock = TestClock{};
+    var t = setup(&fake, &clock);
+    defer t.deinit();
+    for (0..3) |index| t.resolve(index, laneInfo(index + 1));
+    _ = t.startGroup(&.{ 0, 1 });
+    fake.markStarted(1, 0);
+    fake.markStarted(2, 0);
+    t.sync();
+    clock.now = 500_000_000;
+    t.setTempo(126);
+    const boundary = fake.playingLane(1).?.start_at_ns;
+    clock.now = 600_000_000;
+    t.start(2, .now);
+    try testing.expectEqual(boundary, fake.playingLane(3).?.start_at_ns);
+
+    clock.now = 2_200_000_000;
+    t.sync();
+    const retry_at = fake.playingLane(1).?.start_at_ns;
+    try testing.expectEqual(retry_at, fake.playingLane(3).?.start_at_ns);
+    for (1..4) |track_id| fake.markStarted(track_id, retry_at);
+    clock.now = retry_at + 1_000_000_000;
+    t.sync();
+    try expectApprox(@mod(t.beat(0), 4), t.beat(2));
+    try expectApprox(2.1, t.beat(2));
+}
+
+test "a new join latches tempo after every outgoing retune lane ends" {
+    var fake = FakeOutput{};
+    var clock = TestClock{};
+    var t = setup(&fake, &clock);
+    defer t.deinit();
+    for (0..3) |index| t.resolve(index, laneInfo(index + 1));
+    _ = t.startGroup(&.{ 0, 1 });
+    fake.markStarted(1, 0);
+    fake.markStarted(2, 0);
+    t.sync();
+    clock.now = 500_000_000;
+    t.setTempo(126);
+    t.start(2, .next_bar);
+    const boundary = fake.playingLane(3).?.start_at_ns;
+    fake.markEnded(1);
+    fake.markEnded(2);
+    t.sync();
+    fake.markStarted(3, boundary);
+    clock.now = boundary + 1_000_000_000;
+    t.sync();
+    try expectApprox(2.1, t.beat(2));
 }
