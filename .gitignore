@@ -3,3 +3,4 @@ zig-pkg/
 zig-out/
 .DS_Store
 .scratch/
+/graphify-out/
