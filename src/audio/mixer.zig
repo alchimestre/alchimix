@@ -73,6 +73,9 @@ pub const Lane = struct {
     start_at_ns: i128 = 0,
     /// Forces a decoder restart even when position and tempo look unchanged.
     restart: bool = false,
+    /// A bar start the clock has passed is refused rather than joined late;
+    /// the transport reschedules it onto the next bar.
+    rejoin: bool = false,
 };
 
 const sample_rate = device_mod.sample_rate;
@@ -335,6 +338,7 @@ const Slot = struct {
     started: bool = false,
     /// Absolute audio-clock time the lane may become audible.
     start_at_ns: i128 = 0,
+    rejoin: bool = false,
 };
 
 pub const Mixer = struct {
@@ -412,11 +416,14 @@ pub const Mixer = struct {
     }
 
     fn applyBatch(self: *Mixer, lanes: []const Lane) void {
+        const batch = lanes[0..@min(lanes.len, max_lanes)];
         var used: [max_lanes]bool = @splat(false);
-        for (lanes) |lane| {
+        var targets: [max_lanes]?usize = @splat(null);
+        for (batch, 0..) |lane, lane_index| {
             for (&self.slots, 0..) |*slot, index| {
                 if (used[index] or !slot.active or slot.uid != lane.uid) continue;
                 used[index] = true;
+                targets[lane_index] = index;
                 break;
             }
         }
@@ -425,29 +432,10 @@ pub const Mixer = struct {
             self.releaseLane(index);
         }
 
-        @memset(&used, false);
         var restarted_count: usize = 0;
-        for (lanes) |lane| {
-            var target_index: ?usize = null;
-            for (&self.slots, 0..) |*slot, index| {
-                if (!used[index] and slot.active and slot.uid == lane.uid) {
-                    used[index] = true;
-                    target_index = index;
-                    break;
-                }
-            }
-            if (target_index == null) {
-                for (&self.slots, 0..) |*slot, index| {
-                    if (!used[index] and !slot.active) {
-                        used[index] = true;
-                        target_index = index;
-                        break;
-                    }
-                }
-            }
-            if (target_index) |index| {
-                if (self.applyAt(index, lane) == .in_place) restarted_count += 1;
-            }
+        for (batch, 0..) |lane, lane_index| {
+            const index = targets[lane_index] orelse self.claimFreeSlot(&used) orelse continue;
+            if (self.applyAt(index, lane) == .in_place) restarted_count += 1;
         }
 
         var active_count: usize = 0;
@@ -456,6 +444,16 @@ pub const Mixer = struct {
         }
         if (active_count > 0 and restarted_count >= active_count) self.gate = true;
     }
+
+    fn claimFreeSlot(self: *Mixer, used: *[max_lanes]bool) ?usize {
+        for (&self.slots, 0..) |*slot, index| {
+            if (used[index] or slot.active) continue;
+            used[index] = true;
+            return index;
+        }
+        return null;
+    }
+
     fn framesToNs(frames: u64) i128 {
         const ns = @as(u128, frames) * 1_000_000_000 / sample_rate;
         return @intCast(ns);
@@ -504,7 +502,7 @@ pub const Mixer = struct {
         defer self.mutex.unlock(self.io);
 
         for (&self.slots, &self.incoming) |*slot, *incoming| {
-            if (incoming.active and incoming.uid == uid and !decoderEnded(incoming)) return .pending;
+            if (incoming.active and incoming.uid == uid) return .pending;
             if (!slot.active or slot.uid != uid) continue;
             if (decoderEnded(slot)) return .ended;
             if (slot.started) return .{ .started = slot.started_ns };
@@ -565,25 +563,18 @@ pub const Mixer = struct {
     fn applyAt(self: *Mixer, index: usize, lane: Lane) Applied {
         const slot = &self.slots[index];
         const incoming = &self.incoming[index];
-        const same_track = slot.active and slot.uid == lane.uid and slot.track_id == lane.track.id;
-        const same_start = @abs(slot.start_s - lane.start_s) < 0.001;
-        const same_tempo = @abs(slot.tempo - lane.tempo) < 0.0005 and slot.keylock == lane.keylock;
-        const same_incoming = incoming.active and
-            incoming.uid == lane.uid and
-            incoming.track_id == lane.track.id and
-            @abs(incoming.start_s - lane.start_s) < 0.001 and
-            @abs(incoming.tempo - lane.tempo) < 0.0005 and
-            incoming.keylock == lane.keylock;
-
         updateSettings(slot, lane);
-        if (slot.active and !lane.restart and same_incoming) {
+        if (slot.active and !lane.restart and incoming.active and sameStream(incoming, lane)) {
             updateSettings(incoming, lane);
             incoming.start_at_ns = lane.start_at_ns;
             return .staged;
         }
 
-        if (!lane.restart and same_track and same_start and same_tempo) {
-            if (!slot.started) slot.start_at_ns = lane.start_at_ns;
+        if (!lane.restart and slot.active and sameStream(slot, lane)) {
+            if (!slot.started) {
+                slot.start_at_ns = lane.start_at_ns;
+                slot.rejoin = lane.rejoin;
+            }
             if (incoming.active) {
                 self.beginRelease(incoming);
                 self.endRelease(incoming);
@@ -597,6 +588,7 @@ pub const Mixer = struct {
                 self.endRelease(incoming);
             }
             self.start(incoming, lane);
+            if (!incoming.active) failStaged(incoming, lane);
             return .staged;
         }
 
@@ -610,10 +602,39 @@ pub const Mixer = struct {
         return .in_place;
     }
 
+    fn sameStream(slot: *const Slot, lane: Lane) bool {
+        return slot.uid == lane.uid and
+            slot.track_id == lane.track.id and
+            @abs(slot.start_s - lane.start_s) < 0.001 and
+            @abs(slot.tempo - lane.tempo) < 0.0005 and
+            slot.keylock == lane.keylock;
+    }
+
+    /// A replacement that cannot decode still takes over at the shared
+    /// boundary, so its lane ends with its peers' switch instead of keeping
+    /// the old tempo.
+    fn failStaged(incoming: *Slot, lane: Lane) void {
+        incoming.* = .{
+            .ring = incoming.ring,
+            .active = true,
+            .uid = lane.uid,
+            .track_id = lane.track.id,
+            .start_s = lane.start_s,
+            .tempo = lane.tempo,
+            .keylock = lane.keylock,
+            .start_at_ns = lane.start_at_ns,
+        };
+    }
+
+    const one_sample_ns: i128 = (1_000_000_000 + sample_rate - 1) / sample_rate;
+
+    fn isExpired(now: i128, start_at_ns: i128) bool {
+        return start_at_ns != 0 and start_at_ns < now - one_sample_ns;
+    }
+
     fn stagedOffset(now: i128, start_at_ns: i128, frames: usize, block_end: i128) ?usize {
         if (start_at_ns > block_end) return null;
-        const one_sample_ns: i128 = @intCast((1_000_000_000 + sample_rate - 1) / sample_rate);
-        if (start_at_ns < now and start_at_ns < now - one_sample_ns) return null;
+        if (start_at_ns < now - one_sample_ns) return null;
         const offset = startOffset(now, start_at_ns, frames);
         if (offset >= frames) return null;
         return offset;
@@ -625,35 +646,46 @@ pub const Mixer = struct {
 
     fn readyStaged(self: *Mixer, now: i128, frames: usize, block_end: i128) [max_lanes]?usize {
         var handoff_at: [max_lanes]?usize = @splat(null);
+        var offsets: [max_lanes]?usize = @splat(null);
         for (&self.incoming, 0..) |*candidate, index| {
-            if (!candidate.active or decoderEnded(candidate)) continue;
-            const offset = stagedOffset(now, candidate.start_at_ns, frames, block_end) orelse continue;
-            if (self.groupReady(offset, now, frames, block_end)) handoff_at[index] = offset;
+            if (!candidate.active) continue;
+            offsets[index] = stagedOffset(now, candidate.start_at_ns, frames, block_end);
+        }
+        for (offsets, 0..) |maybe_offset, index| {
+            const offset = maybe_offset orelse continue;
+            const ready = for (0..index) |earlier| {
+                if (offsets[earlier] == offset) break handoff_at[earlier] != null;
+            } else self.groupReady(offset, now, frames, block_end);
+            if (ready) handoff_at[index] = offset;
         }
         return handoff_at;
     }
 
+    /// A decoder that already failed counts as ready: its lane retires at the
+    /// boundary with the others.
+    fn stagedPeerReady(peer: *const Slot) bool {
+        if (decoderEnded(peer)) return true;
+        const buffered = bufferedFrames(peer);
+        return buffered != 0 and (buffered >= prefill_frames or peer.file == null);
+    }
+
     fn groupReady(self: *Mixer, offset: usize, now: i128, frames: usize, block_end: i128) bool {
         for (&self.incoming) |*peer| {
-            if (!peer.active or decoderEnded(peer)) continue;
+            if (!peer.active) continue;
             const peer_offset = stagedOffset(now, peer.start_at_ns, frames, block_end) orelse continue;
-            if (peer_offset != offset) continue;
-            const buffered = bufferedFrames(peer);
-            if (buffered == 0 or (buffered < prefill_frames and peer.file != null)) return false;
+            if (peer_offset == offset and !stagedPeerReady(peer)) return false;
         }
         for (&self.slots, &self.incoming) |*peer, *replacement| {
-            if (!peer.active or peer.started or replacement.active or decoderEnded(peer)) continue;
+            if (!peer.active or peer.started or replacement.active) continue;
             const peer_offset = stagedOffset(now, peer.start_at_ns, frames, block_end) orelse continue;
-            if (peer_offset != offset) continue;
-            const buffered = bufferedFrames(peer);
-            if (buffered == 0 or (buffered < prefill_frames and peer.file != null)) return false;
+            if (peer_offset == offset and !stagedPeerReady(peer)) return false;
         }
         return true;
     }
 
     fn joinReady(self: *Mixer, slot: *const Slot, now: i128, frames: usize, block_end: i128) bool {
         for (&self.incoming) |*candidate| {
-            if (!candidate.active or decoderEnded(candidate)) continue;
+            if (!candidate.active) continue;
             if (candidate.start_at_ns != slot.start_at_ns) continue;
             const offset = stagedOffset(now, slot.start_at_ns, frames, block_end) orelse return false;
             return self.groupReady(offset, now, frames, block_end);
@@ -740,6 +772,7 @@ pub const Mixer = struct {
         slot.ready = false;
         slot.started = false;
         slot.start_at_ns = lane.start_at_ns;
+        slot.rejoin = lane.rejoin;
         slot.fft_fill = 0;
         @memset(&slot.spectrum, 0);
         for (&slot.biquads) |*channel| {
@@ -914,6 +947,7 @@ pub const Mixer = struct {
         decay_level: bool,
     ) void {
         if (!slot.active or slot.start_at_ns > block_end) return;
+        if (!slot.started and slot.rejoin and isExpired(now, slot.start_at_ns)) return;
         if (!slot.ready) {
             if (bufferedFrames(slot) < prefill_frames and slot.file != null) return;
             slot.ready = true;
@@ -971,15 +1005,12 @@ pub const Mixer = struct {
     /// Renders the same pipeline to a raw f32le file with no audio device, so
     /// the mix can be compared against a reference render.
     pub fn render(self: *Mixer, lanes: []const Lane, seconds: f64, out: std.Io.File) !void {
-        for (&self.slots) |*slot| {
-            if (slot.active) {
-                self.beginRelease(slot);
-                self.endRelease(slot);
-            }
-        }
+        self.releaseAll();
+        defer self.releaseAll();
         for (lanes, 0..) |lane, index| {
             if (index >= max_lanes) break;
             self.start(&self.slots[index], lane);
+            if (!self.slots[index].active) return error.DecoderFailed;
         }
 
         const total: usize = @intFromFloat(seconds * sample_rate);
@@ -1005,6 +1036,7 @@ pub const Mixer = struct {
                 self.io.sleep(.{ .nanoseconds = std.time.ns_per_ms }, .awake) catch {};
             }
 
+            try self.reapFailed();
             const frames: usize = if (total - written < tick_frames) total - written else tick_frames;
             // No clock and no scheduled starts: the render begins at the seek
             // and runs. A clock of maxInt overflowed `now + block_ns`.
@@ -1019,11 +1051,22 @@ pub const Mixer = struct {
             if (empty) self.io.sleep(.{ .nanoseconds = std.time.ns_per_ms }, .awake) catch {};
         }
 
+        try self.reapFailed();
+    }
+
+    fn releaseAll(self: *Mixer) void {
+        for (0..max_lanes) |index| self.releaseLane(index);
+    }
+
+    /// A decoder that reached its end without a clean exit produced no valid
+    /// audio: the render must fail, not pad the file with silence.
+    fn reapFailed(self: *Mixer) !void {
         for (&self.slots) |*slot| {
-            if (slot.active) {
-                self.beginRelease(slot);
-                self.endRelease(slot);
-            }
+            if (!slot.active or slot.file != null) continue;
+            var child = slot.child orelse continue;
+            slot.child = null;
+            const term = child.wait(self.io) catch return error.DecoderFailed;
+            if (term != .exited or term.exited != 0) return error.DecoderFailed;
         }
     }
 
@@ -1312,11 +1355,19 @@ test "a staged group waits for every decoder at the scheduled boundary" {
     }
 }
 
-test "an exhausted staged decoder does not block its retuned peer" {
+test "a failed staged decoder retires its lane at the boundary its peer switches" {
     var mixer = Mixer.init(testing.allocator, std.testing.io);
     defer mixer.deinit();
-    mixer.slots[0].active = true;
-    mixer.slots[0].uid = 1;
+    const failed_ring = mixer.slots[0].ring;
+    mixer.slots[0] = .{
+        .active = true,
+        .uid = 1,
+        .ready = true,
+        .started = true,
+        .head = 480,
+        .ring = failed_ring,
+    };
+    @memset(failed_ring[0 .. 480 * channels], 0.5);
     mixer.incoming[0].active = true;
     mixer.incoming[0].uid = 1;
     mixer.incoming[0].start_at_ns = 5_000_000;
@@ -1342,12 +1393,40 @@ test "an exhausted staged decoder does not block its retuned peer" {
     };
     @memset(incoming_ring[0 .. prefill_frames * channels], 0.25);
 
-    try testing.expectEqual(LaneState.ended, mixer.laneState(1));
+    try testing.expectEqual(LaneState.pending, mixer.laneState(1));
     mixer.mixFrames(480, 0);
+
     try testing.expectEqual(@as(i128, 5_000_000), mixer.slots[1].started_ns);
-    for (mixer.out[240 * channels .. 480 * channels]) |sample| {
-        try testing.expectApproxEqAbs(@as(f32, 0.25), sample, 0.0001);
+    try testing.expectEqual(LaneState.ended, mixer.laneState(1));
+    for (0..240 * channels) |sample| {
+        try testing.expectApproxEqAbs(@as(f32, 0.625), mixer.out[sample], 0.0001);
     }
+    for (240 * channels..480 * channels) |sample| {
+        try testing.expectApproxEqAbs(@as(f32, 0.25), mixer.out[sample], 0.0001);
+    }
+}
+
+test "a bar start the clock has passed is refused, an immediate start is not" {
+    var mixer = Mixer.init(testing.allocator, std.testing.io);
+    defer mixer.deinit();
+    for (0..2) |index| {
+        const ring = mixer.slots[index].ring;
+        mixer.slots[index] = .{
+            .active = true,
+            .uid = @intCast(index + 1),
+            .ready = true,
+            .head = prefill_frames,
+            .start_at_ns = if (index == 0) 5_000_000 else 0,
+            .rejoin = index == 0,
+            .ring = ring,
+        };
+        @memset(ring[0 .. prefill_frames * channels], 0.25);
+    }
+
+    mixer.mixFrames(480, 10_000_000);
+
+    try testing.expect(!mixer.slots[0].started);
+    try testing.expect(mixer.slots[1].started);
 }
 
 test "an unchanged staged decoder is reused when its start is rescheduled" {
@@ -1565,6 +1644,19 @@ test "a new lane waits when its retune group misses the shared boundary" {
     mixer.mixFrames(480, 10_000_000);
     try testing.expect(!mixer.slots[1].started);
     try testing.expectEqual(LaneState.pending, mixer.laneState(2));
+}
+
+test "a render whose decoder fails is an error, not silence" {
+    var mixer = Mixer.init(testing.allocator, std.testing.io);
+    defer mixer.deinit();
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const out = try tmp.dir.createFile(std.testing.io, "mix.raw", .{});
+    defer out.close(std.testing.io);
+    var track = Track.init(1, "missing", "artist");
+    track.file_path = "/nonexistent/alchimix-render-input.mp3";
+    const lanes = [_]Lane{.{ .track = track, .tempo = 1, .start_s = 0, .keylock = true }};
+    try testing.expectError(error.DecoderFailed, mixer.render(&lanes, 0.1, out));
 }
 
 test "an unstarted join keeps its buffer when the shared boundary is rescheduled" {

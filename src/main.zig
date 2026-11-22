@@ -172,9 +172,10 @@ fn renderMix(init: std.process.Init, args: *std.process.Args.Iterator) !void {
     }
     if (count == 0) return error.NoInputs;
 
-    const file = try std.Io.Dir.cwd().createFile(init.io, out_path, .{});
-    defer file.close(init.io);
-    try mixer.render(lanes[0..count], seconds, file);
+    var output = try std.Io.Dir.cwd().createFileAtomic(init.io, out_path, .{ .replace = true });
+    defer output.deinit(init.io);
+    try mixer.render(lanes[0..count], seconds, output.file);
+    try output.replace(init.io);
     std.debug.print("rendered\n", .{});
 }
 

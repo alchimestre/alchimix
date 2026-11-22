@@ -8,12 +8,15 @@ const Analysis = @import("../domain/analysis.zig").Analysis;
 pub const PlaylistKind = enum { list, smart, folder };
 
 /// One rekordbox playlist, intelligent playlist or folder. Strings live as
-/// long as the source.
+/// long as the source. `seq` and `uuid` are the identity a delete must keep to
+/// be undone; a playlist to create leaves `id` and `uuid` empty and `seq` 0.
 pub const Playlist = struct {
     id: []const u8,
     name: []const u8,
     parent: []const u8,
     kind: PlaylistKind,
+    seq: i64 = 0,
+    uuid: []const u8 = "",
 };
 
 pub const Library = struct {
@@ -36,8 +39,13 @@ pub const Library = struct {
         playlistTracks: *const fn (ctx: *anyopaque, allocator: std.mem.Allocator, playlist_id: []const u8) anyerror![]const u64,
         /// Writes a new playlist with the given tracks, in order.
         createPlaylist: *const fn (ctx: *anyopaque, name: []const u8, track_ids: []const u64) anyerror!void,
-        /// Replaces an existing playlist's tracks, in order.
-        replacePlaylistTracks: *const fn (ctx: *anyopaque, playlist_id: []const u8, track_ids: []const u64) anyerror!void,
+        /// Writes a playlist back after a delete: its id and uuid when still
+        /// free, under its parent at its sequence.
+        restorePlaylist: *const fn (ctx: *anyopaque, playlist: Playlist, track_ids: []const u64) anyerror!void,
+        /// Replaces an existing playlist's tracks, in order. `expected` is the
+        /// membership the caller loaded; a playlist that differs now, or is
+        /// gone, is refused.
+        replacePlaylistTracks: *const fn (ctx: *anyopaque, playlist_id: []const u8, expected: []const u64, track_ids: []const u64) anyerror!void,
         /// Renames a playlist in place, leaving its tracks untouched.
         renamePlaylist: *const fn (ctx: *anyopaque, playlist_id: []const u8, playlist_name: []const u8) anyerror!void,
         /// Removes a playlist and its track rows. The tracks themselves stay.
@@ -71,8 +79,12 @@ pub const Library = struct {
         return self.vtable.createPlaylist(self.ctx, playlist_name, track_ids);
     }
 
-    pub fn replacePlaylistTracks(self: Library, playlist_id: []const u8, track_ids: []const u64) !void {
-        return self.vtable.replacePlaylistTracks(self.ctx, playlist_id, track_ids);
+    pub fn restorePlaylist(self: Library, playlist: Playlist, track_ids: []const u64) !void {
+        return self.vtable.restorePlaylist(self.ctx, playlist, track_ids);
+    }
+
+    pub fn replacePlaylistTracks(self: Library, playlist_id: []const u8, expected: []const u64, track_ids: []const u64) !void {
+        return self.vtable.replacePlaylistTracks(self.ctx, playlist_id, expected, track_ids);
     }
 
     pub fn renamePlaylist(self: Library, playlist_id: []const u8, playlist_name: []const u8) !void {

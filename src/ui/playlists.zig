@@ -6,6 +6,7 @@ const dvui = @import("dvui");
 const pl = @import("alchimix");
 const hit = @import("hit.zig");
 const app_mod = @import("app.zig");
+const undo_mod = @import("undo.zig");
 
 const App = app_mod.App;
 const Palette = app_mod.Palette;
@@ -20,7 +21,7 @@ const metaFont = app_mod.metaFont;
 const headingFont = app_mod.headingFont;
 
 /// What the last write did, shown on the save chip until its timeout.
-pub const Outcome = enum { none, saved, failed };
+pub const Outcome = enum { none, saved, failed, stale, running };
 
 /// Where a save writes: back into the open playlist, or into a new one.
 pub const SaveTarget = union(enum) { replace: []const u8, create: []const u8, refused };
@@ -33,6 +34,9 @@ pub const Panel = struct {
     open_count: usize = 0,
     /// The playlist open in the crate, for the row highlight.
     open_playlist: ?[]const u8 = null,
+    /// The playlist's track ids as they were when the crate was loaded or last
+    /// saved: what a save must still find in the source.
+    open_ids: []u64 = &.{},
     /// What the last write did, shown on its chip until `outcome_until`.
     outcome: Outcome = .none,
     outcome_until: f64 = 0,
@@ -54,30 +58,88 @@ pub const Panel = struct {
     rename_focus: bool = false,
 
     pub fn deinit(self: *Panel, allocator: std.mem.Allocator) void {
-        if (self.open_playlist) |id| {
-            if (id.len > 0) allocator.free(id);
-        }
+        self.release(allocator);
         if (self.renaming) |id| allocator.free(id);
         self.rename_text.deinit(allocator);
         self.save_name.deinit(allocator);
         if (self.delete_playlist) |id| allocator.free(id);
     }
 
+    fn release(self: *Panel, allocator: std.mem.Allocator) void {
+        if (self.open_playlist) |id| allocator.free(id);
+        allocator.free(self.open_ids);
+        self.open_playlist = null;
+        self.open_ids = &.{};
+    }
+
+    /// Opens `id` with the membership it had when loaded. A failed copy leaves
+    /// the previous binding untouched.
+    pub fn bind(self: *Panel, allocator: std.mem.Allocator, id: []const u8, loaded: []const u64) !void {
+        const owned_id = try allocator.dupe(u8, id);
+        errdefer allocator.free(owned_id);
+        const owned_ids = try allocator.dupe(u64, loaded);
+        self.release(allocator);
+        self.open_playlist = owned_id;
+        self.open_ids = owned_ids;
+    }
+
+    /// Puts back the binding an undone crate edit had. The same playlist keeps
+    /// its current membership, which is newer than the one in the entry.
+    pub fn rebind(self: *Panel, allocator: std.mem.Allocator, playlist: ?[]const u8, loaded: []const u64) !void {
+        const id = playlist orelse return self.release(allocator);
+        if (self.open_playlist) |current| {
+            if (std.mem.eql(u8, current, id)) return;
+        }
+        try self.bind(allocator, id, loaded);
+    }
+
+    /// After a successful replace the written ids are what the source holds.
+    fn rebaseline(self: *Panel, allocator: std.mem.Allocator, written: []const u64) void {
+        // A failed copy keeps the old baseline, so the next save reports stale instead of overwriting.
+        const copy = allocator.dupe(u64, written) catch return;
+        allocator.free(self.open_ids);
+        self.open_ids = copy;
+    }
+
     /// A cleared crate forgets the playlist it came from.
     pub fn clear(self: *Panel, app: *App) void {
-        if (self.open_playlist) |id| {
-            if (id.len > 0) app.allocator.free(id);
-        }
-        self.open_playlist = null;
+        self.release(app.allocator);
         self.cancelRename(app);
         self.open_count = 0;
     }
 
-    /// A plain press on the save chip: write, then show the result on the chip.
-    pub fn save(self: *Panel, app: *App) void {
-        self.outcome = self.saveCratePlaylist(app, null);
+    fn indexOf(self: *const Panel, id: []const u8) ?usize {
+        for (self.rows, 0..) |row, index| {
+            if (std.mem.eql(u8, row.id, id)) return index;
+        }
+        return null;
+    }
+
+    fn flash(self: *Panel, outcome: Outcome) void {
+        self.outcome = outcome;
         self.outcome_until = secondsNow() + flash_seconds;
         dvui.refresh(null, @src(), null);
+    }
+
+    pub fn flashFailed(self: *Panel) void {
+        self.flash(.failed);
+    }
+
+    pub fn flashError(self: *Panel, err: anyerror) void {
+        self.flash(outcomeOf(err));
+    }
+
+    fn outcomeOf(err: anyerror) Outcome {
+        return switch (err) {
+            error.StalePlaylist, error.PlaylistNotFound => .stale,
+            error.RekordboxRunning => .running,
+            else => .failed,
+        };
+    }
+
+    /// A plain press on the save chip: write, then show the result on the chip.
+    pub fn save(self: *Panel, app: *App) void {
+        self.flash(self.saveCratePlaylist(app, null));
     }
 
     /// True while a row is an open field, so the caret keeps asking for frames.
@@ -109,8 +171,8 @@ pub const Panel = struct {
     }
 
     /// Shift-click on a playlist row: the name becomes a field in place.
-    pub fn startRename(self: *Panel, app: *App, index: usize) void {
-        if (index >= self.rows.len) return;
+    pub fn startRename(self: *Panel, app: *App, id: []const u8) void {
+        const index = self.indexOf(id) orelse return;
         const playlist = self.rows[index];
         self.cancelRename(app);
         self.rename_text.appendSlice(app.allocator, playlist.name) catch return;
@@ -136,19 +198,19 @@ pub const Panel = struct {
             self.cancelRename(app);
             return;
         }
-        // Keep the name it had, so U can put it back.
-        for (self.rows) |row| {
-            if (std.mem.eql(u8, row.id, id)) {
-                app.undo_history.pushRenamed(row.id, row.name);
-                break;
-            }
-        }
-        app.library.renamePlaylist(id, name) catch {
-            self.cancelRename(app);
-            return;
-        };
+        self.renameChecked(app, id, name) catch |err| self.flash(outcomeOf(err));
         self.rows = app.library.playlists() catch &.{};
         self.cancelRename(app);
+    }
+
+    /// The undo entry is built before the write and kept only once it commits.
+    fn renameChecked(self: *Panel, app: *App, id: []const u8, name: []const u8) !void {
+        const index = self.indexOf(id) orelse return error.PlaylistNotFound;
+        const change = try undo_mod.Change.ofRename(app.allocator, id, self.rows[index].name);
+        errdefer change.deinit(app.allocator);
+        try app.undo_history.reserve();
+        try app.library.renamePlaylist(id, name);
+        app.undo_history.push(change);
     }
 
     /// True when the press lands on the row being renamed, where the field
@@ -157,13 +219,15 @@ pub const Panel = struct {
         const id = self.renaming orelse return false;
         const target = app.hit_map.hit(p) orelse return false;
         return switch (target) {
-            .playlist => |index| index < self.rows.len and std.mem.eql(u8, self.rows[index].id, id),
+            .playlist => |row_id| std.mem.eql(u8, row_id, id),
             else => false,
         };
     }
 
-    /// Opens a playlist in the crate, in playlist order, ready to edit.
-    pub fn selectPlaylist(self: *Panel, app: *App, index: usize) void {
+    /// Opens a playlist in the crate, in playlist order, ready to edit. A
+    /// playlist that cannot be loaded whole leaves the crate as it was.
+    pub fn selectPlaylist(self: *Panel, app: *App, id: []const u8) void {
+        const index = self.indexOf(id) orelse return;
         const playlist = self.rows[index];
         if (playlist.kind == .folder) {
             self.toggleFolder(playlist.id);
@@ -171,8 +235,19 @@ pub const Panel = struct {
         }
         if (playlist.kind == .smart) return;
 
-        const ids = app.library.playlistTracks(app.allocator, playlist.id) catch return;
-        defer if (ids.len > 0) app.allocator.free(ids);
+        self.openPlaylist(app, playlist) catch |err| {
+            std.log.err("opening playlist {s}: {s}", .{ playlist.name, @errorName(err) });
+            self.flash(.failed);
+        };
+    }
+
+    fn openPlaylist(self: *Panel, app: *App, playlist: pl.library.Playlist) !void {
+        const ids = try app.library.playlistTracks(app.allocator, playlist.id);
+        defer app.allocator.free(ids);
+        const staged = try stageTracks(app.allocator, try app.library.all(), ids);
+        defer app.allocator.free(staged);
+        try app.crate.items.ensureTotalCapacity(app.allocator, staged.len);
+        try self.bind(app.allocator, playlist.id, ids);
 
         app.player.stopAll();
         app.scheduled.clear();
@@ -183,23 +258,24 @@ pub const Panel = struct {
         app.selected.clearRetainingCapacity();
         app.query.clearRetainingCapacity();
         app.played = .{};
-
-        const all = app.library.all() catch &.{};
-        for (ids) |id| {
-            for (all) |track| {
-                if (track.id != id) continue;
-                _ = app.crate.append(track) catch break;
-                break;
-            }
-        }
+        for (staged) |track| _ = app.crate.append(track) catch unreachable;
 
         app.grid_dirty = true;
-        if (self.open_playlist) |old| {
-            if (old.len > 0) app.allocator.free(old);
-        }
-        self.open_playlist = app.allocator.dupe(u8, playlist.id) catch null;
         app.refresh() catch {};
         dvui.refresh(null, @src(), null);
+    }
+
+    /// The library's track for every id, in order. A member the library does
+    /// not hold would shorten the crate and the next save would drop it.
+    fn stageTracks(allocator: std.mem.Allocator, all: []const pl.track.Track, ids: []const u64) ![]pl.track.Track {
+        const staged = try allocator.alloc(pl.track.Track, ids.len);
+        errdefer allocator.free(staged);
+        for (ids, staged) |id, *slot| {
+            slot.* = for (all) |candidate| {
+                if (candidate.id == id) break candidate;
+            } else return error.TrackMissing;
+        }
+        return staged;
     }
 
     /// Seconds the save chip keeps its result before returning to its label.
@@ -233,26 +309,22 @@ pub const Panel = struct {
         return .{ .create = automatic };
     }
 
-    /// Writes the crate back to its playlist, or into a new one. `ids` is built
-    /// compactly: a slot with no track leaves no hole, so nothing past the
-    /// written count is ever stored.
+    /// Writes the crate back to its playlist, or into a new one.
     pub fn saveCratePlaylist(self: *Panel, app: *App, chosen_name: ?[]const u8) Outcome {
-        var ids: [256]u64 = undefined;
-        var count: usize = 0;
-        const limit = @min(app.crate.len(), ids.len);
-        for (0..limit) |index| {
-            const track = app.crate.at(index) orelse continue;
-            ids[count] = track.id;
-            count += 1;
-        }
-        if (count == 0) return .failed;
+        const ids = app.allocator.alloc(u64, app.crate.len()) catch return .failed;
+        defer app.allocator.free(ids);
+        for (app.crate.items.items, ids) |track, *slot| slot.* = track.id;
+        if (ids.len == 0) return .failed;
 
         var name_buffer: [128]u8 = undefined;
         const automatic = automaticCrateName(app, &name_buffer);
         switch (saveTarget(self.open_playlist, chosen_name, automatic, self.rows)) {
             .refused => return .failed,
-            .replace => |playlist_id| app.library.replacePlaylistTracks(playlist_id, ids[0..count]) catch return .failed,
-            .create => |name| app.library.createPlaylist(name, ids[0..count]) catch return .failed,
+            .replace => |playlist_id| {
+                app.library.replacePlaylistTracks(playlist_id, self.open_ids, ids) catch |err| return outcomeOf(err);
+                self.rebaseline(app.allocator, ids);
+            },
+            .create => |name| app.library.createPlaylist(name, ids) catch |err| return outcomeOf(err),
         }
         self.rows = app.library.playlists() catch &.{};
         return .saved;
@@ -289,8 +361,7 @@ pub const Panel = struct {
             self.cancelNamedSave();
             return;
         }
-        self.outcome = self.saveCratePlaylist(app, name);
-        self.outcome_until = secondsNow() + flash_seconds;
+        self.flash(self.saveCratePlaylist(app, name));
         self.cancelNamedSave();
     }
 
@@ -308,10 +379,11 @@ pub const Panel = struct {
     }
 
     /// Shift right press on a playlist row: the chip offers to delete it.
-    pub fn armDelete(self: *Panel, app: *App, index: usize) void {
+    pub fn armDelete(self: *Panel, app: *App, id: []const u8) void {
+        const index = self.indexOf(id) orelse return;
         if (!deletable(self.rows, index)) return;
         self.cancelDelete(app);
-        self.delete_playlist = app.allocator.dupe(u8, self.rows[index].id) catch null;
+        self.delete_playlist = app.allocator.dupe(u8, id) catch null;
         dvui.refresh(null, @src(), null);
     }
 
@@ -325,30 +397,29 @@ pub const Panel = struct {
     /// opened from it keeps its rows and simply stops writing back.
     pub fn commitDelete(self: *Panel, app: *App) void {
         const id = self.delete_playlist orelse return;
-        // Keep what the playlist held: a delete takes its rows with it, and
-        // only the tracks can bring them back.
-        for (self.rows) |row| {
-            if (!std.mem.eql(u8, row.id, id)) continue;
-            if (app.library.playlistTracks(app.allocator, id)) |ids| {
-                app.undo_history.pushDeleted(row.name, ids);
-                app.allocator.free(ids);
-            } else |_| {}
-            break;
-        }
-        app.library.deletePlaylist(id) catch {
-            self.outcome = .failed;
-            self.outcome_until = secondsNow() + flash_seconds;
+        self.deleteChecked(app, id) catch |err| {
+            self.flash(outcomeOf(err));
             self.cancelDelete(app);
             return;
         };
         if (self.open_playlist) |selected| {
-            if (std.mem.eql(u8, selected, id)) {
-                app.allocator.free(selected);
-                self.open_playlist = null;
-            }
+            if (std.mem.eql(u8, selected, id)) self.release(app.allocator);
         }
         self.rows = app.library.playlists() catch &.{};
         self.cancelDelete(app);
+    }
+
+    /// A delete takes its rows with it, so the snapshot comes first and a
+    /// snapshot that cannot be taken blocks the delete.
+    fn deleteChecked(self: *Panel, app: *App, id: []const u8) !void {
+        const index = self.indexOf(id) orelse return error.PlaylistNotFound;
+        const ids = try app.library.playlistTracks(app.allocator, id);
+        defer app.allocator.free(ids);
+        const change = try undo_mod.Change.ofDelete(app.allocator, self.rows[index], ids);
+        errdefer change.deinit(app.allocator);
+        try app.undo_history.reserve();
+        try app.library.deletePlaylist(id);
+        app.undo_history.push(change);
     }
 
     /// The name field a shift press opens, under the header.
@@ -395,9 +466,9 @@ pub const Panel = struct {
         defer row.deinit();
 
         const target: hit.Target = if (playlist.kind == .folder)
-            .{ .playlist_toggle = index }
+            .{ .playlist_toggle = playlist.id }
         else
-            .{ .playlist = index };
+            .{ .playlist = playlist.id };
         app.hit_map.append(rectFrom(row.data().contentRectScale().r), target);
 
         if (self.renaming) |renaming_id| {
@@ -551,7 +622,7 @@ pub const Panel = struct {
             gap.deinit();
 
             const armed = self.delete_playlist != null;
-            const flash = self.saveFlash();
+            const shown = self.saveFlash();
             var chip = dvui.box(@src(), .{ .dir = .horizontal }, .{
                 .min_size_content = .{ .w = 60, .h = 20 },
                 .margin = .{ .y = 2 },
@@ -560,24 +631,26 @@ pub const Panel = struct {
                 .id_extra = 7201,
             });
             defer chip.deinit();
-            labelStyled(@src(), if (armed) "Delete ?" else switch (flash) {
+            labelStyled(@src(), if (armed) "Delete ?" else switch (shown) {
                 .none => "Save",
                 .saved => "saved",
                 .failed => "failed",
+                .stale => "stale",
+                .running => "rb open",
             }, .{
                 .gravity_x = 0.5,
                 .gravity_y = 0.5,
-                .color_text = .{ .color = if (armed) Palette.red else switch (flash) {
+                .color_text = .{ .color = if (armed) Palette.red else switch (shown) {
                     .none => Palette.muted,
                     .saved => Palette.green,
-                    .failed => Palette.red,
+                    .failed, .stale, .running => Palette.red,
                 } },
                 .font = metaFont(),
                 .id_extra = 7202,
             });
             app.hit_map.append(rectFrom(chip.data().contentRectScale().r), .save_playlist);
             // The flash reverts on the clock, so it needs its own frames.
-            if (flash != .none) dvui.refresh(null, @src(), null);
+            if (shown != .none) dvui.refresh(null, @src(), null);
         }
 
         if (self.naming_save) self.saveNameField(app);
@@ -608,4 +681,37 @@ test "a folder is only deletable once its children are gone" {
     try std.testing.expect(Panel.deletable(&playlists, 2));
     try std.testing.expect(Panel.deletable(&playlists, 3));
     try std.testing.expect(!Panel.deletable(&playlists, 9));
+}
+
+test "undoing a crate edit restores the playlist it was open on" {
+    const allocator = std.testing.allocator;
+    var panel = Panel{};
+    defer panel.deinit(allocator);
+
+    try panel.bind(allocator, "a", &.{ 1, 2 });
+    try panel.bind(allocator, "b", &.{3});
+    try panel.rebind(allocator, "a", &.{ 1, 2 });
+    try std.testing.expectEqualStrings("a", Panel.saveTarget(panel.open_playlist, null, "Crate", &.{}).replace);
+    try std.testing.expectEqualSlices(u64, &.{ 1, 2 }, panel.open_ids);
+
+    // The same playlist keeps the newer membership it has now.
+    panel.rebaseline(allocator, &.{ 1, 2, 9 });
+    try panel.rebind(allocator, "a", &.{ 1, 2 });
+    try std.testing.expectEqualSlices(u64, &.{ 1, 2, 9 }, panel.open_ids);
+
+    try panel.rebind(allocator, null, &.{});
+    try std.testing.expect(panel.open_playlist == null);
+}
+
+test "a playlist with a member the library lacks is not staged" {
+    const all = [_]pl.track.Track{.{ .id = 1, .title = "one", .artist = "a" }};
+    const staged = try Panel.stageTracks(std.testing.allocator, &all, &.{1});
+    std.testing.allocator.free(staged);
+    try std.testing.expectError(error.TrackMissing, Panel.stageTracks(std.testing.allocator, &all, &.{ 1, 2 }));
+}
+
+test "write errors map to their own chip" {
+    try std.testing.expectEqual(Outcome.stale, Panel.outcomeOf(error.StalePlaylist));
+    try std.testing.expectEqual(Outcome.running, Panel.outcomeOf(error.RekordboxRunning));
+    try std.testing.expectEqual(Outcome.failed, Panel.outcomeOf(error.OutOfMemory));
 }

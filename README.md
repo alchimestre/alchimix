@@ -98,6 +98,11 @@ tracks stay in the collection. A folder that still holds playlists is not offere
 for deletion. Intelligent playlists and rekordbox's own `CUE Analysis Playlist`
 entries are not shown.
 
+`save` and the other playlist writes are refused while rekordbox runs (the chip
+reads `rb open`), and a save is refused as `stale` when the playlist changed in
+rekordbox since it was opened. Undoing a delete puts the playlist back under its
+parent at its old position, with its id and uuid when they are still free.
+
 `U` walks back through the crate and playlist edits one at a time, newest first;
 it types a `u` instead while a text field holds focus. Keys come from
 `$XDG_CONFIG_HOME/alchimix/keys`, or `~/.config/alchimix/keys`, one `name = key`
@@ -171,8 +176,15 @@ spirals and lattices are Klüver's form constants.
 `~/Library/Pioneer/rekordbox/master.db`, opened with SQLCipher. Writes stay
 inside playlists: creating one, replacing its tracks, renaming it, deleting it.
 Tracks, cue points and analysis are never written. Each write holds the
-database's write lock for one transaction and waits up to five seconds for
-rekordbox to let go of it.
+database's write lock for one transaction. Close rekordbox before writing: a
+write is refused while a `rekordbox` process is running, and the check fails
+closed when the process list cannot be read.
+
+Every row a write touches takes the next `agentRegistry.localUpdateCount`, as
+pyrekordbox does, so rekordbox sees the change as local. `masterPlaylists6.xml`
+is not updated: it lives outside the database and cannot be committed with it,
+and pyrekordbox only warns when its node is missing. Whether rekordbox
+rebuilds it on the next launch is untested.
 
 The database key comes from `ALCHIMIX_REKORDBOX_KEY` when set, otherwise from the
 cache pyrekordbox keeps at `~/Library/Application Support/pyrekordbox/rb.cache`.

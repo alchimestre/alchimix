@@ -77,8 +77,9 @@ const Slot = struct {
     /// The mixer's own report of when the current stream began, so a staged
     /// pass taking over is visible as a new instant.
     started_at_ns: ?i128 = null,
-    pending_beat: ?f32 = null,
-    pending_retune: bool = false,
+    /// The pass waiting to take over: a seek keeps its target, a retune
+    /// recomputes its target whenever its bar moves.
+    pending: ?Handoff = null,
     previous_pass: ?struct {
         beat: f32,
         started_master: f32,
@@ -104,8 +105,22 @@ const Slot = struct {
     loop_end: f32 = 0,
     /// The wrap for this pass is already scheduled, waiting on its instant.
     loop_armed: bool = false,
+    /// A group retune lands at this instant; until then the loop keeps
+    /// wrapping at the clock tempo, so the outgoing pass never runs past it.
+    retune_at: i128 = 0,
     /// Set while the grid sync walks the crate.
     seen: bool = false,
+};
+
+const Handoff = union(enum) {
+    seek: f32,
+    retune: f32,
+
+    fn beat(self: Handoff) f32 {
+        return switch (self) {
+            inline else => |target| target,
+        };
+    }
 };
 
 /// How late a lane may start before it is moved to the next bar.
@@ -277,9 +292,11 @@ pub const Transport = struct {
                     // Put it back on the next bar instead of joining mid-bar.
                     // A joint start keeps its bar: its lanes start together,
                     // so they stay in sync with each other.
-                    if (slot.rejoin and (!slot.start_latched or slot.pending_beat != null) and slot.start_at_ns != 0 and now > slot.start_at_ns + start_grace_ns) {
+                    if (slot.rejoin and (!slot.start_latched or slot.pending != null) and slot.start_at_ns != 0 and now > slot.start_at_ns + start_grace_ns) {
                         slot.start_at_ns = self.nextBarAt(now);
-                        if (slot.pending_retune) slot.pending_beat = self.beatAt(slot, slot.start_at_ns);
+                        if (slot.pending) |handoff| {
+                            if (handoff == .retune) slot.pending = .{ .retune = self.retunePose(slot, slot.start_at_ns) };
+                        }
                         changed = true;
                     }
                 },
@@ -287,7 +304,12 @@ pub const Transport = struct {
                     self.latchStart(slot, started);
                 },
             }
-            if (slot.pending_beat != null) continue;
+            if (slot.pending != null) continue;
+            if (slot.retune_at != 0 and self.deferredRetuneDue(slot, now)) {
+                self.installRetune(slot);
+                changed = true;
+                continue;
+            }
             if (slot.start_latched and slot.loop_end > slot.loop_begin) {
                 if (self.wrapLoop(slot, now)) changed = true;
                 continue;
@@ -434,11 +456,15 @@ pub const Transport = struct {
             slot.held = false;
             return;
         }
-        slot.pending_beat = slot.beat;
-        slot.pending_retune = false;
+        // A pending retune bar is a different float sum of the same instant;
+        // the mixer groups only identical start times.
+        const start_at = self.joinAt(self.nextBarAt(self.nowNs()));
+        self.poseForStart(slot);
+        slot.pending = .{ .seek = slot.beat };
+        slot.retune_at = 0;
         slot.beat = old_beat;
         slot.beat_raw = old_raw;
-        slot.start_at_ns = self.nextBarAt(self.nowNs());
+        slot.start_at_ns = start_at;
         slot.rejoin = true;
         slot.restart = true;
         slot.loop_armed = false;
@@ -592,27 +618,65 @@ pub const Transport = struct {
         const at = if (self.playingCount() > 1) self.nextBarAt(now) else 0;
         for (self.slots.items) |*slot| {
             if (!slot.playing) continue;
-            if (slot.pending_beat == null or slot.pending_retune) {
-                slot.pending_beat = self.beatAt(slot, if (at == 0) now else at);
-                slot.pending_retune = true;
+            const keeps_seek = if (slot.pending) |handoff| handoff == .seek else false;
+            if (at != 0 and slot.pending == null and self.loopWrapsBefore(slot, at)) {
+                slot.retune_at = at;
+                continue;
             }
-            slot.start_at_ns = at;
-            slot.rejoin = at != 0;
+            if (!keeps_seek) {
+                slot.pending = .{ .retune = self.retunePose(slot, if (at == 0) now else at) };
+                slot.start_at_ns = at;
+                slot.rejoin = at != 0;
+                slot.retune_at = 0;
+            }
             slot.restart = true;
             slot.loop_armed = false;
         }
         self.pushMix();
     }
 
+    /// Where a retuned lane resumes at `at`: inside its loop when one is set.
+    fn retunePose(self: *Transport, slot: *Slot, at: i128) f32 {
+        const pose = self.beatAt(slot, at);
+        if (slot.loop_end <= slot.loop_begin or pose < slot.loop_end) return pose;
+        return slot.loop_begin + @mod(pose - slot.loop_begin, slot.loop_end - slot.loop_begin);
+    }
+
+    /// True when the loop wraps before `at`: handing over at `at` would let
+    /// the outgoing pass run past the loop end.
+    fn loopWrapsBefore(self: *Transport, slot: *Slot, at: i128) bool {
+        const wrap_tolerance_beats = 0.01;
+        if (!slot.start_latched or slot.loop_end <= slot.loop_begin) return false;
+        return self.beatAt(slot, at) > slot.loop_end + wrap_tolerance_beats;
+    }
+
+    /// A deferred retune is staged once no wrap remains before its instant.
+    fn deferredRetuneDue(self: *Transport, slot: *Slot, now: i128) bool {
+        if (!slot.start_latched or slot.loop_armed) return false;
+        if (slot.loop_end <= slot.loop_begin) return true;
+        const remaining = slot.loop_end - self.beatAt(slot, now);
+        const wrap_at = now + @as(i128, @intFromFloat(@as(f64, remaining) * 60 / self.clock_bpm * 1_000_000_000));
+        return wrap_at >= slot.retune_at - start_grace_ns;
+    }
+
+    fn installRetune(self: *Transport, slot: *Slot) void {
+        const at = self.joinAt(slot.retune_at);
+        slot.retune_at = 0;
+        slot.pending = .{ .retune = self.retunePose(slot, at) };
+        slot.start_at_ns = at;
+        slot.rejoin = true;
+        slot.restart = true;
+    }
+
     fn latchStart(self: *Transport, slot: *Slot, started: i128) void {
-        if (slot.pending_beat) |target| {
+        if (slot.pending) |handoff| {
+            const target = handoff.beat();
             if (slot.started_at_ns != null and started == slot.started_at_ns.?) return;
             retainPass(slot, started);
             slot.beat = target;
             slot.beat_raw = target;
-            slot.pending_beat = null;
+            slot.pending = null;
             slot.loop_armed = false;
-            slot.pending_retune = false;
             slot.start_latched = false;
         }
         if (slot.start_latched and slot.loop_armed and slot.started_at_ns != null and started != slot.started_at_ns.?) {
@@ -630,7 +694,7 @@ pub const Transport = struct {
                 self.clock_bpm = self.bpm;
                 self.previous_bpm = self.bpm;
             }
-            self.latchTempo(started);
+            if (slot.retune_at == 0) self.latchTempo(started);
             slot.start_latched = true;
             slot.started_master = self.masterBeatAt(started);
         }
@@ -787,6 +851,7 @@ pub const Transport = struct {
         slot.playing = true;
         slot.held = false;
         slot.start_latched = false;
+        slot.retune_at = 0;
         slot.rejoin = join == .next_bar or (self.running and self.clock_bpm != self.bpm);
         slot.start_at_ns = start_at;
         self.pushMix();
@@ -795,7 +860,7 @@ pub const Transport = struct {
     fn joinAt(self: *const Transport, fallback: i128) i128 {
         if (self.clock_bpm == self.bpm) return fallback;
         for (self.slots.items) |slot| {
-            if (slot.playing and slot.pending_beat != null) return slot.start_at_ns;
+            if (slot.playing and slot.pending != null) return slot.start_at_ns;
         }
         return fallback;
     }
@@ -901,8 +966,7 @@ pub const Transport = struct {
         slot.beat = self.beatAt(slot, now);
         slot.beat_raw = slot.beat;
         slot.start_latched = false;
-        slot.pending_beat = null;
-        slot.pending_retune = false;
+        slot.pending = null;
         slot.loop_armed = false;
         slot.previous_pass = null;
     }
@@ -958,14 +1022,15 @@ pub const Transport = struct {
         return .{
             .uid = slot.uid,
             .track = slot.track,
-            .start_s = secondsAt(slot, slot.pending_beat orelse if (slot.loop_armed) slot.loop_begin else slot.beat),
-            .tempo = self.bpm / slot.grid_bpm,
+            .start_s = secondsAt(slot, if (slot.pending) |handoff| handoff.beat() else if (slot.loop_armed) slot.loop_begin else slot.beat),
+            .tempo = (if (slot.retune_at != 0) self.clock_bpm else self.bpm) / slot.grid_bpm,
             .eq = slot.eq,
             .muted = slot.muted,
             .trim_db = slot.trim_db,
             .keylock = self.keylock,
             .start_at_ns = slot.start_at_ns,
             .restart = slot.restart,
+            .rejoin = slot.rejoin,
         };
     }
 
@@ -988,6 +1053,7 @@ pub const Transport = struct {
             key = mixHash(key, @as(u32, @bitCast(lane.trim_db)));
             key = mixHash(key, @intFromBool(lane.keylock));
             key = mixHash(key, @intFromBool(lane.restart));
+            key = mixHash(key, @intFromBool(lane.rejoin));
             key = mixHash(key, @as(u64, @intCast(@max(0, lane.start_at_ns) / 1_000_000)));
         }
         if (count == 0) {
@@ -2465,16 +2531,118 @@ test "changing tempo during a seek updates the clock at its handoff" {
     t.sync();
     clock.now = 500_000_000;
     t.seek(0, 8);
+    const seek_bar = fake.playingLane(1).?.start_at_ns;
     t.setTempo(126);
     const pass = fake.playingLane(1).?;
-    fake.markStarted(1, 1_000_000_000);
-    clock.now = 1_000_000_000;
+    try testing.expectEqual(seek_bar, pass.start_at_ns);
+    try testing.expect(@abs(seek_bar - 2_000_000_000) < 1_000);
+    try expectApprox(4, @floatCast(pass.start_s));
+    fake.markStarted(1, seek_bar);
+    clock.now = seek_bar;
     t.sync();
     try expectApprox(8, t.beat(0));
-    clock.now = 2_000_000_000;
+    clock.now = seek_bar + 1_000_000_000;
     t.sync();
     try expectApprox(10.1, t.beat(0));
     try expectApprox(126.0 / 120.0, pass.tempo);
+}
+
+test "a retune inside a loop resumes inside the loop" {
+    var fake = FakeOutput{};
+    var clock = TestClock{};
+    var t = setup(&fake, &clock);
+    defer t.deinit();
+    t.resolve(0, laneInfo(1));
+    t.resolve(1, laneInfo(2));
+    t.startAll();
+    fake.markStarted(1, 0);
+    fake.markStarted(2, 0);
+    t.sync();
+    t.setLoop(0, 4, 8);
+    clock.now = 3_500_000_000;
+    t.setTempo(126);
+    const lane = fake.playingLane(1).?;
+    // The shared bar is beat 8, the loop end: the replacement restarts at 4.
+    try expectApprox(2, @floatCast(lane.start_s));
+}
+
+test "a short loop keeps wrapping at the old tempo until the shared retune bar" {
+    var fake = FakeOutput{};
+    var clock = TestClock{};
+    var t = setup(&fake, &clock);
+    defer t.deinit();
+    t.resolve(0, laneInfo(1));
+    t.resolve(1, laneInfo(2));
+    t.startAll();
+    fake.markStarted(1, 0);
+    fake.markStarted(2, 0);
+    t.sync();
+    t.setLoop(0, 4, 5);
+    clock.now = 2_100_000_000;
+    t.setTempo(126);
+    try expectApprox(1, fake.playingLane(1).?.tempo);
+    const wraps = [_]i128{ 2_500_000_000, 3_000_000_000, 3_500_000_000 };
+    for (wraps) |wrap_at| {
+        clock.now = wrap_at - 200_000_000;
+        t.sync();
+        const pass = fake.playingLane(1).?;
+        try testing.expect(@abs(pass.start_at_ns - wrap_at) < 1_000);
+        try expectApprox(2, @floatCast(pass.start_s));
+        try expectApprox(1, pass.tempo);
+        fake.markStarted(1, pass.start_at_ns);
+        clock.now = wrap_at + 50_000_000;
+        t.sync();
+        try testing.expect(t.beat(0) < 5);
+    }
+    const looped = fake.playingLane(1).?;
+    const peer = fake.playingLane(2).?;
+    try testing.expectEqual(peer.start_at_ns, looped.start_at_ns);
+    try testing.expect(@abs(looped.start_at_ns - 4_000_000_000) < 1_000);
+    try testing.expect(clock.now < looped.start_at_ns);
+    try expectApprox(2, @floatCast(looped.start_s));
+    try expectApprox(126.0 / 120.0, looped.tempo);
+}
+
+test "a seek on a loop waiting for a retune lands on the shared retune bar" {
+    var fake = FakeOutput{};
+    var clock = TestClock{};
+    var t = setup(&fake, &clock);
+    defer t.deinit();
+    t.resolve(0, laneInfo(1));
+    t.resolve(1, laneInfo(2));
+    t.startAll();
+    fake.markStarted(1, 0);
+    fake.markStarted(2, 0);
+    t.sync();
+    t.setLoop(0, 4, 5);
+    clock.now = 2_100_000_000;
+    t.setTempo(126);
+    clock.now = 2_700_000_000;
+    t.seek(0, 0);
+    const seek_pass = fake.playingLane(1).?;
+    const peer = fake.playingLane(2).?;
+    try testing.expectEqual(peer.start_at_ns, seek_pass.start_at_ns);
+    try testing.expect(@abs(seek_pass.start_at_ns - 4_000_000_000) < 1_000);
+    try expectApprox(126.0 / 120.0, seek_pass.tempo);
+    clock.now = 3_900_000_000;
+    t.sync();
+    try expectApprox(7.8, t.beat(1));
+}
+
+test "a live seek before the first downbeat lands on it" {
+    var fake = FakeOutput{};
+    var clock = TestClock{};
+    var t = setup(&fake, &clock);
+    defer t.deinit();
+    var info = laneInfo(1);
+    info.first_downbeat = 2;
+    t.resolve(0, info);
+    t.start(0, .now);
+    fake.markStarted(1, 0);
+    t.sync();
+    clock.now = 500_000_000;
+    t.seek(0, 0);
+    try expectApprox(1, @floatCast(fake.playingLane(1).?.start_s));
 }
 
 test "the audible playhead stays on the outgoing pass behind a seek handoff" {

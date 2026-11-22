@@ -23,9 +23,13 @@ const Track = pl.track.Track;
 const Transition = pl.crate.Transition;
 const Candidate = pl.suggest.Candidate;
 
+const NavSeek = struct { slot: usize, beat: f32 };
+
 const Lane = struct {
     track_id: u64 = 0,
     analysis: ?pl.analysis.Analysis = null,
+    /// The analysed tempo, found once when the lane loads; zero without a grid.
+    bpm: f32 = 0,
     /// Set when the source has no analysis for this track.
     missing: bool = false,
 };
@@ -389,6 +393,9 @@ pub const App = struct {
     loop_gesture: ?LoopGesture = null,
     /// A shift drag on a loop edge over the waveform, moving that edge only.
     loop_edge: ?LoopEdgeDrag = null,
+    /// An overview drag on a playing lane: the lane keeps sounding and the
+    /// seek is staged once, on release.
+    nav_seek: ?NavSeek = null,
     /// The edits U walks back through.
     undo_history: undo_mod.Undo,
     /// Key bindings, from the config file over the defaults.
@@ -541,7 +548,7 @@ pub const App = struct {
         // is rebuilt from this frame's layout.
         self.handleEvents();
         self.typing = false;
-        self.syncGridAndTempo();
+        if (self.grid_dirty) self.syncGridAndTempo();
 
         self.hit_map.reset();
 
@@ -1419,7 +1426,7 @@ pub const App = struct {
         switch (next_action) {
             .remove => |index| {
                 if (self.crate.at(index)) |track| self.endPreview(track.id);
-                self.noteCrate();
+                if (!self.noteCrate()) return;
                 self.crate.remove(index) catch return;
                 self.transport.remove(index);
                 self.grid_dirty = true;
@@ -1621,6 +1628,7 @@ pub const App = struct {
                 self.apply(self.drag.release());
                 self.loop_gesture = null;
                 self.loop_edge = null;
+                self.commitNavSeek();
                 self.transport.jogResume();
             },
             else => {},
@@ -1723,15 +1731,9 @@ pub const App = struct {
                 dvui.refresh(null, @src(), null);
             },
 
-            .select_playlist => |index| {
-                if (index >= self.playlist_column.rows.len) return;
-                self.playlist_column.selectPlaylist(self, index);
-            },
-            .rename_playlist => |index| self.playlist_column.startRename(self, index),
-            .toggle_playlist => |index| {
-                if (index >= self.playlist_column.rows.len) return;
-                self.playlist_column.toggleFolder(self.playlist_column.rows[index].id);
-            },
+            .select_playlist => |id| self.playlist_column.selectPlaylist(self, id),
+            .rename_playlist => |id| self.playlist_column.startRename(self, id),
+            .toggle_playlist => |id| self.playlist_column.toggleFolder(id),
             .save_playlist => self.playlist_column.save(self),
             .save_named_playlist => self.playlist_column.startNamedSave(self),
             .grow_plant => {
@@ -1772,7 +1774,7 @@ pub const App = struct {
                 dvui.refresh(null, @src(), null);
             },
             .drop_track => |drop| {
-                self.noteCrate();
+                if (!self.noteCrate()) return;
                 _ = self.crate.insertAt(drop.gap, drop.track) catch return;
                 self.transport.insert(drop.gap);
                 self.grid_dirty = true;
@@ -1782,7 +1784,7 @@ pub const App = struct {
             },
             .move_block => |move| {
                 if (self.crate.at(move.from)) |track| self.endPreview(track.id);
-                self.noteCrate();
+                if (!self.noteCrate()) return;
                 self.crate.moveTo(move.from, move.gap) catch return;
                 self.transport.move(move.from, move.gap);
                 self.grid_dirty = true;
@@ -1796,9 +1798,7 @@ pub const App = struct {
     /// The tempo a lane runs at: the analysed grid first, then the tag.
     fn bpmOf(self: *const App, index: usize) ?f32 {
         if (index >= self.grid.items.len) return null;
-        if (self.grid.items[index].analysis) |*analysis| {
-            if (analysis.bpm() > 0) return analysis.bpm();
-        }
+        if (self.grid.items[index].bpm > 0) return self.grid.items[index].bpm;
         if (self.crate.at(index)) |track| {
             if (track.bpm > 0) return @floatCast(track.bpm);
         }
@@ -1821,10 +1821,8 @@ pub const App = struct {
         if (self.crate.seedTrack()) |track| {
             if (track.bpm > 0) return @floatCast(track.bpm);
         }
-        for (self.grid.items) |*lane| {
-            if (lane.analysis) |*analysis| {
-                if (analysis.bpm() > 0) return analysis.bpm();
-            }
+        for (self.grid.items) |lane| {
+            if (lane.bpm > 0) return lane.bpm;
         }
         return 128;
     }
@@ -1835,6 +1833,7 @@ pub const App = struct {
     }
 
     fn toggleMasterLock(self: *App) void {
+        self.syncGrid();
         if (self.master_locked) self.master_bpm = self.masterBpm();
         self.master_locked = !self.master_locked;
         self.transport.setTempo(self.masterBpm());
@@ -1892,6 +1891,7 @@ pub const App = struct {
             if (!reused) {
                 lane.analysis = self.library.analysis(self.allocator, track.id) catch null;
                 lane.missing = lane.analysis == null;
+                if (lane.analysis) |*analysis| lane.bpm = analysis.bpm();
             }
 
             next.appendAssumeCapacity(lane);
@@ -1914,8 +1914,8 @@ pub const App = struct {
     fn resolveLane(self: *App, index: usize, lane: *Lane) void {
         const track = self.crate.at(index) orelse return;
         const analysis: ?*const pl.analysis.Analysis = if (lane.analysis) |*a| a else null;
-        const grid_bpm: f32 = if (analysis) |a| blk: {
-            if (a.bpm() > 0) break :blk a.bpm();
+        const grid_bpm: f32 = if (analysis != null) blk: {
+            if (lane.bpm > 0) break :blk lane.bpm;
             break :blk 128;
         } else if (track.bpm > 0) @floatCast(track.bpm) else 128;
         self.transport.resolve(index, .{
@@ -2287,42 +2287,53 @@ pub const App = struct {
     }
 
     /// Remembers the crate as it is, so the edit that follows can be walked
-    /// back. Called before every crate change.
-    fn noteCrate(self: *App) void {
-        var tracks: [256]Track = undefined;
-        const count = @min(self.crate.len(), tracks.len);
-        for (0..count) |index| {
-            if (self.crate.at(index)) |track| tracks[index] = track.*;
-        }
-        self.undo_history.pushCrate(tracks[0..count], self.crate.seed orelse 0);
+    /// back, with the playlist it is open on. False means nothing was
+    /// remembered and the caller must not edit.
+    fn noteCrate(self: *App) bool {
+        const column = &self.playlist_column;
+        self.undo_history.pushCrate(self.crate.items.items, self.crate.seed orelse 0, column.open_playlist, column.open_ids) catch {
+            column.flashFailed();
+            return false;
+        };
+        return true;
     }
 
+    /// A failed undo stays on the stack, except one whose playlist is gone:
+    /// that can never succeed.
     fn undoLast(self: *App) void {
         const change = self.undo_history.pop() orelse return;
-        defer change.deinit(self.allocator);
-        switch (change) {
-            .crate => |restore| self.restoreCrate(restore.tracks, restore.seed),
-            .renamed => |rename| {
-                self.library.renamePlaylist(rename.id, rename.name) catch return;
-                self.playlist_column.rows = self.library.playlists() catch self.playlist_column.rows;
-            },
-            .deleted => |playlist| {
-                self.library.createPlaylist(playlist.name, playlist.track_ids) catch return;
-                self.playlist_column.rows = self.library.playlists() catch self.playlist_column.rows;
-            },
-        }
+        self.applyUndo(change) catch |err| {
+            self.playlist_column.flashError(err);
+            switch (err) {
+                error.PlaylistNotFound, error.ParentNotFound, error.StalePlaylist => change.deinit(self.allocator),
+                else => self.undo_history.push(change),
+            }
+            return;
+        };
+        change.deinit(self.allocator);
         dvui.refresh(null, @src(), null);
     }
 
+    fn applyUndo(self: *App, change: undo_mod.Change) !void {
+        switch (change) {
+            .crate => |restore| try self.restoreCrate(restore.tracks, restore.seed, restore.playlist, restore.baseline),
+            .renamed => |rename| try self.library.renamePlaylist(rename.id, rename.name),
+            .deleted => |gone| try self.library.restorePlaylist(change.deletedPlaylist(), gone.track_ids),
+        }
+        self.playlist_column.rows = self.library.playlists() catch self.playlist_column.rows;
+    }
+
     /// Puts the crate back the way it was, with the transport rebuilt from it
-    /// so the lanes match the rows.
-    fn restoreCrate(self: *App, tracks: []const Track, seed: usize) void {
+    /// so the lanes match the rows, and the playlist binding it had.
+    fn restoreCrate(self: *App, tracks: []const Track, seed: usize, playlist: ?[]const u8, baseline: []const u64) !void {
+        try self.crate.items.ensureTotalCapacity(self.allocator, tracks.len);
+        try self.playlist_column.rebind(self.allocator, playlist, baseline);
         self.player.stopAll();
         self.scheduled.clear();
         self.transport.stopAll();
         self.transport.beginSync();
         self.crate.clear();
-        for (tracks) |track| _ = self.crate.insertAt(self.crate.len(), track) catch break;
+        for (tracks) |track| _ = self.crate.insertAt(self.crate.len(), track) catch unreachable;
         if (tracks.len > 0) self.crate.setSeed(@min(seed, tracks.len - 1));
         self.transport.endSync();
         self.grid_dirty = true;
@@ -2332,7 +2343,7 @@ pub const App = struct {
     }
 
     fn clearAll(self: *App) void {
-        self.noteCrate();
+        if (!self.noteCrate()) return;
         self.player.stopAll();
         self.scheduled.clear();
         self.transport.stopAll();
@@ -2466,6 +2477,13 @@ pub const App = struct {
         return false;
     }
 
+    /// An overview drag on a playing lane is staged on release, so the
+    /// outgoing pass keeps sounding while the pointer moves.
+    fn commitNavSeek(self: *App) void {
+        if (self.nav_seek) |target| self.transport.seek(target.slot, target.beat);
+        self.nav_seek = null;
+    }
+
     fn applyPull(self: *App, pull: hit.Drag.Pull) void {
         switch (pull.target) {
             .lane => |slot| {
@@ -2490,8 +2508,12 @@ pub const App = struct {
                     }
                 }
                 const total: f32 = @floatFromInt(totalBeats(&self.grid.items[slot]));
+                if (self.transport.isPlaying(slot)) {
+                    const beat = self.hit_map.navBeatAt(slot, pull.p.x, total) orelse return;
+                    self.nav_seek = .{ .slot = slot, .beat = beat };
+                    return;
+                }
                 const delta = self.hit_map.navDragBeats(slot, pull.dx, total) orelse return;
-                if (self.transport.isPlaying(slot)) self.transport.jogPause(slot, .bar);
                 self.transport.dragBar(slot, delta);
                 dvui.refresh(null, @src(), null);
             },
@@ -2566,7 +2588,7 @@ pub const App = struct {
 
                 const view = self.laneStart(index);
                 if (lane.analysis) |*analysis| {
-                    self.paintWave(analysis, wave_rect, view, analysis.downbeatOffset(), index);
+                    self.paintWave(analysis, lane.bpm, wave_rect, view, analysis.downbeatOffset(), index);
                 } else {
                     labelStyled(@src(), "no analysis", .{
                         .color_text = .{ .color = Palette.muted },
@@ -2829,11 +2851,11 @@ pub const App = struct {
     }
 
     /// Waveform and beat lines, drawn straight into the lane's rectangle.
-    fn paintWave(self: *App, analysis: *const pl.analysis.Analysis, rect: hit.Rect, start_beat: f32, beat_offset: f32, slot: usize) void {
+    fn paintWave(self: *App, analysis: *const pl.analysis.Analysis, analysed_bpm: f32, rect: hit.Rect, start_beat: f32, beat_offset: f32, slot: usize) void {
         if (rect.w <= 0 or rect.h <= 0) return;
         fillRect(self.allocator, rect.x, rect.y, rect.w, rect.h, Palette.field);
 
-        const bpm = if (analysis.bpm() > 0) analysis.bpm() else 128;
+        const bpm = if (analysed_bpm > 0) analysed_bpm else 128;
         const scale: f32 = 255 / @as(f32, @floatFromInt(@max(1, analysis.peak)));
         const samples_per_beat: f32 = @as(f32, pl.analysis.Analysis.samples_per_second) * 60 / bpm;
         const start_sample = start_beat * samples_per_beat;
@@ -4323,7 +4345,8 @@ const GridTestSource = struct {
     }
 
     fn createPlaylist(_: *anyopaque, _: []const u8, _: []const u64) anyerror!void {}
-    fn replacePlaylistTracks(_: *anyopaque, _: []const u8, _: []const u64) anyerror!void {}
+    fn restorePlaylist(_: *anyopaque, _: pl.library.Playlist, _: []const u64) anyerror!void {}
+    fn replacePlaylistTracks(_: *anyopaque, _: []const u8, _: []const u64, _: []const u64) anyerror!void {}
     fn renamePlaylist(_: *anyopaque, _: []const u8, _: []const u8) anyerror!void {}
     fn deletePlaylist(_: *anyopaque, _: []const u8) anyerror!void {}
     fn name(_: *anyopaque) []const u8 {
@@ -4338,6 +4361,7 @@ const GridTestSource = struct {
         .playlists = listPlaylists,
         .playlistTracks = playlistTracks,
         .createPlaylist = createPlaylist,
+        .restorePlaylist = restorePlaylist,
         .replacePlaylistTracks = replacePlaylistTracks,
         .renamePlaylist = renamePlaylist,
         .deletePlaylist = deletePlaylist,
@@ -4467,4 +4491,43 @@ test "unlock captures the selected lane's analysed tempo" {
 
     try std.testing.expect(!app.master_locked);
     try std.testing.expectEqual(selected_bpm, app.master_bpm);
+}
+
+test "unlock after a drop in the same batch captures the seed track's tempo" {
+    var source: GridTestSource = .{};
+    var app = initGridTestApp(std.testing.allocator, source.port());
+    defer deinitGridTestApp(&app);
+
+    for (1..4) |id| _ = try app.crate.append(Track.init(id, "track", "artist"));
+    app.syncGrid();
+    app.crate.setSeed(1);
+    app.master_locked = true;
+    const seed_bpm = app.grid.items[1].analysis.?.bpm();
+
+    _ = try app.crate.insertAt(0, Track.init(9, "suggestion", "artist"));
+    app.transport.insert(0);
+    app.grid_dirty = true;
+    app.toggleMasterLock();
+
+    try std.testing.expectEqual(seed_bpm, app.master_bpm);
+}
+
+test "an overview drag on a playing lane keeps it playing and seeks on release" {
+    var source: GridTestSource = .{};
+    var app = initGridTestApp(std.testing.allocator, source.port());
+    defer deinitGridTestApp(&app);
+
+    _ = try app.crate.append(Track.init(1, "playing", "artist"));
+    app.syncGrid();
+    app.transport.start(0, .now);
+    app.hit_map.append(.{ .x = 0, .y = 0, .w = 400, .h = 20 }, .{ .nav = 0 });
+
+    app.applyPull(.{ .target = .{ .nav = 0 }, .dx = 200, .dy = 0, .p = .{ .x = 200, .y = 10 } });
+    try std.testing.expect(app.transport.isPlaying(0));
+    try std.testing.expectEqual(@as(f64, 0), source.last_start_s);
+
+    app.commitNavSeek();
+    try std.testing.expect(app.transport.isPlaying(0));
+    try std.testing.expect(app.nav_seek == null);
+    try std.testing.expect(source.last_start_s > 0);
 }

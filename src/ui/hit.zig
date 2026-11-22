@@ -86,9 +86,9 @@ pub const Target = union(enum) {
     /// Advances the garden's plant by one stage, for trying the growth halos.
     grow_plant,
     /// A playlist row: selecting it filters suggestions.
-    playlist: usize,
+    playlist: []const u8,
     /// A playlist folder: opens or closes its children.
-    playlist_toggle: usize,
+    playlist_toggle: []const u8,
     /// Writes the current crate as a new playlist.
     save_playlist,
     /// Orders the suggestions by BPM.
@@ -313,12 +313,12 @@ pub const Drag = struct {
         toggle_dmt,
         heartbeat,
         toggle_pause,
-        select_playlist: usize,
+        select_playlist: []const u8,
         /// A shift press on the overview: loop the bars under the pointer.
         loop_nav: usize,
         /// A shift press on a playlist row: rename it in place.
-        rename_playlist: usize,
-        toggle_playlist: usize,
+        rename_playlist: []const u8,
+        toggle_playlist: []const u8,
         save_playlist,
         /// A shift press on the save chip: ask for a name first.
         save_named_playlist,
@@ -362,8 +362,8 @@ pub const Drag = struct {
             .dmt => .toggle_dmt,
             .heartbeat => .heartbeat,
             .pause => .toggle_pause,
-            .playlist => |index| if (shift) .{ .rename_playlist = index } else .{ .select_playlist = index },
-            .playlist_toggle => |index| .{ .toggle_playlist = index },
+            .playlist => |id| if (shift) .{ .rename_playlist = id } else .{ .select_playlist = id },
+            .playlist_toggle => |id| .{ .toggle_playlist = id },
             .save_playlist => if (shift) .save_named_playlist else .save_playlist,
             .master_lock => .toggle_master_lock,
             .master_up => .step_master_up,

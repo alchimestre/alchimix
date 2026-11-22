@@ -70,7 +70,11 @@ pub const Source = struct {
         return error.Unsupported;
     }
 
-    fn replacePlaylistTracksFn(_: *anyopaque, _: []const u8, _: []const u64) anyerror!void {
+    fn restorePlaylistFn(_: *anyopaque, _: library.Playlist, _: []const u64) anyerror!void {
+        return error.Unsupported;
+    }
+
+    fn replacePlaylistTracksFn(_: *anyopaque, _: []const u8, _: []const u64, _: []const u64) anyerror!void {
         return error.Unsupported;
     }
 
@@ -112,6 +116,7 @@ pub const Source = struct {
         .playlists = playlistsFn,
         .playlistTracks = playlistTracksFn,
         .createPlaylist = createPlaylistFn,
+        .restorePlaylist = restorePlaylistFn,
         .replacePlaylistTracks = replacePlaylistTracksFn,
         .renamePlaylist = renamePlaylistFn,
         .deletePlaylist = deletePlaylistFn,
