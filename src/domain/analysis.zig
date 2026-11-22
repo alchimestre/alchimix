@@ -49,7 +49,7 @@ pub const Analysis = struct {
         if (self.beats.len >= 2) {
             const last = self.beats[self.beats.len - 1];
             const previous = self.beats[self.beats.len - 2];
-            return last.time_ms + (last.time_ms - previous.time_ms);
+            return last.time_ms +| (last.time_ms - previous.time_ms);
         }
         return @intCast(self.waveform.len * 1000 / samples_per_second);
     }
@@ -89,7 +89,7 @@ pub const Analysis = struct {
     /// the whole transport on the wrong bar length.
     pub fn bpm(self: Analysis) f32 {
         if (self.beats.len == 0) return 0;
-        var hist: [1800]u16 = @splat(0);
+        var hist: [1800]u32 = @splat(0);
         var counted: usize = 0;
         for (self.beats) |beat| {
             if (beat.bpm < 60 or beat.bpm >= 240) continue;
@@ -133,6 +133,7 @@ pub fn parse(allocator: std.mem.Allocator, dat: []const u8, ext: []const u8) !An
         const time = std.mem.readInt(u32, grid[offset + 4 ..][0..4], .big);
         // The opening entry describes the grid origin and carries no tempo.
         if (tempo == 0) continue;
+        if (beats.items.len > 0 and time < beats.items[beats.items.len - 1].time_ms) return error.Malformed;
         try beats.append(allocator, .{
             .time_ms = time,
             .bpm = @as(f32, @floatFromInt(tempo)) / 100,
@@ -145,9 +146,9 @@ pub fn parse(allocator: std.mem.Allocator, dat: []const u8, ext: []const u8) !An
     errdefer allocator.free(waveform);
 
     var bands: []Band = &.{};
+    errdefer if (bands.len > 0) allocator.free(bands);
     if (entries(ext, "PWV5")) |color| {
         bands = try allocator.alloc(Band, waveform.len);
-        errdefer allocator.free(bands);
         const sharp = @min(waveform.len, color.len / 2);
         for (bands, 0..) |*band, i| {
             if (i >= sharp) {
@@ -168,12 +169,15 @@ pub fn parse(allocator: std.mem.Allocator, dat: []const u8, ext: []const u8) !An
     var peak: u8 = 0;
     for (waveform) |sample| peak = @max(peak, sample);
 
+    const phrases = try readPhrases(allocator, ext);
+    errdefer if (phrases.len > 0) allocator.free(phrases);
+
     return .{
         .beats = try beats.toOwnedSlice(allocator),
         .waveform = waveform,
         .bands = bands,
         .peak = peak,
-        .phrases = try readPhrases(allocator, ext),
+        .phrases = phrases,
     };
 }
 
@@ -418,4 +422,63 @@ test "the first downbeat follows the grid's bar phase" {
     try std.testing.expectEqual(@as(u32, 2), analysis.firstDownbeat());
     analysis.beats[0].position = 4;
     try std.testing.expectEqual(@as(u32, 1), analysis.firstDownbeat());
+}
+
+test "a grid whose times run backwards is rejected" {
+    var dat_buffer: [128]u8 = undefined;
+    header(&dat_buffer);
+    var body: [4 + 16]u8 = undefined;
+    @memset(body[0..4], 0);
+    std.mem.writeInt(u16, body[4..6], 1, .big);
+    std.mem.writeInt(u16, body[6..8], 12800, .big);
+    std.mem.writeInt(u32, body[8..12], 2000, .big);
+    std.mem.writeInt(u16, body[12..14], 2, .big);
+    std.mem.writeInt(u16, body[14..16], 12800, .big);
+    std.mem.writeInt(u32, body[16..20], 1000, .big);
+    const dat_end = writeSection(&dat_buffer, 28, "PQTZ", &body);
+
+    var ext_buffer: [128]u8 = undefined;
+    header(&ext_buffer);
+    const ext_end = writeWaveSection(&ext_buffer, 28, "PWV3", 1, 2, &.{ 100, 50 });
+
+    try testing.expectError(error.Malformed, parse(testing.allocator, dat_buffer[0..dat_end], ext_buffer[0..ext_end]));
+}
+
+test "the tempo of a grid longer than 65535 beats is counted in full" {
+    const majority = 70000;
+    const beats = try testing.allocator.alloc(Beat, majority + 1000);
+    defer testing.allocator.free(beats);
+    for (beats, 0..) |*beat, i| {
+        beat.* = .{ .time_ms = @intCast(i), .bpm = if (i < 1000) 100 else 128, .position = 1 };
+    }
+    const analysis = Analysis{ .beats = beats, .waveform = &.{}, .bands = &.{}, .peak = 0 };
+    try testing.expectApproxEqAbs(@as(f32, 128), analysis.bpm(), 0.001);
+}
+
+fn parseAndFree(allocator: std.mem.Allocator, dat: []const u8, ext: []const u8) !void {
+    var analysis = try parse(allocator, dat, ext);
+    analysis.deinit(allocator);
+}
+
+test "a parse that fails late leaks nothing" {
+    var dat_buffer: [128]u8 = undefined;
+    header(&dat_buffer);
+    var body: [4 + 8]u8 = undefined;
+    @memset(body[0..4], 0);
+    std.mem.writeInt(u16, body[4..6], 1, .big);
+    std.mem.writeInt(u16, body[6..8], 12800, .big);
+    std.mem.writeInt(u32, body[8..12], 1000, .big);
+    const dat_end = writeSection(&dat_buffer, 28, "PQTZ", &body);
+
+    var ext_buffer: [256]u8 = undefined;
+    header(&ext_buffer);
+    const after_wave = writeWaveSection(&ext_buffer, 28, "PWV3", 1, 2, &.{ 100, 50 });
+    var color: [4]u8 = @splat(0);
+    const after_color = writeWaveSection(&ext_buffer, after_wave, "PWV5", 2, 2, &color);
+    var phrases: [20 + 24]u8 = @splat(0);
+    std.mem.writeInt(u32, phrases[0..4], 24, .big);
+    std.mem.writeInt(u16, phrases[4..6], 1, .big);
+    const ext_end = writeSection(&ext_buffer, after_color, "PSSI", &phrases);
+
+    try testing.checkAllAllocationFailures(testing.allocator, parseAndFree, .{ dat_buffer[0..dat_end], ext_buffer[0..ext_end] });
 }
