@@ -1,227 +1,48 @@
-# alchimix
+<p align="center">
+  <img src="./assets/readme/hero.svg" width="100%" alt="alchimix: build a DJ set block by block from a rekordbox collection, with Camelot and tempo arrows between tracks">
+</p>
 
-A block-style playlist builder for a rekordbox collection. Pick a seed track, see
-what can follow it by Camelot key and tempo, and place tracks left or right of a
-neighbour.
+<p align="center">
+  <img alt="Zig 0.17" src="https://img.shields.io/badge/zig-0.17-f7a41d?logo=zig&logoColor=white">
+  <img alt="macOS" src="https://img.shields.io/badge/macOS-rekordbox%206-1e1f27">
+  <img alt="SDL3 + dvui" src="https://img.shields.io/badge/UI-SDL3%20%2B%20dvui-44475a">
+</p>
 
-## Requirements
+alchimix is a desktop playlist builder for a rekordbox collection: pick a seed track, see what can follow it by Camelot key and tempo, and stack blocks into a set. Preview tracks in sync on a shared bar clock, then write the crate back into a rekordbox playlist.
 
-- Zig 0.17
-- SQLCipher (`brew install sqlcipher`) — the rekordbox collection is encrypted
-- ffmpeg (`brew install ffmpeg`) — preview playback
+## Quick start
 
-SDL3, dvui, FreeType and the rest come in as packages; `zig-pkg/` is ignored by git.
+1. Install the system libraries:
 
-## Run
+   ```sh
+   brew install sqlcipher ffmpeg
+   ```
 
-```sh
-zig build && ./zig-out/bin/alchimix
-```
+2. Build and run with Zig 0.17:
 
-```sh
-zig build test        # domain, transport and pointer tests
-```
+   ```sh
+   zig build && ./zig-out/bin/alchimix
+   ```
 
-| Command | What it prints |
+3. Run the tests:
+
+   ```sh
+   zig build test
+   ```
+
+SDL3, dvui, FreeType and the rest come in as Zig packages. Without a rekordbox key the app opens with three demo tracks.
+
+| Command | Prints |
 |---|---|
 | `alchimix` | the block canvas |
 | `alchimix library` | track count and how many carry a key |
 | `alchimix suggest <text>` | what could follow the first match, ranked |
 
-## Preview
+## Reading the arrows
 
-`▶` on a row or a block plays fifteen seconds from the middle of the track, through
-`ffplay`. While the grid is playing, a preview waits for the next master bar and
-matches the master tempo. Pause stops the process and remembers the offset, so play resumes from
-there; a stopped process would keep the audio device open. Starting another track stops the first.
-The master tempo is the analysed tempo of the seeded track, or of the lane you
-start when the crate has no seed, so the bars and the effect clock follow the
-audio rather than the tag.
+Blocks stack down the canvas. The `↓` between two blocks is coloured by the harmonic step; triangles beside it show which way the energy moves.
 
-Each block carries a bar along its bottom that fills as the snippet runs.
-
-Lane playback uses one mixer clock. The playhead waits for decoded audio; up to
-eight lanes can play together. Drag the waveform to jog, or the overview to seek
-by bars; releasing a jog lands on the nearest beat. A shift press on the overview
-loops four bars from the bar under the pointer, a shift drag loops however many
-bars it covers, and a shift press on a live loop clears it; the loop draws as a
-green band and wraps on its bar while other lanes keep running. Shift-drag
-either edge of the band on the lane waveform to move that edge; the other stays
-put, the held edge follows the drag a beat at a time, and the pointer turns into
-a resize arrow inside the grab zone while shift is held. Shift-right-click the band, on either surface, drops
-the loop. Every other start lands on a bar, so two lanes never sit half a bar
-apart. Each lane ends in a live spectrum
-with three draggable EQ nodes (low shelf, bell, high shelf); HPF, BPF and LPF
-presets load a shape, and clicking the active preset clears the EQ. A trim slider
-at the far right doubles as a level meter;
-`M` under a lane's play button mutes it while the clock keeps running. The footer
-sets the waveform span (16, 32 or 64 beats), next to the master BPM. The
-waveform is tinted by rekordbox's three bands: kick red, mid green, high blue. Tracks
-whose analysis carries rekordbox's phrase marks show them under the overview as
-faint bands, one colour per phrase kind.
-
-An overview seek keeps the current pass sounding until its replacement starts on
-a bar. With several lanes, tempo changes land together on one bar; an unready
-decoder delays that group to the next bar. A lone lane changes tempo as soon as
-its replacement is ready. Unlocking the master BPM keeps the current value for
-manual adjustment.
-
-Moving or inserting blocks keeps each playing lane's position. Removing a block
-cancels its playing pass and any queued replacement.
-
-`.-.` runs the same drift field at 0.45 strength with the same colour fringe and
-no flare, over an ASCII undergrowth: small mushrooms pop and grow, tall ones arrive in
-tight clusters of seven to twelve, wide ones stand alone, pale rain falls and
-rings where it lands, insects crawl, and a snail crosses slowly. A shamrock
-grows, leaf by leaf, into a small flowering tree while music plays; pressing it
-floats hearts up to pop.
-
-The `garden` column lists eight switches. Clicking a row turns that behaviour on
-or off; the arrow in front of each title drops its description.
-
-The undergrowth is drawn in the bundled Caskaydia Mono: the art is a character
-grid, and a proportional or round face pulls the rows apart.
-
-`space`, or the footer's `play`, starts the last four tracks that played,
-together; `stop` stops every lane. The history holds the four most recent
-tracks to start, so a lane begun from its own `▶` joins it too. With nothing
-remembered yet, play starts every lane and remembers what started.
-
-The right column lists rekordbox playlists and folders. Picking a playlist
-loads its tracks into the crate in playlist order, ready to rearrange; `save`
-writes the crate back into that playlist, or into a new one named after the seed
-when the crate came from nowhere. Shift-press `save` to type the name instead; a
-name the library already holds is refused and nothing is written. Shift-click a
-row to rename it. Shift-right-click a row to delete it: the chip turns into
-`Delete ?`, and one more press removes the playlist and its track rows. The
-tracks stay in the collection. A folder that still holds playlists is not offered
-for deletion. Intelligent playlists and rekordbox's own `CUE Analysis Playlist`
-entries are not shown.
-
-`save` and the other playlist writes are refused while rekordbox runs (the chip
-reads `rb open`), and a save is refused as `stale` when the playlist changed in
-rekordbox since it was opened. Undoing a delete puts the playlist back under its
-parent at its old position, with its id and uuid when they are still free.
-
-`U` walks back through the crate and playlist edits one at a time, newest first;
-it types a `u` instead while a text field holds focus. Keys come from
-`$XDG_CONFIG_HOME/alchimix/keys`, or `~/.config/alchimix/keys`, one `name = key`
-per line over the built-in defaults:
-
-```
-# keys
-undo = u
-play = space
-```
-
-
-## Editing a crate
-
-Drag a row from the left column into the canvas to insert it; a click alone adds
-nothing. Drag a block by its body and drop it on a gap line to move it. Pressing a
-block selects it, and the suggestions follow that selection. `×` removes a block.
-
-## Effects
-
-`LSD` drifts the window. The frame is drawn into an offscreen copy and laid back
-through a slowly moving displacement field, one colour channel at a time, under
-a drifting wash and a lens flare. Red rides a few pixels out of blue at every
-hard edge.
-
-`DMT` repeats the window in a funnel. Every ring is a whole copy of the frame,
-0.55 of the ring outside it and turned slightly against it, so the UI itself is
-the fractal and the funnel is its scale. Rings advance with the effect clock.
-
-The effect clock runs at the master tempo over 128, so a 140 BPM track moves the
-drift and the funnel faster than a 90 BPM one. 128 is the default when no track
-has set the tempo.
-
-`DMT` speed wanders on seeded sines and the turn flips direction every 6.5
-seconds, so the motion never settles into a loop. A speed slider under the mode
-chips scales both effects.
-
-The fold carries its own sliders: `window` scales the small virtual window the
-tunnel is laid out on, `wander` sets how far that window breathes by itself
-(every five to eleven seconds), `lanes` sets how many rings it repeats, `colour`
-how much of the picture the colour pass carries, and `mirror` how many mirrored
-sectors it turns through. A kick swells both the window and the ring count with
-the beat.
-
-`OG DMT` is the pinned look: full brightness, constant turn, and the window
-border held still so nothing samples past the frame. It runs on tempo alone, so
-the speed slider leaves it alone.
-
-`DMT` folds at full brightness, the frame as it is. `DMT A` and `DMT B` fold at
-0.55: the frame is mostly grey chrome, and the coloured content should carry the
-picture. `DMT A` dims the whole fold and lifts the waveform; `DMT B` also paints
-the waveform fills back at full strength through the same map, so colour
-survives the fold undimmed. All three are one choice: pressing a chip runs that
-fold, and pressing the active one stops it.
-
-Both effects can run at once. `DMT` folds the frame `LSD` has already drifted,
-and both chips stay live.
-
-Each mode runs the same map for drawing and for the pointer, so a click lands on
-the control the eye sees under the cursor. With both on, the pointer follows the
-tunnel first and the drift underneath it. The chips are painted back from the
-copy last, so they never move and always respond.
-
-The shapes follow reported phenomenology rather than a shader: fractal and
-geometric patterns with vivid colour are the most common visual content
-(Sci. Rep. 2022, n = 3,778), entities appear in 45.5% of accounts, and tunnels,
-spirals and lattices are Klüver's form constants.
-
-## Where the tracks come from
-
-`~/Library/Pioneer/rekordbox/master.db`, opened with SQLCipher. Writes stay
-inside playlists: creating one, replacing its tracks, renaming it, deleting it.
-Tracks, cue points and analysis are never written. Each write holds the
-database's write lock for one transaction. Close rekordbox before writing: a
-write is refused while a `rekordbox` process is running, and the check fails
-closed when the process list cannot be read.
-
-Every row a write touches takes the next `agentRegistry.localUpdateCount`, as
-pyrekordbox does, so rekordbox sees the change as local. `masterPlaylists6.xml`
-is not updated: it lives outside the database and cannot be committed with it,
-and pyrekordbox only warns when its node is missing. Whether rekordbox
-rebuilds it on the next launch is untested.
-
-The database key comes from `ALCHIMIX_REKORDBOX_KEY` when set, otherwise from the
-cache pyrekordbox keeps at `~/Library/Application Support/pyrekordbox/rb.cache`.
-Without either, the app opens with three demo tracks.
-
-To read the collection from another source, implement the port in `src/ports/library.zig`.
-
-## Layout
-
-| Path | Holds |
-|---|---|
-| `src/domain/camelot.zig` | key parsing, wheel distance, relation between two keys |
-| `src/domain/bpm.zig` | tempo match, including half and double time |
-| `src/domain/crate.zig` | the crate: ordered tracks, seed, transitions |
-| `src/domain/suggest.zig` | ranking of what can follow a seed |
-| `src/ports/library.zig` | the track-source port |
-| `src/adapters/rekordbox.zig` | SQLCipher reader and playlist writer for rekordbox 6 |
-| `src/adapters/memory.zig` | in-memory source for tests and the demo |
-| `src/ui/app.zig` | block canvas, picker, toolbar |
-| `src/ui/playlists.zig` | the playlist column: rows, rename, delete, save |
-| `src/ui/hit.zig` | hit rectangles, pointer-to-beat conversion and drag rules |
-| `src/ui/lsd.zig` | the drift field, the colour passes and the flare |
-| `src/ui/dmt.zig` | the fold, the tunnel haze and the beings |
-| `src/ui/geom.zig` | triangle buffers shared by both effects |
-| `src/ui/run.zig` | window and frame loop |
-| `src/audio/transport.zig` | playback positions, bar joins, jog and retune transitions |
-| `src/audio/mixer.zig` | decoder buffers, shared output clock and lane start times |
-
-## Arrows
-
-Blocks stack down the canvas, and the arrow between two of them is a `↓` glyph.
-Its colour runs from green to red
-with the size of the harmonic step, the same ramp in both directions. Triangles
-to the right of the arrow say which way the energy moves: one for ±1, two
-for ±2, three for ±5.
-
-| Colour | Step | Triangles |
+| Colour | Camelot step | Triangles |
 |---|---|---|
 | green | 0, relative | none |
 | olive | ±1 | 1 |
@@ -229,6 +50,107 @@ for ±2, three for ±5.
 | orange | ±5 | 3 |
 | red | ±3, ±4, ±6 | none, not harmonic |
 
-The arrow needs a font with `→`. Both faces are compiled into the binary from
-`src/assets`: Caskaydia Cove for body text and Caskaydia Mono for the art. The
-OFL 1.1 licence sits beside them. Neither is read from the system.
+Tempo matching counts half and double time.
+
+## Editing a crate
+
+| Action | Result |
+|---|---|
+| Drag a row from the left column onto the canvas | inserts it; a click alone adds nothing |
+| Drag a block onto a gap line | moves it |
+| Press a block | selects it; suggestions follow the selection |
+| `×` on a block | removes it |
+| `U` | undoes crate and playlist edits, newest first |
+
+Moving or inserting blocks keeps each playing lane's position. Removing a block cancels its playing pass and any queued replacement.
+
+## Playback
+
+`▶` on a row or block plays fifteen seconds from the middle of the track through `ffplay`, with a progress bar along the block. While the grid plays, a preview waits for the next master bar and matches the master tempo.
+
+| Control | Does |
+|---|---|
+| `space` / footer `play` | starts the last four tracks that played, together |
+| footer `stop` | stops every lane |
+| drag the waveform | jogs; release lands on the nearest beat |
+| drag the overview | seeks by bars |
+| shift-press the overview | loops four bars from the bar under the pointer |
+| shift-drag the overview | loops the bars it covers |
+| shift-drag a loop edge | moves that edge a beat at a time |
+| shift-right-click a loop | drops it |
+| `M` under a lane's play button | mutes it; the clock keeps running |
+| EQ nodes on the lane spectrum | low shelf, bell, high shelf; HPF/BPF/LPF presets |
+| trim slider | lane gain, doubles as a level meter |
+
+- Up to eight lanes share one mixer clock; every start lands on a bar.
+- The master tempo is the analysed tempo of the seed, or of the first lane started when the crate has no seed.
+- With several lanes, tempo changes land together on one bar.
+- Waveforms use rekordbox's three bands: kick red, mid green, high blue. Phrase marks show under the overview when the analysis has them.
+- The footer sets the waveform span: 16, 32 or 64 beats.
+
+## Playlists
+
+The right column lists rekordbox playlists and folders.
+
+| Action | Result |
+|---|---|
+| Click a playlist | loads its tracks into the crate in order |
+| `save` | writes the crate into that playlist, or a new one named after the seed |
+| shift-press `save` | type the name; a name already in the library is refused |
+| shift-click a row | renames it |
+| shift-right-click a row, then `Delete ?` | deletes the playlist; its tracks stay in the collection |
+
+- Folders that still hold playlists cannot be deleted.
+- Intelligent playlists and `CUE Analysis Playlist` entries are hidden.
+- Undoing a delete restores the playlist under its parent at its old position.
+
+## Visual modes
+
+The mode chips overlay the canvas with tempo-driven visuals. Every mode maps the pointer through the same transform as the picture, so clicks land on the control under the cursor, and the chips themselves never move.
+
+| Mode | Look |
+|---|---|
+| drift | the window flows through a moving displacement field with split colour channels and a lens flare |
+| fold | the window repeats as a rotating tunnel of nested copies; sliders set size, wander, ring count, colour and mirror sectors, and the kick swells it |
+| garden | an ASCII undergrowth in Caskaydia Mono: plants, rain, insects, a snail, and a shamrock that grows into a tree while music plays |
+
+The effect clock runs at master tempo / 128, so faster tracks move faster. A speed slider scales drift and fold. The `garden` column toggles eight behaviours.
+
+## Keys
+
+Overrides live in `$XDG_CONFIG_HOME/alchimix/keys` or `~/.config/alchimix/keys`, one `name = key` per line:
+
+```
+undo = u
+play = space
+```
+
+## rekordbox access
+
+| Fact | Detail |
+|---|---|
+| Database | `~/Library/Pioneer/rekordbox/master.db`, opened with SQLCipher |
+| Key | `ALCHIMIX_REKORDBOX_KEY`, else pyrekordbox's cache at `~/Library/Application Support/pyrekordbox/rb.cache` |
+| Writes | playlists only: create, replace tracks, rename, delete; one transaction each |
+| Never written | tracks, cue points, analysis |
+| Write guard | refused while `rekordbox` runs (chip reads `rb open`); fails closed if the process list is unreadable |
+| Stale guard | `save` refused as `stale` when the playlist changed in rekordbox since it was opened |
+
+Every touched row takes the next `agentRegistry.localUpdateCount`, as pyrekordbox does.
+
+Limit: `masterPlaylists6.xml` is not updated; whether rekordbox rebuilds it on launch is untested.
+
+## Layout
+
+| Path | Holds |
+|---|---|
+| `src/domain/` | Camelot wheel, tempo match, crate, suggestion ranking |
+| `src/ports/library.zig` | the track-source port; implement it to read another library |
+| `src/adapters/rekordbox.zig` | SQLCipher reader and playlist writer for rekordbox 6 |
+| `src/adapters/memory.zig` | in-memory source for tests and the demo |
+| `src/ui/` | block canvas, playlist column, hit testing, visual modes, frame loop |
+| `src/audio/` | transport (bar joins, jog, retune) and mixer (shared output clock) |
+
+## Fonts
+
+Caskaydia Cove (body) and Caskaydia Mono (ASCII art) are compiled in from `src/assets`, under the OFL 1.1 licence beside them. Noto Emoji ships in `assets/` with its licence.
