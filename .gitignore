@@ -4,3 +4,4 @@ zig-out/
 .DS_Store
 .scratch/
 /graphify-out/
+.truthiness/
